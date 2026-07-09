@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# 실행 중 생성되는 파일 (커밋 금지)
+settings.json
+bot_stats.json
+bot_running.json
+trade_history.xlsx
+trade_backup_*.csv
