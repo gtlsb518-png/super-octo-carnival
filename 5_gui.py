@@ -183,7 +183,7 @@ class BinanceAPI:
         
         # 🔥 klines 캐시 (같은 코인 LONG/SHORT 봇 공유)
         self._klines_cache = {}  # {symbol_interval: (data, timestamp)}
-        self._klines_cache_ttl = 5  # 5초간 캐시 (15분봉)
+        self._klines_cache_ttl = 5  # 5초간 캐시
         self._klines_cache_lock = threading.Lock()
         
         # 시간 오프셋 초기화
@@ -1281,86 +1281,6 @@ class TradingBot:
                             self.config["is_closing"] = False
                             continue
                         
-                        # 🔥🔥🔥 ROI -50% 손절!
-                        sl_roi = self.config.get('sl_roi', -50)  # 기본 -50%
-                        if pnl_pct <= sl_roi and not self.config.get("is_closing"):
-                            print(f"[🛑 손절] {self.config['symbol']} LONG: ROI {pnl_pct:.2f}% <= 손절 {sl_roi}%")
-                            
-                            self.config["is_closing"] = True
-                            self.config["is_closing_start"] = time.time()
-                            
-                            close_success = False
-                            for attempt in range(3):
-                                try:
-                                    result = self.api.close_position(self.config['symbol'])
-                                    if result:
-                                        close_success = True
-                                        break
-                                except Exception as e:
-                                    print(f"[{self.config['symbol']}] 손절 청산 시도 {attempt+1}/3 실패: {e}")
-                                time.sleep(1)
-                            
-                            if not close_success:
-                                self.log(f"❌ 손절 청산 실패! 수동으로 청산하세요!", 'LONG')
-                                print(f"[❌ 손절 실패] {self.config['symbol']} LONG - 수동 청산 필요!")
-                                self.config["is_closing"] = False
-                                continue
-                            
-                            # 🔥 수수료 계산
-                            position_size = self.config['amount'] * self.config['leverage']
-                            entry_fee = self.config.get('entry_fee_long', position_size * FEE_RATE)
-                            close_fee = position_size * FEE_RATE
-                            total_fee = entry_fee + close_fee
-                            net_profit = pnl_usd - total_fee  # pnl_usd는 이미 음수
-                            
-                            # 통계
-                            self.config['stats']['long_fee'] = self.config['stats'].get('long_fee', 0) + total_fee
-                            self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
-                            
-                            close_price = current
-                            
-                            self.config['stats']['long_count'] += 1
-                            self.config['stats']['long_loss'] += 1  # 손절!
-                            self.config['stats']['long_profit'] += net_profit
-                            self.config['stats']['total_pnl'] += net_profit
-                            
-                            count = self.config['stats']['long_count']
-                            
-                            # 엑셀 저장
-                            self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '손절')
-                            
-                            # 로그
-                            self.log(f"🛑 LONG 손절! ROI {pnl_pct:.2f}% (손절선 {sl_roi}%) (#{count})", 'LONG')
-                            self.log(f"   💰 청산가: ${close_price:.2f} | 손실: ${pnl_usd:.2f}", 'LONG')
-                            self.log(f"   💸 수수료: ${total_fee:.2f} | 순손실: -${abs(net_profit):.2f}", 'LONG')
-                            self.log(f"   ⏸️ 신호 2개 충족 전까지 진입 대기!", 'LONG')
-                            
-                            print(f"[🛑 손절] {self.config['symbol']} LONG ROI {pnl_pct:.2f}% (손절선 {sl_roi}%)")
-                            
-                            self.stats_callback()
-                            self.config['last_close_time'] = time.time()
-                            
-                            # 🔥🔥🔥 손절 후 신호 초기화 → 신호 2개 다 나와야 재진입!
-                            self.config['prev_signals'] = {
-                                'ut_long': None, 'ut_short': None,  # None으로 초기화!
-                                'ema_long': None, 'ema_short': None,
-                                'long_signal': None, 'short_signal': None
-                            }
-                            self.config['sl_cooldown_long'] = True  # 🔥 손절 쿨다운!
-                            
-                            # ROI 초기화
-                            self.config['entry_tp_long'] = None
-                            self.config['chart_entry_long'] = None
-                            self.config['entry_fee_long'] = 0
-                            self.config['roi']['long_entry'] = None
-                            self.config['roi']['long_current'] = 0
-                            self.config['roi']['long_max'] = 0
-                            self.config['roi']['long_min'] = 0
-                            
-                            print(f"[{self.config['symbol']}] LONG 손절 완료 - 신호 2개 충족 전까지 대기!")
-                            self.config["is_closing"] = False
-                            continue
-                        
                         # 🔥 손절: AUTO(스위칭) - UT Bot 현재 상태 + EMA 크로스
                         auto_sl = signals.get('ut_position_short', False) and signals['ema_short']
                         
@@ -1695,86 +1615,6 @@ class TradingBot:
                             self.config['roi']['short_min'] = 0
                             
                             print(f"[{self.config['symbol']}] SHORT 익절 완료 - 재진입 대기")
-                            self.config["is_closing"] = False
-                            continue
-                        
-                        # 🔥🔥🔥 ROI -50% 손절!
-                        sl_roi = self.config.get('sl_roi', -50)  # 기본 -50%
-                        if pnl_pct <= sl_roi and not self.config.get("is_closing"):
-                            print(f"[🛑 손절] {self.config['symbol']} SHORT: ROI {pnl_pct:.2f}% <= 손절 {sl_roi}%")
-                            
-                            self.config["is_closing"] = True
-                            self.config["is_closing_start"] = time.time()
-                            
-                            close_success = False
-                            for attempt in range(3):
-                                try:
-                                    result = self.api.close_position(self.config['symbol'])
-                                    if result:
-                                        close_success = True
-                                        break
-                                except Exception as e:
-                                    print(f"[{self.config['symbol']}] 손절 청산 시도 {attempt+1}/3 실패: {e}")
-                                time.sleep(1)
-                            
-                            if not close_success:
-                                self.log(f"❌ 손절 청산 실패! 수동으로 청산하세요!", 'SHORT')
-                                print(f"[❌ 손절 실패] {self.config['symbol']} SHORT - 수동 청산 필요!")
-                                self.config["is_closing"] = False
-                                continue
-                            
-                            # 🔥 수수료 계산
-                            position_size = self.config['amount'] * self.config['leverage']
-                            entry_fee = self.config.get('entry_fee_short', position_size * FEE_RATE)
-                            close_fee = position_size * FEE_RATE
-                            total_fee = entry_fee + close_fee
-                            net_profit = pnl_usd - total_fee  # pnl_usd는 이미 음수
-                            
-                            # 통계
-                            self.config['stats']['short_fee'] = self.config['stats'].get('short_fee', 0) + total_fee
-                            self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
-                            
-                            close_price = current
-                            
-                            self.config['stats']['short_count'] += 1
-                            self.config['stats']['short_loss'] += 1  # 손절!
-                            self.config['stats']['short_profit'] += net_profit
-                            self.config['stats']['total_pnl'] += net_profit
-                            
-                            count = self.config['stats']['short_count']
-                            
-                            # 엑셀 저장
-                            self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '손절')
-                            
-                            # 로그
-                            self.log(f"🛑 SHORT 손절! ROI {pnl_pct:.2f}% (손절선 {sl_roi}%) (#{count})", 'SHORT')
-                            self.log(f"   💰 청산가: ${close_price:.2f} | 손실: ${pnl_usd:.2f}", 'SHORT')
-                            self.log(f"   💸 수수료: ${total_fee:.2f} | 순손실: -${abs(net_profit):.2f}", 'SHORT')
-                            self.log(f"   ⏸️ 신호 2개 충족 전까지 진입 대기!", 'SHORT')
-                            
-                            print(f"[🛑 손절] {self.config['symbol']} SHORT ROI {pnl_pct:.2f}% (손절선 {sl_roi}%)")
-                            
-                            self.stats_callback()
-                            self.config['last_close_time'] = time.time()
-                            
-                            # 🔥🔥🔥 손절 후 신호 초기화 → 신호 2개 다 나와야 재진입!
-                            self.config['prev_signals'] = {
-                                'ut_long': None, 'ut_short': None,  # None으로 초기화!
-                                'ema_long': None, 'ema_short': None,
-                                'long_signal': None, 'short_signal': None
-                            }
-                            self.config['sl_cooldown_short'] = True  # 🔥 손절 쿨다운!
-                            
-                            # ROI 초기화
-                            self.config['entry_tp_short'] = None
-                            self.config['chart_entry_short'] = None
-                            self.config['entry_fee_short'] = 0
-                            self.config['roi']['short_entry'] = None
-                            self.config['roi']['short_current'] = 0
-                            self.config['roi']['short_max'] = 0
-                            self.config['roi']['short_min'] = 0
-                            
-                            print(f"[{self.config['symbol']}] SHORT 손절 완료 - 신호 2개 충족 전까지 대기!")
                             self.config["is_closing"] = False
                             continue
                         
@@ -2210,9 +2050,8 @@ class App:
                 'long_active': False,
                 'short_active': False,
                 # 🔥 동적 TP 설정
-                'tp_trend': 1.5,  # ✅ 추세장 TP 1.5% (ADX >= 21)
+                'tp_trend': 1.2,  # ✅ 추세장 TP 1.2% (ADX >= 21)
                 'tp_sideways': 1.0,  # ✅ 횡보장 TP 1.0% (ADX < 21)
-                'sl_roi': -50,  # 🔥 손절 ROI% (-50% = ROI가 -50%되면 손절)
                 'adx_period': 10,  # ADX 기간
                 # 🔥 거래량 필터 비활성화
                 'volume_filter_enabled': False,  # 거래량 필터 비활성화
@@ -3474,7 +3313,7 @@ class App:
         tk.Label(dialog, text="📊 동적 TP (ADX 기반)", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
         
         tk.Label(dialog, text="추세장 TP (%) - ADX >= 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
-        tp_trend_var = tk.DoubleVar(value=1.5)  # ✅ 1.5% (추세장)
+        tp_trend_var = tk.DoubleVar(value=1.2)  # ✅ 1.2% (추세장)
         tk.Entry(dialog, textvariable=tp_trend_var, font=('Arial', 11)).pack(pady=5)
         
         tk.Label(dialog, text="횡보장 TP (%) - ADX < 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
@@ -3865,7 +3704,7 @@ class App:
         tk.Label(scrollable_frame, text="📊 동적 TP (ADX 기반)", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
         
         tk.Label(scrollable_frame, text="추세장 TP (%) - ADX >= 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
-        tp_trend_var = tk.DoubleVar(value=coin.get('tp_trend', 1.5))  # ✅ 기본값 1.5%
+        tp_trend_var = tk.DoubleVar(value=coin.get('tp_trend', 1.2))  # ✅ 기본값 1.2%
         tk.Entry(scrollable_frame, textvariable=tp_trend_var, font=('Arial', 11)).pack(pady=3)
         
         tk.Label(scrollable_frame, text="횡보장 TP (%) - ADX < 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
@@ -4402,7 +4241,7 @@ class App:
                                 adx_value = Indicators.calculate_adx(df_full, period=adx_period)
                                 
                                 if adx_value >= 21:
-                                    dynamic_tp = coin.get('tp_trend', 1.5)  # ✅ 1.5%
+                                    dynamic_tp = coin.get('tp_trend', 1.2)  # ✅ 1.2%
                                     market_type = '추세장'
                                 else:
                                     dynamic_tp = coin.get('tp_sideways', 1.0)  # ✅ 1.0%
@@ -4747,7 +4586,7 @@ class App:
                         if adx_value >= 21:
                             market_type = '추세장'
                             market_color = '#00ff00'
-                            current_tp = coin.get('tp_trend', 1.5)  # ✅ 1.5%
+                            current_tp = coin.get('tp_trend', 1.2)  # ✅ 1.2%
                         else:
                             market_type = '횡보장'
                             market_color = '#ffaa00'
