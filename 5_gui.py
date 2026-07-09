@@ -220,6 +220,8 @@ class BinanceAPI:
                 response = self.session.get(url, params=params, timeout=10)
             elif method == 'POST':
                 response = self.session.post(url, params=params, timeout=10)
+            elif method == 'DELETE':
+                response = self.session.delete(url, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
@@ -354,14 +356,73 @@ class BinanceAPI:
         # 일단 positionSide 없이 시도
         
         result = self._request('POST', '/fapi/v1/order', params=params, signed=True)
-        
+
         if result is None:
             print(f"주문 실패: {symbol} {side} {quantity}")
         else:
             self.invalidate_position_cache()  # 🔥 주문 성공 후 캐시 무효화
-        
+
         return result
-    
+
+    def _load_exchange_info(self):
+        """심볼별 가격 tickSize 로드 (최초 1회만 시도, 실패 시 fallback 사용)"""
+        if getattr(self, '_tick_cache_loaded', False):
+            return
+        self._tick_cache_loaded = True
+        self._tick_cache = {}
+        try:
+            info = self._request('GET', '/fapi/v1/exchangeInfo')
+            if info and 'symbols' in info:
+                for s in info['symbols']:
+                    for f in s.get('filters', []):
+                        if f.get('filterType') == 'PRICE_FILTER':
+                            self._tick_cache[s['symbol']] = f['tickSize']
+                print(f"✅ exchangeInfo 로드: {len(self._tick_cache)}개 심볼 tickSize 캐시")
+        except Exception as e:
+            print(f"⚠️ exchangeInfo 로드 실패 (fallback 사용): {e}")
+
+    # tickSize fallback (exchangeInfo 조회 실패 시)
+    _TICK_FALLBACK = {
+        'BTCUSDT': '0.10', 'ETHUSDT': '0.01', 'BNBUSDT': '0.010', 'SOLUSDT': '0.0100',
+        'XRPUSDT': '0.0001', 'ADAUSDT': '0.00010', 'DOGEUSDT': '0.000010',
+        'TRXUSDT': '0.00001', 'TONUSDT': '0.0001', 'LINKUSDT': '0.001',
+    }
+
+    def round_price(self, symbol, price):
+        """tickSize 배수로 가격 반올림 → 문자열 반환 (주문 파라미터용)"""
+        from decimal import Decimal, ROUND_HALF_UP
+        self._load_exchange_info()
+        symbol_clean = symbol.replace('/', '')
+        tick_str = self._tick_cache.get(symbol_clean) or self._TICK_FALLBACK.get(symbol_clean, '0.0001')
+        tick = Decimal(tick_str)
+        steps = (Decimal(str(price)) / tick).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+        result = steps * tick
+        decimals = -tick.normalize().as_tuple().exponent
+        if decimals < 0:
+            decimals = 0
+        return f"{result:.{decimals}f}"
+
+    def create_tp_order(self, symbol, position_side, stop_price):
+        """🔥 거래소 측 TP 주문 (TAKE_PROFIT_MARKET + closePosition)
+
+        거래소가 직접 트리거하므로 프로그램 지연 없이 설정가 근처에서 청산됨.
+        position_side: 'long'이면 SELL TP, 'short'이면 BUY TP
+        """
+        params = {
+            'symbol': symbol.replace('/', ''),
+            'side': 'SELL' if position_side == 'long' else 'BUY',
+            'type': 'TAKE_PROFIT_MARKET',
+            'stopPrice': self.round_price(symbol, stop_price),
+            'closePosition': 'true',
+            'workingType': 'CONTRACT_PRICE',  # 차트(최종가) 기준 트리거
+        }
+        return self._request('POST', '/fapi/v1/order', params=params, signed=True)
+
+    def cancel_all_orders(self, symbol):
+        """심볼의 모든 대기 주문 취소 (잔여 TP 주문 정리)"""
+        params = {'symbol': symbol.replace('/', '')}
+        return self._request('DELETE', '/fapi/v1/allOpenOrders', params=params, signed=True)
+
     def get_position(self, symbol):
         # 🔥 캐시된 positionRisk 사용 (3초 TTL)
         with self._position_cache_lock:
@@ -413,6 +474,11 @@ class BinanceAPI:
             self._position_cache_time = 0
     
     def close_position(self, symbol):
+        # 🔥 대기 중인 TP 주문 먼저 취소 (고아 주문 방지)
+        try:
+            self.cancel_all_orders(symbol)
+        except Exception:
+            pass
         position = self.get_position(symbol)
         if position:
             side = 'SELL' if position['side'] == 'long' else 'BUY'
@@ -453,6 +519,7 @@ class BinanceAPI:
 import threading
 LOG_LOCK = threading.Lock()
 ENTRY_LOCK = threading.Lock()
+CLOSE_LOCK = threading.Lock()  # 🔥 거래소 TP 체결 감지 중복 방지
 
 # ==================== 트레이딩 봇 ====================
 class TradingBot:
@@ -555,6 +622,111 @@ class TradingBot:
                 trade_type=trade_type
             )
     
+    def place_exchange_tp(self, pos_type, entry_price, tp_pct):
+        """🔥 진입 직후 거래소에 TP 트리거 주문 등록
+
+        설정한 TP 가격에 도달하면 거래소가 즉시 청산 → 폴링 지연/슬리피지 최소화.
+        등록 실패 시 False 반환 (기존 봇 폴링 익절이 백업으로 동작).
+        """
+        try:
+            if pos_type == 'LONG':
+                tp_price = entry_price * (1 + tp_pct / 100)
+            else:
+                tp_price = entry_price * (1 - tp_pct / 100)
+            result = self.api.create_tp_order(self.config['symbol'], pos_type.lower(), tp_price)
+            if result:
+                tp_price_str = self.api.round_price(self.config['symbol'], tp_price)
+                self.log(f"   📌 거래소 TP 주문 등록: ${tp_price_str} (도달 시 즉시 청산)", pos_type)
+                print(f"[📌 TP 주문] {self.config['symbol']} {pos_type} → ${tp_price_str}")
+                return True
+            self.log(f"   ⚠️ 거래소 TP 주문 등록 실패 → 봇 폴링으로 익절 처리", pos_type)
+        except Exception as e:
+            print(f"[{self.config['symbol']}] TP 주문 등록 오류: {e}")
+        return False
+
+    def _handle_external_close(self):
+        """🔥 포지션이 봇 청산 없이 사라짐 = 거래소 TP 주문 체결 (또는 수동 청산)
+
+        바이낸스 실현 손익을 조회해서 통계/로그/엑셀에 기록.
+        """
+        with CLOSE_LOCK:
+            prev = self.config.get('_cached_position')
+            if not prev or not isinstance(prev, dict) or self.config.get('is_closing'):
+                return
+            side = prev.get('side')
+            if side not in ('long', 'short') or not self.config.get(f'entry_tp_{side}'):
+                return
+            self.config['_cached_position'] = None  # 소비 (중복 기록 방지)
+
+        pos_type = side.upper()
+        symbol = self.config['symbol']
+        print(f"[🎯 TP 체결 감지] {symbol} {pos_type} 포지션이 거래소에서 청산됨")
+
+        # 잔여 주문 정리
+        try:
+            self.api.cancel_all_orders(symbol)
+        except Exception:
+            pass
+
+        # 바이낸스 실현 손익 조회
+        pnl_usd = prev.get('pnl', 0)
+        position_size = self.config['amount'] * self.config['leverage']
+        entry_fee = self.config.get(f'entry_fee_{side}', position_size * FEE_RATE)
+        close_fee = position_size * FEE_RATE
+        total_fee = entry_fee + close_fee
+        try:
+            time.sleep(1)
+            info = self.api.get_last_trade_info(symbol)
+            if info and info.get('realized_pnl', 0) != 0:
+                pnl_usd = info['realized_pnl']
+                if info.get('commission', 0) > 0:
+                    total_fee = info['commission']
+        except Exception as e:
+            print(f"[{symbol}] 실현 손익 조회 실패: {e}")
+
+        net_profit = pnl_usd - total_fee
+        roi_pct = (pnl_usd / self.config['amount']) * 100 if self.config['amount'] > 0 else 0
+
+        # 통계 (기존 익절 경로와 동일한 방식)
+        self.config['stats'][f'{side}_fee'] = self.config['stats'].get(f'{side}_fee', 0) + total_fee
+        self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
+        self.config['stats'][f'{side}_count'] += 1
+        if net_profit > 0:
+            self.config['stats'][f'{side}_win'] += 1
+        else:
+            self.config['stats'][f'{side}_loss'] += 1
+        self.config['stats'][f'{side}_profit'] += net_profit
+        self.config['stats']['total_pnl'] += net_profit
+
+        count = self.config['stats'][f'{side}_count']
+        profit_sign = '+' if net_profit >= 0 else ''
+
+        # 엑셀 저장
+        self.save_trade_excel(pos_type, roi_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '익절(TP주문)')
+
+        # 로그
+        self.log(f"✅ {pos_type} 익절! 거래소 TP 주문 체결 (#{count})", pos_type)
+        self.log(f"   💰 실현 수익: ${pnl_usd:.2f}", pos_type)
+        self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
+        print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
+
+        self.stats_callback()
+        self.config['last_close_time'] = time.time()
+
+        # 신호/ROI 초기화 (재진입 대비)
+        self.config['prev_signals'] = {
+            'ut_long': False, 'ut_short': False,
+            'ema_long': False, 'ema_short': False,
+            'long_signal': False, 'short_signal': False
+        }
+        self.config[f'entry_tp_{side}'] = None
+        self.config[f'chart_entry_{side}'] = None
+        self.config[f'entry_fee_{side}'] = 0
+        self.config['roi'][f'{side}_entry'] = None
+        self.config['roi'][f'{side}_current'] = 0
+        self.config['roi'][f'{side}_max'] = 0
+        self.config['roi'][f'{side}_min'] = 0
+
     def get_dynamic_tp(self, df):
         """
         ADX 기반 동적 TP 계산
@@ -637,6 +809,11 @@ class TradingBot:
                 else:
                     print(f"[✅ 포지션 없음] {self.config['symbol']} 깨끗한 상태로 시작!")
                     print(f"")
+                    # 🔥 이전 세션의 잔여 TP 주문 정리
+                    try:
+                        self.api.cancel_all_orders(self.config['symbol'])
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"[⚠️ 체크 실패] {self.config['symbol']} 포지션 확인 실패: {e}")
                 print(f"")
@@ -764,6 +941,8 @@ class TradingBot:
                         current_position = self.config.get('_cached_position')
                     elif current_position is False or not current_position:
                         self.config['has_position'] = False  # 실제로 포지션 없음
+                        # 🔥 봇이 청산한 게 아니면 = 거래소 TP 주문 체결 → 기록!
+                        self._handle_external_close()
                 else:
                     # 포지션 없으면 60초마다 (5초 × 12회)
                     if not hasattr(self, '_position_check_count'):
@@ -1148,6 +1327,10 @@ class TradingBot:
                                             self.config['restart_entry_short'] = signals['price']
                                             print(f"[{self.config['symbol']}] SHORT restart_entry 설정 (신호): ${signals['price']:.2f}")
                                 
+                                # 🔥🔥🔥 거래소 TP 주문 등록 (설정가 도달 시 거래소가 즉시 청산!)
+                                tp_base = filled_price or self.config.get(f'restart_entry_{self.bot_type}') or signals['price']
+                                self.place_exchange_tp(pos_type, tp_base, dynamic_tp)
+
                                 # 🔥 is_closing 해제 (새 진입이므로)
                                 self.config['is_closing'] = False
                                 
@@ -1418,13 +1601,13 @@ class TradingBot:
                                         # 진입 시간 기록
                                         self.config['entry_time'] = time.time()
                                         
-                                        # 목표 ROI
-                                        target_tp_roi = self.config['tp'] * self.config['leverage']
-                                        
+                                        # 목표 ROI (🔥 ADX 동적 TP 사용!)
+                                        target_tp_roi = dynamic_tp * self.config['leverage']
+
                                         # 🔥 목표 USDT 계산 (SHORT 전용!)
                                         target_usdt = self.config['amount'] * (target_tp_roi / 100)
                                         self.config['target_usdt_short'] = target_usdt  # 저장!
-                                        self.config['entry_tp_short'] = self.config['tp']
+                                        self.config['entry_tp_short'] = dynamic_tp
                                         self.config['tp_reached_short'] = False
                                         
                                         # 🔥🔥🔥 메인넷 차트 진입가 저장!
@@ -1449,7 +1632,7 @@ class TradingBot:
                                         
 
                                         self.log(f"✅ SHORT 진입! ${signals['price']:.2f} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'SHORT')
-                                        self.log(f"   🎯 TP: 가격+{self.config['tp']:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'SHORT')
+                                        self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'SHORT')
                                         self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'SHORT')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'SHORT')
                                         
@@ -1508,10 +1691,14 @@ class TradingBot:
                                             else:
                                                 self.config['restart_entry_short'] = signals['price']
                                                 print(f"[{self.config['symbol']}] SHORT restart_entry 설정 (신호): ${signals['price']:.2f}")
-                                        
+
+                                        # 🔥🔥🔥 거래소 TP 주문 등록 (설정가 도달 시 거래소가 즉시 청산!)
+                                        tp_base = filled_price or self.config.get('restart_entry_short') or signals['price']
+                                        self.place_exchange_tp('SHORT', tp_base, dynamic_tp)
+
                                         # 🔥 청산 시간 기록 (진입 성공 후)
                                         self.config['last_close_time'] = time.time()
-                                        
+
                                         # 10초 대기
                                         time.sleep(10)
                                     
@@ -1757,13 +1944,13 @@ class TradingBot:
                                         # 진입 시간 기록
                                         self.config['entry_time'] = time.time()
                                         
-                                        # 목표 ROI
-                                        target_tp_roi = self.config['tp'] * self.config['leverage']
-                                        
+                                        # 목표 ROI (🔥 ADX 동적 TP 사용!)
+                                        target_tp_roi = dynamic_tp * self.config['leverage']
+
                                         # 🔥 목표 USDT 계산 (LONG 전용!)
                                         target_usdt = self.config['amount'] * (target_tp_roi / 100)
                                         self.config['target_usdt_long'] = target_usdt  # 저장!
-                                        self.config['entry_tp_long'] = self.config['tp']
+                                        self.config['entry_tp_long'] = dynamic_tp
                                         self.config['tp_reached_long'] = False
                                         
                                         # 🔥🔥🔥 메인넷 차트 진입가 저장!
@@ -1788,7 +1975,7 @@ class TradingBot:
                                         
 
                                         self.log(f"✅ LONG 진입! ${signals['price']:.2f} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'LONG')
-                                        self.log(f"   🎯 TP: 가격+{self.config['tp']:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'LONG')
+                                        self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'LONG')
                                         self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'LONG')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'LONG')
                                         
@@ -1847,10 +2034,14 @@ class TradingBot:
                                             else:
                                                 self.config['restart_entry_long'] = signals['price']
                                                 print(f"[{self.config['symbol']}] LONG restart_entry 설정 (신호): ${signals['price']:.2f}")
-                                        
+
+                                        # 🔥🔥🔥 거래소 TP 주문 등록 (설정가 도달 시 거래소가 즉시 청산!)
+                                        tp_base = filled_price or self.config.get('restart_entry_long') or signals['price']
+                                        self.place_exchange_tp('LONG', tp_base, dynamic_tp)
+
                                         # 🔥 청산 시간 기록 (진입 성공 후)
                                         self.config['last_close_time'] = time.time()
-                                        
+
                                         # 10초 대기
                                         time.sleep(10)
                                     
@@ -2749,7 +2940,13 @@ class App:
                                 pnl = float(pos['unRealizedProfit'])
                                 
                                 print(f"📍 발견: {symbol_display} {side} (수익: ${pnl:.2f})")
-                                
+
+                                # 🔥 잔여 TP 주문 먼저 취소
+                                try:
+                                    self.api.cancel_all_orders(symbol_display)
+                                except Exception:
+                                    pass
+
                                 # 🔥 청산 재시도 (최대 3번)
                                 close_success = False
                                 for attempt in range(3):
@@ -4134,11 +4331,17 @@ class App:
             if CustomMessageBox.askyesno("강제 진입", 
                 f"{side} 포지션을 강제로 진입하시겠습니까?\n\n※ 기존 포지션이 있으면 청산 후 진입합니다.\n※ 신호 무시하고 즉시 진입합니다.\n※ 통계에 포함됩니다."):
                 
+                # 🔥 0단계: 잔여 TP 주문 정리
+                try:
+                    self.api.cancel_all_orders(coin['symbol'])
+                except Exception:
+                    pass
+
                 # 🔥 1단계: 기존 포지션 청산!
                 position = self.api.get_position(coin['symbol'])
                 if position:
                     print(f"[{coin['symbol']}] 기존 포지션 발견 → 청산 후 진입")
-                    
+
                     try:
                         # 청산 주문
                         close_side = 'SELL' if position['side'] == 'long' else 'BUY'
@@ -4331,6 +4534,21 @@ class App:
                         coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + entry_fee
                         coin['stats']['total_pnl'] = coin['stats'].get('total_pnl', 0) - entry_fee
                         
+                        # 🔥🔥🔥 거래소 TP 주문 등록 (설정가 도달 시 거래소가 즉시 청산!)
+                        try:
+                            tp_base = filled_price or current_price
+                            if side == 'LONG':
+                                tp_price = tp_base * (1 + dynamic_tp / 100)
+                            else:
+                                tp_price = tp_base * (1 - dynamic_tp / 100)
+                            tp_result = self.api.create_tp_order(coin['symbol'], side.lower(), tp_price)
+                            if tp_result:
+                                self.add_log(coin, side, f"   📌 거래소 TP 주문 등록: ${self.api.round_price(coin['symbol'], tp_price)}")
+                            else:
+                                self.add_log(coin, side, f"   ⚠️ TP 주문 등록 실패 → 봇 폴링으로 익절 처리")
+                        except Exception as e:
+                            print(f"[{coin['symbol']}] 강제 진입 TP 주문 오류: {e}")
+
                         self.add_log(coin, side, f"🔥 강제 진입! ${current_price:.2f} | {qty}개 | {coin['timeframe']} | {coin['leverage']}x")
                         if market_type != '기본':
                             self.add_log(coin, side, f"   📊 ADX: {adx_value:.1f} ({market_type}) → TP {dynamic_tp}%")
