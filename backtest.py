@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-바이낸스 선물 백테스트 — 실제 봇 코드(3_indicators.py) 기반 시뮬레이터
+바이낸스 선물 백테스트 — 완전 독립 실행형 프로그램
+
+🔥 이 파일 하나만 있으면 실행됩니다 (봇 파일 불필요, API 키 불필요).
+   필요 라이브러리(pandas/numpy/requests)는 실행 시 자동 설치됩니다.
 
 사용법:
   python backtest.py                          # BTC/XRP/DOGE, 365일, 봇 기본 설정
@@ -13,32 +16,39 @@
                                               #   ③ EMA 9/21
                                               #   ④ 하이브리드: 진입 34/55 + 손실 시 9/21 조기청산
 
-- 데이터: 바이낸스 선물 메인넷 5분봉 자동 다운로드 (API 키 불필요)
+- 데이터: 바이낸스 선물 메인넷 5분봉 자동 다운로드
 - 다운로드 데이터는 backtest_data/ 폴더에 캐시 → 재실행 시 재사용
 - 결과: 콘솔 표 + backtest_result.csv + backtest_trades_{심볼}_{설정}.csv
 
-전략 (봇 5_gui.py와 동일):
+전략 (봇 5_gui.py와 동일 — 지표 공식은 3_indicators.py에서 그대로 복제):
 - 진입: 완성된 5분봉 기준 UT Bot(10, 2) 방향 + EMA 크로스 AND 조건
 - 익절: 진입 시 ADX(10) >= 21이면 TP 1.2%(추세장), 아니면 1.0%(횡보장)
         → 거래소 TP 주문 = TP 가격에 정확히 청산되는 것으로 모델링
 - 손절: 고정 손절 없음. 역신호 시 청산 + 즉시 반대 진입(스위칭)
 - 수수료: 테이커 0.04% × 진입/청산
 - 사이즈: 진입금 50 USDT × 레버리지 3배
+
+⚠️ 봇의 지표 설정(UT/EMA/ADX 공식)을 바꾸면 이 파일도 같이 맞춰야 합니다.
 """
 
 import argparse
-import importlib
 import os
+import subprocess
 import sys
 import time
+
+# ==================== 라이브러리 자동 설치 ====================
+for _mod in ['pandas', 'numpy', 'requests']:
+    try:
+        __import__(_mod)
+    except ImportError:
+        print(f"📦 {_mod} 설치 중...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', _mod],
+                              stdout=subprocess.DEVNULL)
 
 import numpy as np
 import pandas as pd
 import requests
-
-# 🔥 실제 봇의 지표 코드 사용 (같은 폴더의 3_indicators.py)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-Indicators = importlib.import_module('3_indicators').Indicators
 
 # ==================== 봇 기본 설정 (5_gui.py와 동일) ====================
 FEE_RATE = 0.0004
@@ -114,7 +124,55 @@ def fetch_klines(symbol, days, interval='5m', cache_dir='backtest_data'):
     return df
 
 
-# ==================== 지표 ====================
+# ==================== 지표 (3_indicators.py와 동일 공식 내장) ====================
+def atr_rma(df, period):
+    """ATR with RMA (Wilder's smoothing) - TradingView 방식"""
+    high, low, close = df['high'], df['low'], df['close']
+    tr = pd.concat([high - low,
+                    (high - close.shift(1)).abs(),
+                    (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+
+def ut_bot(df, sensitivity, atr_period):
+    """UT Bot - TradingView Pine Script 완전 복제 (봇과 동일)"""
+    atr = atr_rma(df, atr_period)
+    close = df['close'].values
+    n_loss = (sensitivity * atr).values
+    stop = np.zeros(len(close))
+    pos = np.zeros(len(close), dtype=int)
+    stop[0] = close[0] - n_loss[0] if not np.isnan(n_loss[0]) else close[0]
+    pos[0] = 1
+    for i in range(1, len(close)):
+        if np.isnan(n_loss[i]):
+            stop[i] = stop[i - 1]
+            pos[i] = pos[i - 1]
+            continue
+        prev_stop, cur, prev = stop[i - 1], close[i], close[i - 1]
+        if cur > prev_stop and prev > prev_stop:
+            stop[i] = max(prev_stop, cur - n_loss[i])
+        elif cur < prev_stop and prev < prev_stop:
+            stop[i] = min(prev_stop, cur + n_loss[i])
+        elif cur > prev_stop:
+            stop[i] = cur - n_loss[i]
+        else:
+            stop[i] = cur + n_loss[i]
+        if prev < stop[i - 1] and cur > stop[i]:
+            pos[i] = 1
+        elif prev > stop[i - 1] and cur < stop[i]:
+            pos[i] = -1
+        else:
+            pos[i] = pos[i - 1]
+    return pd.Series(pos, index=df.index)
+
+
+def ema_pair(df, fast, slow):
+    """EMA fast/slow (봇과 동일)"""
+    ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
+    return ema_fast, ema_slow
+
+
 def adx_full_series(df, period):
     """ADX 전체 시계열 (3_indicators.calculate_adx와 동일 공식, 마지막 값이 아닌 전체 반환)"""
     high, low, close = df['high'], df['low'], df['close']
@@ -140,8 +198,8 @@ def run_backtest(df, cfg):
     c = df['close'].values
 
     # 🔥 봇과 동일한 UT Bot / EMA (실제 봇 코드 호출)
-    ut = Indicators.ut_bot(df, UT_SENS, UT_ATR).values
-    fast, slow = Indicators.ema(df, cfg['ema_fast'], cfg['ema_slow'])
+    ut = ut_bot(df, UT_SENS, UT_ATR).values
+    fast, slow = ema_pair(df, cfg["ema_fast"], cfg["ema_slow"])
     ema_long = (fast > slow).values
     ema_short = (fast < slow).values
     adx = adx_full_series(df, ADX_PERIOD).values
@@ -151,7 +209,7 @@ def run_backtest(df, cfg):
 
     # 하이브리드: 손실 중 조기청산용 빠른 EMA
     if cfg.get('hybrid'):
-        hf, hs = Indicators.ema(df, cfg['hybrid_fast'], cfg['hybrid_slow'])
+        hf, hs = ema_pair(df, cfg["hybrid_fast"], cfg["hybrid_slow"])
         h_dead = (hf < hs).values   # LONG 조기청산 조건
         h_gold = (hf > hs).values   # SHORT 조기청산 조건
         roi_th = cfg.get('hybrid_roi_th', -5.0)
