@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CapCut Agent</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0a0a0a;
+      --surface: #111111;
+      --border:  #222222;
+      --text:    #e5e5e5;
+      --muted:   #666666;
+      --accent:  #22c55e;
+      --accent2: #16a34a;
+      --danger:  #ef4444;
+      --warn:    #f59e0b;
+      --radius:  6px;
+      --mono:    'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── 헤더 ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 18px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo {
+      width: 28px; height: 28px;
+      background: var(--accent);
+      border-radius: 4px;
+      display: grid; place-items: center;
+      font-size: 14px; font-weight: 700; color: #000;
+    }
+    header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.05em; }
+    header span { color: var(--muted); font-size: 11px; margin-left: 8px; }
+
+    /* ── 레이아웃 ── */
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 40px 32px;
+      display: grid;
+      gap: 24px;
+    }
+
+    /* ── 카드 ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+    .card-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    /* ── 드롭존 ── */
+    #dropzone {
+      border: 1.5px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 40px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    #dropzone:hover, #dropzone.drag-over {
+      border-color: var(--accent);
+      background: rgba(34,197,94,0.04);
+    }
+    #dropzone .icon { font-size: 32px; margin-bottom: 10px; }
+    #dropzone p { color: var(--muted); font-size: 12px; }
+    #dropzone p strong { color: var(--text); }
+    #file-input { display: none; }
+
+    /* ── 설정 슬라이더 ── */
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .setting-item label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .setting-item label span {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+    }
+
+    /* ── 버튼 ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent2); }
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { color: var(--text); border-color: #444; }
+
+    /* ── 로그 ── */
+    #log {
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      min-height: 120px;
+      max-height: 240px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+    .log-line {
+      display: flex;
+      gap: 10px;
+      padding: 2px 0;
+      border-bottom: 1px solid #111;
+    }
+    .log-line:last-child { border-bottom: none; }
+    .log-time { color: var(--muted); min-width: 60px; }
+    .log-msg { flex: 1; }
+    .log-line.ok   .log-msg { color: var(--accent); }
+    .log-line.err  .log-msg { color: var(--danger); }
+    .log-line.warn .log-msg { color: var(--warn); }
+    .log-line.info .log-msg { color: var(--text); }
+
+    /* ── 결과 ── */
+    #result-section { display: none; }
+    .result-box {
+      background: rgba(34,197,94,0.06);
+      border: 1px solid rgba(34,197,94,0.3);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
+    .result-box h3 { color: var(--accent); font-size: 13px; margin-bottom: 12px; }
+    .result-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      text-align: center;
+    }
+    .stat .val { font-size: 22px; font-weight: 700; color: var(--accent); }
+    .stat .lbl { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+    .silence-list {
+      max-height: 160px;
+      overflow-y: auto;
+      margin-top: 12px;
+    }
+    .silence-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .silence-item span { color: var(--text); }
+
+    /* ── 설치 안내 ── */
+    .copy-box {
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-size: 11px;
+      color: var(--accent);
+      cursor: pointer;
+      position: relative;
+    }
+    .copy-box::after {
+      content: '클릭하여 복사';
+      position: absolute;
+      right: 10px; top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    /* ── 진행바 ── */
+    .progress-wrap {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+      transition: width 0.4s ease;
+      width: 0%;
+    }
+
+    /* ── 스크롤바 ── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">C</div>
+  <h1>CapCut Agent</h1>
+  <span>무음 자동 컷편집 v2.0</span>
+</header>
+
+<main>
+
+  <!-- 파일 경로 입력 -->
+  <div class="card">
+    <div class="card-title">영상 파일 경로</div>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="video-path"
+        placeholder="예) C:\Users\Lusey\Desktop\영상.mp4"
+        style="flex:1; background:#000; border:1px solid var(--border); border-radius:var(--radius);
+               color:var(--text); font-family:var(--mono); font-size:12px; padding:10px 14px; outline:none;"
+        oninput="onPathInput(this.value)"
+      />
+      <button class="btn btn-ghost" onclick="browsePath()">찾아보기</button>
+    </div>
+    <div id="file-info" style="margin-top:10px; color:var(--muted); font-size:12px;"></div>
+    <p style="margin-top:8px; font-size:11px; color:var(--muted);">
+      💡 영상 파일을 탐색기에서 찾아서 경로를 복사하거나, 파일을 이 창에 드래그하세요
+    </p>
+  </div>
+
+  <!-- 설정 -->
+  <div class="card">
+    <div class="card-title">무음 감지 설정</div>
+    <div class="settings-grid">
+      <div class="setting-item">
+        <label>
+          노이즈 임계값
+          <span id="db-val">-40 dB</span>
+        </label>
+        <input type="range" id="noise-db" min="-60" max="-20" value="-40" step="1"
+               oninput="document.getElementById('db-val').textContent = this.value + ' dB'" />
+      </div>
+      <div class="setting-item">
+        <label>
+          최소 무음 길이
+          <span id="sec-val">0.5 s</span>
+        </label>
+        <input type="range" id="min-silence" min="0.1" max="3.0" value="0.5" step="0.1"
+               oninput="document.getElementById('sec-val').textContent = parseFloat(this.value).toFixed(1) + ' s'" />
+      </div>
+    </div>
+  </div>
+
+  <!-- 화면 비율 -->
+  <div class="card">
+    <div class="card-title">화면 비율</div>
+    <div style="display:flex; gap:20px; align-items:center;">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="radio" name="ratio" value="9:16" checked style="accent-color:var(--accent);" />
+        <span style="font-size:12px;">📱 숏츠 (1080×1920)</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="radio" name="ratio" value="16:9" style="accent-color:var(--accent);" />
+        <span style="font-size:12px;">🖥 가로 (1920×1080)</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- 자막 옵션 -->
+  <div class="card">
+    <div class="card-title">자막 설정</div>
+    <div style="display:flex; align-items:center; gap:14px;">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="use-subtitle" style="width:16px; height:16px; accent-color:var(--accent);" />
+        <span style="font-size:12px;">Whisper 자동 자막 생성 (한국어)</span>
+      </label>
+      <span style="font-size:11px; color:var(--muted);">GPU large-v3 · 처음 실행 시 모델 다운로드 (~3GB)</span>
+    </div>
+    <div style="margin-top:14px;">
+      <label style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px; color:var(--muted);">
+        대본 (선택) — 넣으면 Whisper 인식 결과를 대본과 대조해서 자막 정확도를 높입니다
+        <input type="file" id="script-file" accept=".txt,.md" style="display:none;" onchange="loadScriptFile(this)" />
+        <button class="btn btn-ghost" style="padding:5px 12px; font-size:11px;"
+                onclick="document.getElementById('script-file').click()">📄 .txt 불러오기</button>
+      </label>
+      <textarea id="script-text" rows="5"
+        placeholder="영상 대본을 여기에 붙여넣으세요. 실제 발화와 조금 달라도 됩니다 — 비슷한 부분만 대본 텍스트로 교체되고, 대본에 없는 애드립은 인식 결과가 그대로 유지됩니다."
+        style="width:100%; background:#000; border:1px solid var(--border); border-radius:var(--radius);
+               color:var(--text); font-family:var(--mono); font-size:12px; padding:10px 14px;
+               outline:none; resize:vertical;"></textarea>
+    </div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:center;">
+    <button class="btn btn-primary" id="run-btn" onclick="runProcess()" disabled>
+      ▶ draft 생성
+    </button>
+    <button class="btn btn-ghost" onclick="clearLog()">로그 지우기</button>
+    <div style="flex:1;"></div>
+    <span id="status-text" style="color:var(--muted); font-size:11px;"></span>
+  </div>
+
+  <!-- 진행바 -->
+  <div class="progress-wrap" id="progress-wrap" style="display:none;">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+
+  <!-- 로그 -->
+  <div class="card" style="padding:0; overflow:hidden;">
+    <div style="padding:14px 16px; border-bottom:1px solid var(--border);">
+      <div class="card-title" style="margin:0;">실행 로그</div>
+    </div>
+    <div id="log" style="border:none; border-radius:0;"></div>
+  </div>
+
+  <!-- 결과 -->
+  <div id="result-section">
+    <div class="result-box">
+      <h3>✅ draft 생성 완료</h3>
+      <div class="result-stats">
+        <div class="stat">
+          <div class="val" id="stat-silence">0</div>
+          <div class="lbl">무음 구간</div>
+        </div>
+        <div class="stat">
+          <div class="val" id="stat-saved">0s</div>
+          <div class="lbl">절약 시간</div>
+        </div>
+        <div class="stat">
+          <div class="val" id="stat-segments">0</div>
+          <div class="lbl">영상 클립</div>
+        </div>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button class="btn btn-primary" id="dl-btn" onclick="downloadDraft()">
+          ⬇ Draft 다운로드 (.zip)
+        </button>
+        <button class="btn btn-ghost" onclick="copyToCapcut()">
+          🎬 CapCut에 바로 적용
+        </button>
+      </div>
+      <div style="margin-top:16px; font-size:11px; color:var(--muted);">
+        <p>📁 압축 해제 후 → <strong style="color:var(--text);">캡컷 草稿 폴더에 복사</strong>하면 자동 인식</p>
+        <p style="margin-top:4px;">Windows: <code style="color:var(--accent);">%USERPROFILE%\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft\</code></p>
+      </div>
+      <div class="silence-list" id="silence-list"></div>
+    </div>
+  </div>
+
+  <!-- SRT 다운로드 -->
+  <div id="srt-section" style="display:none;">
+    <div style="background:rgba(34,197,94,0.06); border:1px solid rgba(34,197,94,0.3); border-radius:6px; padding:16px; display:flex; align-items:center; justify-content:space-between;">
+      <div>
+        <div style="font-size:12px; color:var(--accent); font-weight:600;">📄 자막 SRT 생성 완료</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:4px;">캡컷에서 자막 → 자막 가져오기로 불러오세요</div>
+      </div>
+      <button class="btn btn-ghost" onclick="downloadSrt()">⬇ SRT 다운로드</button>
+    </div>
+  </div>
+
+  <!-- 설치 안내 -->
+  <div class="card">
+    <div class="card-title">설치 방법 (처음 한 번만)</div>
+    <p style="color:var(--muted); font-size:12px; margin-bottom:12px;">아래 명령어를 CMD에서 실행하세요:</p>
+    <div class="copy-box" onclick="copyCmd(this, 'pip install fastapi uvicorn python-multipart faster-whisper')">
+      pip install fastapi uvicorn python-multipart faster-whisper
+    </div>
+    <div class="copy-box" style="margin-top:8px;" onclick="copyCmd(this, 'python server.py')">
+      python server.py
+    </div>
+    <p style="color:var(--muted); font-size:11px; margin-top:10px;">
+      ※ ffmpeg이 PATH에 있어야 합니다. 없으면 <a href="https://ffmpeg.org/download.html" target="_blank" style="color:var(--accent);">ffmpeg.org</a>에서 다운로드
+    </p>
+  </div>
+
+</main>
+
+<script>
+  let videoPath = null;
+  let currentDraftName = null;
+
+  // ── 경로 입력 ────────────────────────────────────────────
+  function onPathInput(val) {
+    val = val.trim();
+    if (!val) return;
+    videoPath = val;
+    document.getElementById('file-info').textContent = `📎 경로 설정됨: ${val}`;
+    document.getElementById('run-btn').disabled = false;
+    log(`경로 입력: ${val}`, 'info');
+  }
+
+  // 탐색기에서 찾아보기 (서버에 파일 다이얼로그 요청)
+  async function browsePath() {
+    try {
+      const res = await fetch('/api/browse');
+      const data = await res.json();
+      if (data.path) {
+        document.getElementById('video-path').value = data.path;
+        onPathInput(data.path);
+      }
+    } catch(e) {
+      log('찾아보기 실패 - 경로를 직접 입력해주세요', 'warn');
+    }
+  }
+
+  // 드래그 앤 드롭으로 경로 추출
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    if (f && f.path) {
+      document.getElementById('video-path').value = f.path;
+      onPathInput(f.path);
+    } else if (f) {
+      // 브라우저에서 path 못 가져올 때 안내
+      log('경로를 직접 입력해주세요 (탐색기에서 파일 우클릭 → 경로 복사)', 'warn');
+    }
+  });
+
+  // ── 로그 ─────────────────────────────────────────────────
+  function log(msg, type = 'info') {
+    const el = document.getElementById('log');
+    const t = new Date().toTimeString().slice(0,8);
+    const line = document.createElement('div');
+    line.className = `log-line ${type}`;
+    line.innerHTML = `<span class="log-time">${t}</span><span class="log-msg">${msg}</span>`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function clearLog() {
+    document.getElementById('log').innerHTML = '';
+  }
+
+  // ── 진행바 ───────────────────────────────────────────────
+  const STEPS = { upload: 15, probe: 30, silence: 55, silence_done: 70, draft: 85, done: 100 };
+
+  function setProgress(step) {
+    const pct = STEPS[step] ?? 0;
+    document.getElementById('progress-bar').style.width = pct + '%';
+  }
+
+  // ── 메인 실행 ────────────────────────────────────────────
+  function runProcess() {
+    if (!videoPath) return;
+
+    const btn = document.getElementById('run-btn');
+    btn.disabled = true;
+    document.getElementById('result-section').style.display = 'none';
+    document.getElementById('srt-section').style.display = 'none';
+    currentSrtName = null;
+    document.getElementById('progress-wrap').style.display = 'block';
+    document.getElementById('status-text').textContent = '처리 중...';
+    setProgress('upload');
+
+    const noiseDb = document.getElementById('noise-db').value;
+    const minSil  = document.getElementById('min-silence').value;
+    const useSub  = document.getElementById('use-subtitle').checked ? 'true' : 'false';
+    const ratio   = document.querySelector('input[name="ratio"]:checked').value;
+    const encoded = encodeURIComponent(videoPath);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}`);
+
+    xhr.setRequestHeader('Content-Type', 'application/json');
+
+    let lastIdx = 0;
+    xhr.onprogress = () => {
+      const chunk = xhr.responseText.slice(lastIdx);
+      lastIdx = xhr.responseText.length;
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        try { handleEvent(JSON.parse(line.slice(5).trim())); } catch(e) {}
+      }
+    };
+
+    xhr.onload  = () => { btn.disabled = false; document.getElementById('status-text').textContent = ''; };
+    xhr.onerror = () => { log('연결 오류: server.py가 실행 중인지 확인하세요', 'err'); btn.disabled = false; };
+    xhr.timeout = 0;
+    const script = document.getElementById('script-text').value.trim();
+    xhr.send(JSON.stringify({ script }));
+    log(`처리 시작: ${videoPath}` + (script ? ` (대본 ${script.length}자 참고)` : ''), 'info');
+  }
+
+  function handleEvent(data) {
+    setProgress(data.step);
+    const type = data.step === 'done' ? 'ok' : data.step === 'error' ? 'err' : 'info';
+    log(data.msg, type);
+
+    if (data.step === 'silence_done' && data.silences) showSilences(data.silences);
+    if (data.step === 'asr_done' && data.srt_name) {
+      currentSrtName = data.srt_name;
+      document.getElementById('srt-section').style.display = 'block';
+    }
+
+    if (data.step === 'done') {
+      currentDraftName = data.draft_dir.split(/[\\/]/).pop();
+      const silences = window._lastSilences || [];
+      const savedSec = silences.reduce((a, s) => a + s.duration, 0).toFixed(1);
+      document.getElementById('stat-silence').textContent  = data.silence_count ?? silences.length;
+      document.getElementById('stat-saved').textContent    = savedSec + 's';
+      document.getElementById('stat-segments').textContent = data.clip_count ?? ((data.silence_count ?? 0) + 1);
+      if (data.subtitle_count > 0) {
+        log(`✅ 자막 클립 ${data.subtitle_count}개 타임라인에 삽입 완료`, 'ok');
+      }
+      document.getElementById('result-section').style.display = 'block';
+    }
+  }
+
+  function showSilences(silences) {
+    window._lastSilences = silences;
+    const list = document.getElementById('silence-list');
+    list.innerHTML = silences.map((s, i) =>
+      `<div class="silence-item">
+        <span>#${i+1}</span>
+        <span>${s.start.toFixed(2)}s → ${s.end.toFixed(2)}s</span>
+        <span style="color:var(--warn);">${s.duration.toFixed(2)}s</span>
+      </div>`
+    ).join('');
+  }
+
+  let currentSrtName = null;
+
+  async function downloadDraft() {
+    if (!currentDraftName) return;
+    window.location.href = `/api/download/${encodeURIComponent(currentDraftName)}`;
+  }
+
+  async function downloadSrt() {
+    if (!currentSrtName) return;
+    window.location.href = `/api/download-srt/${encodeURIComponent(currentSrtName)}`;
+  }
+
+  async function copyToCapcut() {
+    if (!currentDraftName) return;
+    try {
+      const res = await fetch(`/api/copy-to-capcut/${encodeURIComponent(currentDraftName)}`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        log('✅ CapCut 폴더에 복사 완료! CapCut을 재시작하세요.', 'ok');
+      } else {
+        log('복사 실패: ' + (data.detail || '알 수 없는 오류'), 'err');
+      }
+    } catch(e) {
+      log('복사 오류: ' + e.message, 'err');
+    }
+  }
+
+  function loadScriptFile(input) {
+    const f = input.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      document.getElementById('script-text').value = reader.result;
+      log(`대본 불러오기 완료: ${f.name} (${reader.result.length}자)`, 'ok');
+    };
+    reader.readAsText(f, 'utf-8');
+    input.value = '';
+  }
+
+  function copyCmd(el, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      el.style.color = '#22c55e';
+      setTimeout(() => el.style.color = '', 1000);
+    });
+  }
+
+  log('CapCut Agent 준비 완료', 'ok');
+  log('영상 파일 경로를 입력하거나 드래그하세요', 'info');
+</script>
+</body>
+</html>
