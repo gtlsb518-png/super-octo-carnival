@@ -73,9 +73,10 @@ FPS = 30.0
 # 클립 끝보다 0.1초 일찍 끝나서 다음 자막과 겹치거나 붙지 않게 한다.
 SUBTITLE_GAP_US = 100_000
 
-# 자막 한 클립당 최대 글자 수. 초과하면 단어 단위로 잘라서
-# 같은 영상 클립 위에 여러 개의 자막 클립으로 나눠 넣는다.
-MAX_SUBTITLE_CHARS = 15
+# 자막 한 클립당 최대 글자 수 (기본값, UI에서 조절 가능).
+# 초과하면 단어 단위로 잘라서 같은 영상 클립 위에 여러 자막 클립으로 나눠 넣는다.
+# 참고 SRT(숏츠 스타일) 기준 조각당 7~12자가 읽기 좋다.
+MAX_SUBTITLE_CHARS = 12
 
 def snap_to_frame(sec: float) -> float:
     """초 단위 시간을 가장 가까운 프레임 경계로 스냅 (30fps 기준)"""
@@ -197,60 +198,6 @@ def make_srt(chunks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def split_subtitle_chunks(text: str, max_chars: int = MAX_SUBTITLE_CHARS, tolerance: int = 3) -> list[str]:
-    """
-    자막 텍스트를 max_chars(±tolerance) 길이로 균형 있게 분할.
-    - 문장 경계(. ! ?)를 먼저 유지
-    - 문장이 max_chars + tolerance 이하면 통째로 사용
-    - 초과하면 필요한 조각 수를 계산해 목표 길이(≈균등)로 나누되,
-      단어(띄어쓰기) 경계에서만 끊고 하드 최대 max_chars + tolerance를 지킨다
-    → 조각들이 15자 ±2~3자 수준으로 비슷한 길이가 된다 (짧은 꼬리 조각 방지)
-    """
-    text = text.strip()
-    if not text:
-        return []
-
-    hard_max = max_chars + tolerance
-
-    # 문장 단위로 먼저 분리 (마침표/물음표/느낌표 뒤에서 끊기, 구분자 유지)
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    if not sentences:
-        sentences = [text]
-
-    all_chunks = []
-    for sentence in sentences:
-        if len(sentence) <= hard_max:
-            all_chunks.append(sentence)
-            continue
-
-        words = sentence.split()
-        # 조각 수 → 목표 길이 (균등 배분)
-        n_chunks = max(1, math.ceil(len(sentence) / max_chars))
-        target = math.ceil(len(sentence) / n_chunks)
-
-        current = ""
-        for word in words:
-            candidate = (current + " " + word) if current else word
-            if not current or len(candidate) <= min(target + tolerance, hard_max):
-                # 목표 길이 안이면 계속 붙임 (단어 하나는 무조건 수용)
-                current = candidate
-                if len(current) >= target - tolerance and len(current) >= target:
-                    all_chunks.append(current)
-                    current = ""
-            else:
-                all_chunks.append(current)
-                current = word
-        if current:
-            # 마지막 조각이 너무 짧으면 직전 조각과 합치기 시도
-            if all_chunks and len(current) <= tolerance + 2 and len(all_chunks[-1]) + 1 + len(current) <= hard_max:
-                all_chunks[-1] = all_chunks[-1] + " " + current
-            else:
-                all_chunks.append(current)
-
-    return all_chunks if all_chunks else [text]
-
-
 def correct_subtitles_with_script(segments: list[dict], script_text: str) -> list[dict]:
     """
     Whisper 인식 결과를 대본과 대조해서 텍스트를 보정.
@@ -299,8 +246,8 @@ def correct_subtitles_with_script(segments: list[dict], script_text: str) -> lis
 
 def build_word_stream(segments: list[dict]) -> list[dict]:
     """
-    Whisper 세그먼트 → 단어 스트림 [{"time": 원본_시각(초), "word": str}, ...].
-    - 단어별 타임스탬프(word_timestamps)가 있으면 실제 발화 시각(중간값) 사용
+    Whisper 세그먼트 → 단어 스트림 [{"time": 발화_중간(초), "start": 발화_시작(초), "word": str}, ...].
+    - 단어별 타임스탬프(word_timestamps)가 있으면 실제 발화 시각 사용
     - 없으면(대본 보정으로 텍스트가 교체된 경우 등) 세그먼트 구간에 균등 배분
     """
     stream = []
@@ -312,29 +259,30 @@ def build_word_stream(segments: list[dict]) -> list[dict]:
         text_words = text.split()
         if words and len(words) == len(text_words):
             for w, tw in zip(words, text_words):
-                stream.append({"time": (w["start"] + w["end"]) / 2, "word": tw})
+                stream.append({"time": (w["start"] + w["end"]) / 2, "start": w["start"], "word": tw})
         else:
             n = len(text_words)
             seg_dur = max(seg["end"] - seg["start"], 0.01)
             for wi, tw in enumerate(text_words):
-                t = seg["start"] + seg_dur * (wi + 0.5) / n
-                stream.append({"time": t, "word": tw})
+                ws = seg["start"] + seg_dur * wi / n
+                stream.append({"time": ws + seg_dur / (2 * n), "start": ws, "word": tw})
     stream.sort(key=lambda x: x["time"])
     return stream
 
 
-def words_for_clips(segments: list[dict], keep_ranges: list[tuple[float, float, int, int]]) -> dict[int, str]:
+def words_for_clips(segments: list[dict],
+                    keep_ranges: list[tuple[float, float, int, int]]) -> dict[int, list[dict]]:
     """
     단어 스트림을 각 keep 구간(영상 클립)에 배분.
     - 클립 시간 안에서 발화된 단어는 그 클립으로
     - 잘려나간 무음 구간에 걸친 단어는 앞/뒤 중 더 가까운 클립으로
     → 발화가 있는 모든 클립 위에 자막이 올라간다.
-    반환: {클립 인덱스: 텍스트}
+    반환: {클립 인덱스: [단어 dict, ...]} (발화 시각 포함)
     """
     if not keep_ranges:
         return {}
     stream = build_word_stream(segments)
-    clip_words: dict[int, list[str]] = {i: [] for i in range(len(keep_ranges))}
+    clip_words: dict[int, list[dict]] = {i: [] for i in range(len(keep_ranges))}
 
     for w in stream:
         t = w["time"]
@@ -353,42 +301,104 @@ def words_for_clips(segments: list[dict], keep_ranges: list[tuple[float, float, 
                 break
         if target is None:
             target = len(keep_ranges) - 1
-        clip_words[target].append(w["word"])
+        clip_words[target].append(w)
 
-    return {i: " ".join(ws) for i, ws in clip_words.items() if ws}
+    return {i: ws for i, ws in clip_words.items() if ws}
+
+
+def chunk_word_groups(words: list[dict], max_chars: int, tolerance: int = 3) -> list[list[dict]]:
+    """
+    단어 리스트를 자막 조각(단어 그룹)으로 균형 분할.
+    각 조각의 텍스트 길이(공백 포함)가 max_chars ±tolerance 수준이 되도록
+    필요한 조각 수를 먼저 계산해 목표 길이로 나눈다 (짧은 꼬리 조각 방지).
+    """
+    total = sum(len(w["word"]) for w in words) + max(0, len(words) - 1)
+    hard_max = max_chars + tolerance
+    if total <= hard_max:
+        return [words]
+
+    n_chunks = max(1, math.ceil(total / max_chars))
+    target = math.ceil(total / n_chunks)
+
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    cur_len = 0
+    for w in words:
+        add = len(w["word"]) + (1 if current else 0)
+        if current and cur_len + add > min(target + tolerance, hard_max):
+            groups.append(current)
+            current, cur_len = [w], len(w["word"])
+        else:
+            current.append(w)
+            cur_len += add
+            if cur_len >= target:
+                groups.append(current)
+                current, cur_len = [], 0
+    if current:
+        prev_len = (sum(len(x["word"]) for x in groups[-1]) + len(groups[-1]) - 1) if groups else 0
+        if groups and cur_len <= tolerance + 2 and prev_len + 1 + cur_len <= hard_max:
+            groups[-1].extend(current)  # 너무 짧은 꼬리는 직전 조각에 합침
+        else:
+            groups.append(current)
+    return groups
 
 
 def subtitle_chunks_for_timeline(segments: list[dict],
-                                 keep_ranges: list[tuple[float, float, int, int]]) -> list[dict]:
+                                 keep_ranges: list[tuple[float, float, int, int]],
+                                 max_chars: int = MAX_SUBTITLE_CHARS) -> list[dict]:
     """
     최종 자막 클립 목록 생성 (draft 텍스트 트랙 + SRT 공용).
     - 각 영상 클립 위에 그 클립에서 발화된 텍스트를 얹음
-    - 15자(±3자) 초과 시 문장/단어 경계에서 균형 있게 분할해 여러 자막 클립으로
-    - 자막 구간: 클립 시작 ~ 클립 끝 - 0.1초 (다음 클립 자막과 간격)
-    - 클립 안에서 분할된 자막들의 시간은 글자 수 비율로 배분
+    - max_chars(±3자) 초과 시 단어 경계에서 균형 분할해 여러 자막 클립으로
+    - 조각의 시간 경계 = 조각 첫 단어의 실제 발화 시각 (타임라인으로 매핑)
+      → 자막이 말하는 속도를 그대로 따라감 (참고 SRT 스타일)
+    - 첫 조각은 클립 시작에 정렬, 마지막 조각 끝 = 클립 끝 - 0.1초
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
-    clip_texts = words_for_clips(segments, keep_ranges)
+    MIN_STEP_US = 66_667  # 최소 2프레임 간격 (조각 시각이 겹치지 않게)
+    clip_words = words_for_clips(segments, keep_ranges)
     out = []
-    for i, (_ks, _ke, tl_s, tl_e) in enumerate(keep_ranges):
-        text = clip_texts.get(i)
-        if not text:
+    for i, (ks, _ke, tl_s, tl_e) in enumerate(keep_ranges):
+        words = clip_words.get(i)
+        if not words:
             continue
         clip_dur = tl_e - tl_s
         end_us = tl_e - SUBTITLE_GAP_US if clip_dur > 2 * SUBTITLE_GAP_US else tl_e
 
-        chunks = split_subtitle_chunks(text, max_chars=MAX_SUBTITLE_CHARS)
-        total_chars = sum(len(c) for c in chunks)
-        cursor = tl_s
-        for ci, chunk in enumerate(chunks):
-            if ci == len(chunks) - 1:
-                chunk_end = end_us
-            else:
-                chunk_end = cursor + int((end_us - tl_s) * len(chunk) / total_chars) if total_chars else end_us
-            if chunk_end <= cursor:
+        groups = chunk_word_groups(words, max_chars)
+        src_s = sec_to_us(snap_to_frame(ks))
+
+        # 조각 시작 시각: 첫 단어의 발화 시각을 타임라인으로 매핑
+        starts = [tl_s]
+        word_timing_ok = True
+        for g in groups[1:]:
+            mapped = tl_s + (sec_to_us(g[0]["start"]) - src_s)
+            mapped = max(mapped, starts[-1] + MIN_STEP_US)
+            if mapped >= end_us:
+                word_timing_ok = False
+                break
+            starts.append(mapped)
+
+        if not word_timing_ok:
+            # 단어 시각이 클립 범위와 안 맞으면 글자 수 비례 배분으로 폴백
+            total_chars = sum(sum(len(w["word"]) for w in g) for g in groups) or 1
+            starts = [tl_s]
+            cursor = tl_s
+            for g in groups[:-1]:
+                step = max(MIN_STEP_US, int((end_us - tl_s) * sum(len(w["word"]) for w in g) / total_chars))
+                cursor = min(cursor + step, end_us)
+                starts.append(cursor)
+
+        boundaries = starts + [end_us]
+        for gi, g in enumerate(groups):
+            s, e = boundaries[gi], boundaries[gi + 1]
+            text = " ".join(w["word"] for w in g)
+            if e <= s:
+                # 자리가 없으면 직전 자막에 텍스트를 합쳐서 단어 유실 방지
+                if out:
+                    out[-1]["text"] += " " + text
                 continue
-            out.append({"start_us": cursor, "end_us": chunk_end, "text": chunk})
-            cursor = chunk_end
+            out.append({"start_us": s, "end_us": e, "text": text})
     return out
 
 def _make_text_material(text_id: str, text: str, task_id: str = "") -> dict:
@@ -580,11 +590,13 @@ def build_draft(
     draft_name: str = "CapCut_Agent_Draft",
     subtitles: list[dict] | None = None,
     ratio: str = "9:16",
+    max_sub_chars: int = MAX_SUBTITLE_CHARS,
 ) -> Path:
     """
-    subtitles: Whisper 원본 인식 결과 [{"start", "end", "text"}] (원본 영상 타임스탬프 기준).
-               각 영상 클립 위에 자막 클립을 1개씩 텍스트 트랙으로 삽입한다.
-    ratio:     "9:16" (숏츠 1080x1920, 기본) 또는 "16:9" (가로 1920x1080)
+    subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
+                   발화가 있는 모든 영상 클립 위에 자막 클립을 텍스트 트랙으로 삽입한다.
+    ratio:         "9:16" (숏츠 1080x1920, 기본) 또는 "16:9" (가로 1920x1080)
+    max_sub_chars: 자막 한 조각 최대 글자 수 (±3자 허용)
     """
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
     src_width, src_height = get_video_resolution(video_path)
@@ -652,11 +664,11 @@ def build_draft(
     # ── 자막 텍스트 트랙 ─────────────────────────────────
     # 단어별 발화 시각 기준으로 각 영상 클립에 자막을 배분 →
     # 발화가 있는 모든 클립 위에 자막 클립이 올라간다.
-    # 15자(±3) 초과 텍스트는 같은 클립 위에서 여러 자막 클립으로 균형 분할.
+    # max_sub_chars(±3) 초과 텍스트는 같은 클립 위에서 여러 자막 클립으로 균형 분할.
     text_materials = []
     text_segments = []
     if subtitles:
-        sub_chunks = subtitle_chunks_for_timeline(subtitles, keep_ranges)
+        sub_chunks = subtitle_chunks_for_timeline(subtitles, keep_ranges, max_sub_chars)
         for idx, chunk in enumerate(sub_chunks):
             text_mat_id = str(uuid.uuid4()).upper()
             text_seg_id = str(uuid.uuid4()).upper()
@@ -900,6 +912,7 @@ async def process_video(
     min_silence: float = 0.5,
     use_subtitle: bool = False,
     ratio: str = "9:16",
+    max_sub_chars: int = MAX_SUBTITLE_CHARS,
     payload: dict | None = Body(None),
 ):
     # 대본은 길이 제한 없는 POST body(JSON)로 받는다: {"script": "..."}
@@ -934,7 +947,7 @@ async def process_video(
                 if script_text:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 대조 보정 중...'})}\n\n"
                     raw_subs = correct_subtitles_with_script(raw_subs, script_text)
-                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges)
+                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars)
                 subtitle_count = len(sub_chunks)
                 srt_content = make_srt(sub_chunks)
                 srt_path = OUTPUT_DIR / f"{video.stem}.srt"
@@ -944,7 +957,7 @@ async def process_video(
 
             yield f"data: {json.dumps({'step': 'draft', 'msg': f'CapCut draft 생성 중... ({ratio})'})}\n\n"
             name = video.stem
-            draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio)
+            draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio, max_sub_chars)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count})}\n\n"
 
