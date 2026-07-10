@@ -34,6 +34,16 @@ tkinter가 없는 리눅스에서는 `sudo apt-get install python3-tk`로 설치
 | `6~8_gui_*.py` | 호환용 스텁 (미사용) |
 | `9_main.py` | 실행 진입점 (라이브러리 자동 설치) |
 
+## 백테스터
+
+- `backtest.py` — 현재 봇 전략(UT Bot + EMA) 백테스터 (GUI/CLI, 독립 실행형)
+- `backtest_v2.py` — **대안 전략 실험실** (GUI/CLI, 독립 실행형): 돈치안 추세추종(ATR 손절 + 트레일링 + 리스크 사이징), BB+RSI 역추세(횡보장 전용), ADX 국면 라우터, 기존 UT+EMA 비교 모드. 결과에 전반부/후반부 분리 표시로 과최적화 점검 가능.
+
+```bash
+python backtest_v2.py        # GUI
+python backtest_v2.py --cli  # 콘솔
+```
+
 ## 매매 로직 요약
 
 - **진입**: UT Bot 상태 + EMA(34/55) 크로스 AND 조건, 코인당 LONG/SHORT 봇 각 1개 (기본 5분봉)
