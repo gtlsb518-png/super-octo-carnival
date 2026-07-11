@@ -19,6 +19,7 @@
 전략 (봇 5_gui.py와 동일 로직):
 - 진입: 완성봉 기준 UT Bot 방향 + EMA 크로스 AND 조건
 - 익절: 진입 시 ADX >= 기준이면 추세장 TP, 아니면 횡보장 TP
+        🔥 ADX는 별도 시간봉(기본 1시간봉)의 완성봉으로 계산
         (거래소 TP 주문 = TP 가격에 정확히 청산되는 것으로 모델링)
 - 손절: 고정 손절 없음. 역신호 시 청산 + 즉시 반대 진입(스위칭)
 - 하이브리드(선택): 손실 중일 때만 빠른 EMA 크로스로 조기청산
@@ -54,6 +55,7 @@ DEFAULTS = {
     'tp_sideways': 1.0,    # 횡보장 TP %
     'adx_period': 10,      # ADX 기간
     'adx_th': 21,          # ADX 추세장 기준
+    'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용, 매매봉과 별개)
     'ut_sens': 10.0,       # UT Bot Key Value
     'ut_atr': 2,           # UT Bot ATR Period
     'ema_fast': 34,        # EMA Fast
@@ -74,6 +76,8 @@ FALLBACK_SYMBOLS = [
     'OPUSDT', 'FILUSDT',
 ]
 INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h']
+RESAMPLE_RULE = {'1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min',
+                 '30m': '30min', '1h': '1h', '2h': '2h', '4h': '4h'}
 
 
 # ==================== 데이터 ====================
@@ -195,6 +199,22 @@ def ema_pair(df, fast, slow):
             df['close'].ewm(span=slow, adjust=False).mean())
 
 
+def adx_on_interval(df, period, adx_interval, trade_interval):
+    """🔥 ADX를 별도 시간봉으로 계산해 매매봉 인덱스에 정렬
+
+    - adx_interval == trade_interval이면 매매봉 그대로 계산
+    - 다르면 상위 봉으로 리샘플 후 계산하고, '완성된 상위 봉'만 사용
+      (shift(1) → 진행 중인 상위 봉을 참조하는 미래 참조 방지)
+    """
+    if adx_interval == trade_interval:
+        return adx_full_series(df, period)
+    rule = RESAMPLE_RULE.get(adx_interval, adx_interval)
+    ohlc = df.resample(rule).agg({
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
+    adx_h = adx_full_series(ohlc, period)
+    return adx_h.shift(1).reindex(df.index, method='ffill').fillna(20.0)
+
+
 def adx_full_series(df, period):
     high, low, close = df['high'], df['low'], df['close']
     tr = pd.concat([high - low,
@@ -229,7 +249,8 @@ def run_backtest(df, p):
     fast, slow = ema_pair(df, p['ema_fast'], p['ema_slow'])
     ema_long = (fast > slow).values
     ema_short = (fast < slow).values
-    adx = adx_full_series(df, p['adx_period']).values
+    adx = adx_on_interval(df, p['adx_period'],
+                          p.get('adx_interval', p['interval']), p['interval']).values
 
     long_sig = (ut == 1) & ema_long
     short_sig = (ut == -1) & ema_short
@@ -371,7 +392,8 @@ def run_all(symbols, p, compare, log=print, on_row=None):
     """심볼 목록 전체 백테스트. on_row(row)로 결과 행 전달"""
     configs = make_configs(p, compare)
     log("=" * 50)
-    log(f"🔬 백테스트: {len(symbols)}개 심볼 | {p['days']}일 | {p['interval']}봉")
+    log(f"🔬 백테스트: {len(symbols)}개 심볼 | {p['days']}일 | 매매 {p['interval']}봉"
+        f" | ADX {p.get('adx_interval', p['interval'])}봉")
     log(f"   설정 {len(configs)}종: {', '.join(c['name'] for c in configs)}")
     log("=" * 50)
 
@@ -456,11 +478,17 @@ def launch_gui():
                  justify='center').grid(row=r, column=1, padx=6, pady=2)
         vars_[key] = v
 
-    tk.Label(form, text='시간봉', bg=PANEL, fg=FG, font=('Arial', 10),
+    tk.Label(form, text='시간봉 (매매)', bg=PANEL, fg=FG, font=('Arial', 10),
              anchor='w').grid(row=len(fields), column=0, sticky='w', pady=2)
     interval_var = tk.StringVar(value=DEFAULTS['interval'])
     ttk.Combobox(form, textvariable=interval_var, values=INTERVALS, width=8,
                  state='readonly').grid(row=len(fields), column=1, padx=6, pady=2)
+
+    tk.Label(form, text='ADX 시간봉', bg=PANEL, fg=FG, font=('Arial', 10),
+             anchor='w').grid(row=len(fields) + 1, column=0, sticky='w', pady=2)
+    adx_interval_var = tk.StringVar(value=DEFAULTS['adx_interval'])
+    ttk.Combobox(form, textvariable=adx_interval_var, values=INTERVALS, width=8,
+                 state='readonly').grid(row=len(fields) + 1, column=1, padx=6, pady=2)
 
     # 하이브리드
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
@@ -631,6 +659,7 @@ def launch_gui():
             raw = v.get().strip()
             p[key] = int(float(raw)) if key in int_keys else float(raw)
         p['interval'] = interval_var.get()
+        p['adx_interval'] = adx_interval_var.get()
         p['hybrid'] = hybrid_var.get()
         return p
 
@@ -693,6 +722,8 @@ def run_cli():
     ap.add_argument('--symbols', default=','.join(DEFAULT_SYMBOLS))
     ap.add_argument('--days', type=int, default=DEFAULTS['days'])
     ap.add_argument('--interval', default=DEFAULTS['interval'])
+    ap.add_argument('--adx-interval', default=DEFAULTS['adx_interval'],
+                    help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
     ap.add_argument('--compare', action='store_true')
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
@@ -701,6 +732,7 @@ def run_cli():
     p = dict(DEFAULTS)
     p['days'] = args.days
     p['interval'] = args.interval
+    p['adx_interval'] = args.adx_interval
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
 
     symbols = fetch_symbols() if args.all else \
