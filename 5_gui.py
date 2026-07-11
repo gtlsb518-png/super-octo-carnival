@@ -727,24 +727,50 @@ class TradingBot:
         self.config['roi'][f'{side}_max'] = 0
         self.config['roi'][f'{side}_min'] = 0
 
+    def get_htf_adx(self, df_fallback):
+        """🔥 ADX를 1시간봉(완성봉)으로 계산 — TP 결정용
+
+        - 60초 캐시 (LONG/SHORT 봇 공유, API 부하 최소화)
+        - 1시간봉 조회 실패 시 매매봉 데이터로 폴백
+        """
+        adx_period = self.config.get('adx_period', 10)
+        adx_interval = self.config.get('adx_interval', '1h')
+
+        cache = self.config.get('_adx_htf_cache')
+        now = time.time()
+        if cache and (now - cache[1]) < 60:
+            return cache[0]
+
+        df_adx = df_fallback
+        if adx_interval and adx_interval != self.config.get('timeframe'):
+            try:
+                df_h = self.api.get_klines(self.config['symbol'], adx_interval)
+                if df_h is not None and len(df_h) > adx_period + 5:
+                    df_adx = df_h[:-1]  # 완성된 봉만
+            except Exception as e:
+                print(f"[{self.config['symbol']}] {adx_interval} ADX 조회 실패(매매봉 사용): {e}")
+
+        adx_value = Indicators.calculate_adx(df_adx, period=adx_period)
+        self.config['_adx_htf_cache'] = (adx_value, now)
+        return adx_value
+
     def get_dynamic_tp(self, df):
         """
-        ADX 기반 동적 TP 계산
-        
+        ADX 기반 동적 TP 계산 (🔥 ADX는 1시간봉 기준!)
+
         Args:
-            df: OHLCV 데이터프레임
-        
+            df: OHLCV 데이터프레임 (매매봉 - 1시간봉 조회 실패 시 폴백용)
+
         Returns:
             tuple: (tp, adx_value, market_type)
                 - tp: 적용할 TP 값
-                - adx_value: 현재 ADX 값
+                - adx_value: 현재 ADX 값 (1시간봉)
                 - market_type: '추세장' 또는 '횡보장'
         """
         try:
-            # ADX 계산 (설정값 사용)
-            adx_period = self.config.get('adx_period', 10)  # 기본 10 (코인 최적화)
-            adx_value = Indicators.calculate_adx(df, period=adx_period)
-            
+            # 🔥 1시간봉 ADX (60초 캐시)
+            adx_value = self.get_htf_adx(df)
+
             # ADX 기준으로 TP 결정
             if adx_value >= 21:
                 # 추세장
@@ -2244,6 +2270,7 @@ class App:
                 'tp_trend': 1.2,  # ✅ 추세장 TP 1.2% (ADX >= 21)
                 'tp_sideways': 1.0,  # ✅ 횡보장 TP 1.0% (ADX < 21)
                 'adx_period': 10,  # ADX 기간
+                'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
                 # 🔥 거래량 필터 비활성화
                 'volume_filter_enabled': False,  # 거래량 필터 비활성화
                 'volume_multiplier': 1.0,  # 사용 안 함
@@ -3730,7 +3757,7 @@ class App:
         coin['debug_label'] = None
         
         # 🔥 ADX & Volume 프레임 (반으로 나눔)
-        adx_vol_frame = tk.LabelFrame(self.main_frame, text="📊 ADX - 동적 TP | 📊 Volume", bg='#2d2d2d', fg='#00ffff',
+        adx_vol_frame = tk.LabelFrame(self.main_frame, text="📊 ADX(1시간봉) - 동적 TP | 📊 Volume", bg='#2d2d2d', fg='#00ffff',
                                  font=('Arial', 10, 'bold'))
         adx_vol_frame.pack(fill='x', padx=10, pady=5)
         
@@ -4436,12 +4463,15 @@ class App:
                         # 진입 시간 기록
                         coin['entry_time'] = time.time()
                         
-                        # 🔥 동적 TP 계산 (강제 진입도 동적 TP 사용)
+                        # 🔥 동적 TP 계산 (강제 진입도 동적 TP 사용, ADX는 1시간봉!)
                         try:
-                            df_full = self.api.get_klines(coin['symbol'], coin['timeframe'], limit=100)
+                            adx_interval = coin.get('adx_interval', '1h')
+                            df_full = self.api.get_klines(coin['symbol'], adx_interval, limit=100)
+                            if df_full is None or len(df_full) < 50:
+                                df_full = self.api.get_klines(coin['symbol'], coin['timeframe'], limit=100)
                             if df_full is not None and len(df_full) >= 50:
                                 adx_period = coin.get('adx_period', 10)
-                                adx_value = Indicators.calculate_adx(df_full, period=adx_period)
+                                adx_value = Indicators.calculate_adx(df_full[:-1], period=adx_period)
                                 
                                 if adx_value >= 21:
                                     dynamic_tp = coin.get('tp_trend', 1.2)  # ✅ 1.2%
@@ -4793,12 +4823,22 @@ class App:
                     except:
                         return
                 
-                # 🔥 ADX 막대바 업데이트
+                # 🔥 ADX 막대바 업데이트 (1시간봉 기준, 60초 캐시 - 봇과 공유)
                 if 'adx_canvas' in coin:
                     try:
-                        # ADX 계산 (완성된 봉 기준)
                         adx_period = coin.get('adx_period', 10)
-                        adx_value = Indicators.calculate_adx(df_closed, period=adx_period)
+                        adx_interval = coin.get('adx_interval', '1h')
+                        _cache = coin.get('_adx_htf_cache')
+                        if _cache and (time.time() - _cache[1]) < 60:
+                            adx_value = _cache[0]
+                        else:
+                            df_adx = df_closed
+                            if adx_interval and adx_interval != coin.get('timeframe'):
+                                df_h = self.api.get_klines(coin['symbol'], adx_interval)
+                                if df_h is not None and len(df_h) > adx_period + 5:
+                                    df_adx = df_h[:-1]
+                            adx_value = Indicators.calculate_adx(df_adx, period=adx_period)
+                            coin['_adx_htf_cache'] = (adx_value, time.time())
                         
                         # 시장 타입 결정
                         if adx_value >= 21:
