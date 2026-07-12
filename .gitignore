@@ -8,3 +8,9 @@ bot_stats.json
 bot_running.json
 trade_history.xlsx
 trade_backup_*.csv
+
+# 도매꾹 크롤러 생성 파일 (커밋 금지)
+dmg_settings.json
+dmg_history.json
+도매꾹_수집결과_*.xlsx
+도매꾹_수집결과_*.csv

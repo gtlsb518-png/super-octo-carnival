@@ -41,3 +41,25 @@ tkinter가 없는 리눅스에서는 `sudo apt-get install python3-tk`로 설치
 - **손절/스위칭**: 고정 손절 없음 — 보유 중 역신호(UT+EMA) 발생 시 청산 후 즉시 반대 방향 진입 (AUTO 스위칭이 유일한 손절 수단)
 - 차트 데이터는 항상 메인넷 시세, 주문은 테스트넷/메인넷 선택
 - 거래 기록은 `trade_history.xlsx`(코인별 시트), 통계는 `bot_stats.json`에 저장
+
+---
+
+# 도매꾹 제품 자동 크롤러 (별도 프로그램)
+
+`domeggook_crawler.py` — 도매꾹(domeggook.com) 상품 검색 결과를 자동 수집하는 독립 실행형 프로그램.
+
+## 실행 방법
+
+```bash
+python domeggook_crawler.py              # GUI 실행
+python domeggook_crawler.py 양말 -p 3    # CLI: '양말' 1~3페이지 수집 후 엑셀 저장
+python domeggook_crawler.py 양말 -i 30   # 30분마다 자동 반복 수집
+```
+
+## 기능
+
+- 키워드별 상품 수집: 상품번호 / 상품명 / 가격 / 최소구매수량 / URL / 이미지
+- 자동(주기) 크롤링: N분마다 재수집하여 **신규 상품 · 가격 변동** 자동 감지
+- 결과는 `도매꾹_수집결과_날짜.xlsx`로 저장, 수집 이력은 `dmg_history.json`에 누적
+- 수집 방식: 웹 크롤링(기본) 또는 [도매꾹 오픈API](https://openapi.domeggook.com) 키 입력 시 API 모드(권장, 더 안정적)
+- 요청 간 딜레이 기본 2초 — 서버에 부담을 주지 않도록 과도한 페이지 수/짧은 주기 사용은 피하세요
