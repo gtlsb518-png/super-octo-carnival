@@ -8,3 +8,7 @@ bot_stats.json
 bot_running.json
 trade_history.xlsx
 trade_backup_*.csv
+
+# 네이버 자동 업로드 프로그램 - 로그인 세션/작성한 엑셀 (커밋 금지)
+naver_uploader/chrome_profile/
+naver_uploader/*.xlsx
