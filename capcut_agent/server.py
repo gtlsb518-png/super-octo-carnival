@@ -167,7 +167,10 @@ def transcribe(video_path: Path, script_text: str = "") -> list[dict]:
         beam_size=5,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 300},
-        word_timestamps=True,  # 단어별 발화 시각 → 클립별 자막 배분에 사용
+        word_timestamps=True,          # 단어별 발화 시각 → 클립별 자막 배분에 사용
+        condition_on_previous_text=False,  # 직전 문장 반복(할루시네이션 루프) 방지
+        no_repeat_ngram_size=3,        # 같은 3-gram 반복 금지
+        repetition_penalty=1.2,        # 반복 토큰에 페널티
         **kwargs,
     )
     return [{
@@ -198,50 +201,72 @@ def make_srt(chunks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def correct_subtitles_with_script(segments: list[dict], script_text: str) -> list[dict]:
+def _norm_token(s: str) -> str:
+    """정렬 비교용 정규화: 한글/영숫자만 남기고 소문자화 (문장부호·공백 제거)."""
+    return re.sub(r"[^0-9a-z가-힣]", "", s.lower())
+
+
+def _interpolate_starts(items: list[dict]) -> None:
+    """items의 start=None 항목을 앞뒤 앵커 사이 선형 보간으로 채움 (in-place)."""
+    n = len(items)
+    known = [i for i, o in enumerate(items) if o["start"] is not None]
+    if not known:
+        for i, o in enumerate(items):
+            o["start"] = i * 0.001
+        return
+    first, last = known[0], known[-1]
+    for i in range(first):
+        items[i]["start"] = items[first]["start"]
+    for i in range(last + 1, n):
+        items[i]["start"] = items[last]["start"]
+    for a, b in zip(known, known[1:]):
+        if b - a > 1:
+            t0, t1 = items[a]["start"], items[b]["start"]
+            for k in range(1, b - a):
+                items[a + k]["start"] = t0 + (t1 - t0) * k / (b - a)
+
+
+def align_script_to_word_stream(whisper_stream: list[dict], script_text: str) -> list[dict]:
     """
-    Whisper 인식 결과를 대본과 대조해서 텍스트를 보정.
-    - 대본과 발화 순서가 같다고 가정하고, 커서를 앞으로 이동시키며
-      각 세그먼트와 가장 비슷한 대본 구간(단어 윈도우)을 찾는다.
-    - 유사도가 충분히 높으면 대본 텍스트로 교체 (오탈자/띄어쓰기 교정).
-    - 유사도가 낮으면 (애드립 등 대본에 없는 발화) Whisper 결과 유지.
-    타임스탬프는 Whisper 것을 그대로 사용한다.
+    대본을 '정답 텍스트'로, Whisper 단어 시각을 '타이밍'으로 사용해 정렬된 단어 스트림 생성.
+    - 대본 단어 순서를 Whisper 단어 순서에 정렬 (difflib)
+    - 정확히 일치: 대본 단어 + 해당 Whisper 단어 시각
+    - 불일치(오인식): 대본 단어로 교체 + 겹치는 Whisper 단어 시각
+    - 대본에만 있음(Whisper 놓침): 대본 단어 + 앞뒤 보간 시각
+    - Whisper에만 있음(반복 인식/오인식/애드립): 대본에 없으므로 제거
+    → 오탈자·고유명사 교정 + 반복 자동 제거 + 대본 순서·내용 그대로.
+    반환: [{"time", "start", "word"(=대본 단어)}, ...] 시간순
     """
     import difflib
 
-    script_words = script_text.split()
-    n_script = len(script_words)
-    if n_script == 0 or not segments:
-        return segments
+    sw = script_text.split()
+    if not sw or not whisper_stream:
+        return whisper_stream
 
-    corrected = []
-    cursor = 0  # 대본 단어 커서 (발화 순서 추적)
+    a = [_norm_token(w["word"]) for w in whisper_stream]
+    b = [_norm_token(w) for w in sw]
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
 
-    for seg in segments:
-        seg_text = seg["text"].strip()
-        seg_compact = seg_text.replace(" ", "")
-        n_words = max(1, len(seg_text.split()))
+    out: list[dict] = []  # {"start": float|None, "word": 대본 단어}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for k in range(j2 - j1):
+                out.append({"start": whisper_stream[i1 + k]["start"], "word": sw[j1 + k]})
+        elif tag == "replace":
+            m, nsub = i2 - i1, j2 - j1
+            for k in range(nsub):
+                wi = min(i1 + (k * m // nsub if nsub else 0), i2 - 1)
+                out.append({"start": whisper_stream[wi]["start"], "word": sw[j1 + k]})
+        elif tag == "insert":  # 대본에만 있는 단어 → 시각 미정 (보간)
+            for k in range(j2 - j1):
+                out.append({"start": None, "word": sw[j1 + k]})
+        # delete: Whisper에만 있는 단어(반복/오인식/애드립) → 버림
 
-        best_ratio, best_start, best_len = 0.0, -1, 0
-        # 커서 주변에서 탐색 (뒤로 10단어, 앞으로 40단어 허용)
-        search_from = max(0, cursor - 10)
-        search_to   = min(n_script, cursor + 40)
-        for start in range(search_from, search_to):
-            for wlen in range(max(1, n_words - 4), min(n_script - start, n_words + 5) + 1):
-                cand = "".join(script_words[start:start + wlen])
-                ratio = difflib.SequenceMatcher(None, seg_compact, cand).ratio()
-                if ratio > best_ratio:
-                    best_ratio, best_start, best_len = ratio, start, wlen
-
-        if best_ratio >= 0.55 and best_start >= 0:
-            # 텍스트가 교체되면 단어별 타임스탬프는 더 이상 유효하지 않음 →
-            # words를 비워서 이후 단계가 세그먼트 구간에 균등 배분하게 한다
-            corrected.append({**seg, "text": " ".join(script_words[best_start:best_start + best_len]), "words": []})
-            cursor = best_start + best_len
-        else:
-            corrected.append(seg)
-
-    return corrected
+    _interpolate_starts(out)
+    stream = [{"time": o["start"], "start": o["start"], "word": o["word"]}
+              for o in out if o["start"] is not None]
+    stream.sort(key=lambda x: x["start"])
+    return stream
 
 
 def build_word_stream(segments: list[dict]) -> list[dict]:
@@ -270,7 +295,7 @@ def build_word_stream(segments: list[dict]) -> list[dict]:
     return stream
 
 
-def words_for_clips(segments: list[dict],
+def words_for_clips(stream: list[dict],
                     keep_ranges: list[tuple[float, float, int, int]]) -> dict[int, list[dict]]:
     """
     단어 스트림을 각 keep 구간(영상 클립)에 배분.
@@ -281,7 +306,6 @@ def words_for_clips(segments: list[dict],
     """
     if not keep_ranges:
         return {}
-    stream = build_word_stream(segments)
     clip_words: dict[int, list[dict]] = {i: [] for i in range(len(keep_ranges))}
 
     for w in stream:
@@ -345,9 +369,12 @@ def chunk_word_groups(words: list[dict], max_chars: int, tolerance: int = 3) -> 
 
 def subtitle_chunks_for_timeline(segments: list[dict],
                                  keep_ranges: list[tuple[float, float, int, int]],
-                                 max_chars: int = MAX_SUBTITLE_CHARS) -> list[dict]:
+                                 max_chars: int = MAX_SUBTITLE_CHARS,
+                                 script_text: str = "") -> list[dict]:
     """
     최종 자막 클립 목록 생성 (draft 텍스트 트랙 + SRT 공용).
+    - script_text가 있으면 대본을 정답 텍스트로 삼아 정렬 (오탈자 교정 + 반복 제거),
+      없으면 Whisper 인식 결과를 그대로 사용
     - 각 영상 클립 위에 그 클립에서 발화된 텍스트를 얹음
     - max_chars(±3자) 초과 시 단어 경계에서 균형 분할해 여러 자막 클립으로
     - 조각의 시간 경계 = 조각 첫 단어의 실제 발화 시각 (타임라인으로 매핑)
@@ -357,7 +384,10 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
     MIN_STEP_US = 66_667  # 최소 2프레임 간격 (조각 시각이 겹치지 않게)
-    clip_words = words_for_clips(segments, keep_ranges)
+    stream = build_word_stream(segments)
+    if script_text.strip():
+        stream = align_script_to_word_stream(stream, script_text)
+    clip_words = words_for_clips(stream, keep_ranges)
     out = []
     for i, (ks, _ke, tl_s, tl_e) in enumerate(keep_ranges):
         words = clip_words.get(i)
@@ -592,12 +622,14 @@ def build_draft(
     subtitles: list[dict] | None = None,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
+    script_text: str = "",
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
                    발화가 있는 모든 영상 클립 위에 자막 클립을 텍스트 트랙으로 삽입한다.
     ratio:         "9:16" (숏츠 1080x1920, 기본) 또는 "16:9" (가로 1920x1080)
     max_sub_chars: 자막 한 조각 최대 글자 수 (±3자 허용)
+    script_text:   대본. 있으면 정답 텍스트로 정렬해 오탈자 교정 + 반복 제거
     """
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
     src_width, src_height = get_video_resolution(video_path)
@@ -669,7 +701,7 @@ def build_draft(
     text_materials = []
     text_segments = []
     if subtitles:
-        sub_chunks = subtitle_chunks_for_timeline(subtitles, keep_ranges, max_sub_chars)
+        sub_chunks = subtitle_chunks_for_timeline(subtitles, keep_ranges, max_sub_chars, script_text)
         for idx, chunk in enumerate(sub_chunks):
             text_mat_id = str(uuid.uuid4()).upper()
             text_seg_id = str(uuid.uuid4()).upper()
@@ -946,9 +978,8 @@ async def process_video(
                     loop = asyncio.get_event_loop()
                     raw_subs = await loop.run_in_executor(None, transcribe, video, script_text)
                 if script_text:
-                    yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 대조 보정 중...'})}\n\n"
-                    raw_subs = correct_subtitles_with_script(raw_subs, script_text)
-                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars)
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 정렬 보정 중... (오탈자 교정 + 반복 제거)'})}\n\n"
+                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars, script_text)
                 subtitle_count = len(sub_chunks)
                 srt_content = make_srt(sub_chunks)
                 srt_path = OUTPUT_DIR / f"{video.stem}.srt"
@@ -958,7 +989,7 @@ async def process_video(
 
             yield f"data: {json.dumps({'step': 'draft', 'msg': f'CapCut draft 생성 중... ({ratio})'})}\n\n"
             name = video.stem
-            draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio, max_sub_chars)
+            draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio, max_sub_chars, script_text)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count})}\n\n"
 
