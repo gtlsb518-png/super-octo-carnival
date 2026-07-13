@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -917,16 +917,23 @@ async def index():
 
 @app.post("/api/process")
 async def process_video(
+    request: Request,
     video_path: str,
     noise_db: float = -40.0,
     min_silence: float = 0.5,
     use_subtitle: bool = False,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
-    payload: dict | None = Body(None),
 ):
     # 대본은 길이 제한 없는 POST body(JSON)로 받는다: {"script": "..."}
-    script_text = ((payload or {}).get("script") or "").strip()
+    # FastAPI Body 파싱 대신 raw body를 직접 읽어 파싱 문제를 원천 차단
+    script_text = ""
+    try:
+        raw = await request.body()
+        if raw:
+            script_text = (json.loads(raw.decode("utf-8")).get("script") or "").strip()
+    except Exception:
+        script_text = ""
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
@@ -955,7 +962,15 @@ async def process_video(
                     loop = asyncio.get_event_loop()
                     raw_subs = await loop.run_in_executor(None, transcribe, video, script_text)
                 if script_text:
-                    yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 정렬 보정 중... (오탈자 교정 + 반복 제거)'})}\n\n"
+                    # 진단: 대본이 실제로 수신됐는지 + 철자 교정이 몇 개 걸리는지 표시
+                    _sw = script_text.split()
+                    _sn = [_norm_token(w) for w in _sw]
+                    _all = build_word_stream(raw_subs)
+                    _corr = spell_correct_words(_all, _sw, _sn)
+                    _nfix = sum(1 for a, b in zip(_all, _corr) if a["word"] != b["word"])
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 {len(script_text)}자 수신 → 철자 교정 {_nfix}개 적용'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 없음 → Whisper 인식 그대로 사용'})}\n\n"
                 sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars, script_text)
                 subtitle_count = len(sub_chunks)
                 srt_content = make_srt(sub_chunks)
