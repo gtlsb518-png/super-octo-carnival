@@ -80,6 +80,50 @@ RESAMPLE_RULE = {'1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min',
                  '30m': '30min', '1h': '1h', '2h': '2h', '4h': '4h'}
 
 
+# ==================== 쓰기 가능한 작업 폴더 찾기 ====================
+_WORKDIR = None
+
+
+def get_workdir(log=print):
+    """결과/캐시를 저장할 쓰기 가능한 폴더를 찾는다.
+
+    실행 폴더가 보호되어 있으면(WinError 5 등) 홈/문서/임시 폴더 순으로
+    폴백. 모두 실패하면 None (캐시·저장 생략).
+    """
+    global _WORKDIR
+    if _WORKDIR is not None:
+        return _WORKDIR
+
+    candidates = []
+    try:
+        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    except Exception:
+        pass
+    candidates.append(os.getcwd())
+    home = os.path.expanduser('~')
+    candidates.append(os.path.join(home, 'Documents', '바이낸스백테스트'))
+    candidates.append(os.path.join(home, '바이낸스백테스트'))
+    import tempfile
+    candidates.append(os.path.join(tempfile.gettempdir(), '바이낸스백테스트'))
+
+    for base in candidates:
+        try:
+            os.makedirs(base, exist_ok=True)
+            testfile = os.path.join(base, '.write_test')
+            with open(testfile, 'w') as f:
+                f.write('ok')
+            os.remove(testfile)
+            _WORKDIR = base
+            log(f"💾 저장 폴더: {base}")
+            return base
+        except Exception:
+            continue
+
+    log("⚠️ 쓰기 가능한 폴더를 못 찾음 — 결과는 화면에만 표시(파일 저장 생략)")
+    _WORKDIR = ''  # 빈 문자열 = 저장 불가 표시 (재탐색 방지)
+    return ''
+
+
 # ==================== 데이터 ====================
 def fetch_symbols(log=print):
     """바이낸스 USDT 선물 무기한 전체 심볼"""
@@ -99,10 +143,19 @@ def fetch_symbols(log=print):
         return list(FALLBACK_SYMBOLS)
 
 
-def fetch_klines(symbol, days, interval='5m', cache_dir='backtest_data', log=print):
-    os.makedirs(cache_dir, exist_ok=True)
-    cache = os.path.join(cache_dir, f"{symbol}_{interval}_{days}d.csv")
-    if os.path.exists(cache):
+def fetch_klines(symbol, days, interval='5m', cache_dir=None, log=print):
+    # 🔥 쓰기 가능한 폴더 안에 캐시 저장 (권한 오류 방지)
+    base = get_workdir(log)
+    cache = None
+    if base:
+        cache_dir = os.path.join(base, 'backtest_data')
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            cache = os.path.join(cache_dir, f"{symbol}_{interval}_{days}d.csv")
+        except Exception as e:
+            log(f"  ⚠️ 캐시 폴더 생성 실패({e}) — 캐시 없이 진행")
+            cache = None
+    if cache and os.path.exists(cache):
         df = pd.read_csv(cache, index_col=0, parse_dates=True)
         log(f"  📂 캐시 사용: {symbol} ({len(df):,}봉)")
         return df
@@ -149,8 +202,14 @@ def fetch_klines(symbol, days, interval='5m', cache_dir='backtest_data', log=pri
     df['ts'] = pd.to_datetime(df['ts'], unit='ms')
     df = df.set_index('ts')
     df = df[~df.index.duplicated(keep='first')].sort_index()
-    df.to_csv(cache)
-    log(f"  💾 {symbol}: {len(df):,}봉 다운로드 완료 (캐시 저장)")
+    if cache:
+        try:
+            df.to_csv(cache)
+            log(f"  💾 {symbol}: {len(df):,}봉 다운로드 완료 (캐시 저장)")
+        except Exception as e:
+            log(f"  ⚠️ {symbol}: {len(df):,}봉 다운로드 완료 (캐시 저장 실패: {e})")
+    else:
+        log(f"  ✅ {symbol}: {len(df):,}봉 다운로드 완료")
     return df
 
 
@@ -397,6 +456,20 @@ def run_all(symbols, p, compare, log=print, on_row=None):
     log(f"   설정 {len(configs)}종: {', '.join(c['name'] for c in configs)}")
     log("=" * 50)
 
+    base = get_workdir(log)
+
+    def save_csv(df_out, filename):
+        """쓰기 가능하면 저장, 아니면 조용히 생략 (경로 반환/None)"""
+        if not base:
+            return None
+        try:
+            path = os.path.join(base, filename)
+            df_out.to_csv(path, index=False, encoding='utf-8-sig')
+            return path
+        except Exception as e:
+            log(f"  ⚠️ 저장 실패({filename}): {e}")
+            return None
+
     summaries = []
     for k, sym in enumerate(symbols, 1):
         log(f"\n[{k}/{len(symbols)}] {sym} 데이터 준비...")
@@ -418,14 +491,16 @@ def run_all(symbols, p, compare, log=print, on_row=None):
                 log(f"  ▶ [{cfg['name']}] {row['거래수']}회 | 승률 {row['승률%']}% "
                     f"| 순손익 {row['순손익']:+,.2f} | 수수료 -{row['수수료']:,.2f}")
                 safe = cfg['name'].replace('/', '-')
-                trades.to_csv(f"backtest_trades_{sym}_{safe}.csv",
-                              index=False, encoding='utf-8-sig')
+                save_csv(trades, f"backtest_trades_{sym}_{safe}.csv")
 
     if summaries:
         result = pd.DataFrame(summaries)
-        result.to_csv('backtest_result.csv', index=False, encoding='utf-8-sig')
+        saved = save_csv(result, 'backtest_result.csv')
         log("\n" + "=" * 50)
-        log("📊 완료! 요약: backtest_result.csv 저장됨")
+        if saved:
+            log(f"📊 완료! 요약 저장됨:\n   {saved}")
+        else:
+            log("📊 완료! (파일 저장은 생략 — 아래 결과 참고)")
         for name, grp in result.groupby('설정', sort=False):
             log(f"   {name:20s}: 합산 순손익 {grp['순손익'].sum():+10,.2f} USDT"
                 f" (수수료 -{grp['수수료'].sum():,.2f})")
@@ -587,7 +662,7 @@ def launch_gui():
     right = tk.Frame(root, bg=BG)
     right.pack(side='left', fill='both', expand=True, pady=8, padx=(0, 8))
 
-    tk.Label(right, text="📊 결과 (backtest_result.csv 자동 저장)", bg=BG, fg=ACCENT,
+    tk.Label(right, text="📊 결과 (CSV 자동 저장 — 로그에 저장 위치 표시)", bg=BG, fg=ACCENT,
              font=('Arial', 12, 'bold')).pack(anchor='w')
 
     cols = ['심볼', '설정', '거래수', '승률%', 'TP익절', '스위칭', '조기청산',
