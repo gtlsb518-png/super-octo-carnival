@@ -433,14 +433,34 @@ def summarize(trades, symbol, cfg_name, max_dd, p):
 
 
 def make_configs(p, compare):
-    """실행할 설정 목록. compare=True면 4종 비교"""
-    base_name = f"EMA{int(p['ema_fast'])}-{int(p['ema_slow'])}"
-    if p.get('hybrid'):
-        base_name += "+하이브리드"
-    if not compare:
+    """실행할 설정 목록.
+
+    compare: 'off'  → 현재 설정 1종
+             'vs'   → 설정값 vs 하이브리드 (2종)  ← 기본 추천
+             'full' → EMA 4종 비교
+    (하위호환: True=='full', False=='off')
+    """
+    if compare is True:
+        compare = 'full'
+    elif compare is False:
+        compare = 'off'
+
+    setval_name = f"EMA{int(p['ema_fast'])}-{int(p['ema_slow'])}(설정값)"
+
+    if compare == 'off':
+        base_name = f"EMA{int(p['ema_fast'])}-{int(p['ema_slow'])}"
+        if p.get('hybrid'):
+            base_name += "+하이브리드"
         return [dict(p, name=base_name)]
+
+    if compare == 'vs':
+        return [
+            dict(p, name=setval_name, hybrid=False),
+            dict(p, name='하이브리드', hybrid=True),
+        ]
+
     return [
-        dict(p, name=f"EMA{int(p['ema_fast'])}-{int(p['ema_slow'])}(설정값)", hybrid=False),
+        dict(p, name=setval_name, hybrid=False),
         dict(p, name='EMA12-26', ema_fast=12, ema_slow=26, hybrid=False),
         dict(p, name='EMA9-21', ema_fast=9, ema_slow=21, hybrid=False),
         dict(p, name='하이브리드', hybrid=True),
@@ -501,10 +521,38 @@ def run_all(symbols, p, compare, log=print, on_row=None):
             log(f"📊 완료! 요약 저장됨:\n   {saved}")
         else:
             log("📊 완료! (파일 저장은 생략 — 아래 결과 참고)")
+
+        # 🏆 설정별 합산 순손익 집계 → 승자 추천
+        agg = []
         for name, grp in result.groupby('설정', sort=False):
-            log(f"   {name:20s}: 합산 순손익 {grp['순손익'].sum():+10,.2f} USDT"
-                f" (수수료 -{grp['수수료'].sum():,.2f})")
+            net = grp['순손익'].sum()
+            fee = grp['수수료'].sum()
+            trades = grp['거래수'].sum()
+            wr = (grp['승률%'] * grp['거래수']).sum() / trades if trades else 0
+            dd = grp['최대낙폭'].min()
+            agg.append({'설정': name, '순손익': net, '수수료': fee,
+                        '승률': wr, '낙폭': dd})
+            log(f"   {name:20s}: 순손익 {net:+10,.2f} | 승률 {wr:4.1f}%"
+                f" | 최대낙폭 {dd:+.2f} | 수수료 -{fee:,.2f}")
         log("=" * 50)
+
+        agg.sort(key=lambda x: x['순손익'], reverse=True)
+        best = agg[0]
+        if best['순손익'] <= 0:
+            log(f"\n⚠️ 추천 보류: 1위 [{best['설정']}]도 순손익 {best['순손익']:+,.2f} "
+                f"— 이 기간엔 모든 설정이 손실입니다.")
+        else:
+            log(f"\n🏆 추천: [{best['설정']}]  순손익 {best['순손익']:+,.2f} USDT"
+                f" (승률 {best['승률']:.1f}%, 최대낙폭 {best['낙폭']:+.2f})")
+            if len(agg) > 1:
+                second = agg[1]
+                gap = best['순손익'] - second['순손익']
+                base = abs(second['순손익']) or 1
+                log(f"   2위 [{second['설정']}] 대비 {gap:+,.2f} USDT"
+                    f" ({gap / base * 100:+.1f}%) 우위")
+                if gap / base < 0.1:
+                    log("   ⚠️ 1·2위 차이가 10% 미만 — 우열 크지 않음(우연일 수 있음). "
+                        "여러 코인·기간으로 재확인 권장.")
     else:
         log("\n⚠️ 결과 없음")
     return summaries
@@ -584,11 +632,18 @@ def launch_gui():
         vars_[key] = v
 
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
-    compare_var = tk.BooleanVar(value=False)
-    tk.Checkbutton(left, text="EMA 4종 비교 모드", variable=compare_var,
-                   bg=PANEL, fg='#00ffff', selectcolor=BG, font=('Arial', 10, 'bold'),
-                   activebackground=PANEL).pack(anchor='w', padx=10)
-    tk.Label(left, text="(설정값 / 12,26 / 9,21 / 하이브리드)", bg=PANEL,
+    tk.Label(left, text="🔬 비교 모드", bg=PANEL, fg='#00ffff',
+             font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
+    COMPARE_OPTS = {
+        '설정값 vs 하이브리드': 'vs',
+        'EMA 4종 비교': 'full',
+        '단일 (현재 설정만)': 'off',
+    }
+    compare_label_var = tk.StringVar(value='설정값 vs 하이브리드')
+    ttk.Combobox(left, textvariable=compare_label_var,
+                 values=list(COMPARE_OPTS.keys()), width=20,
+                 state='readonly').pack(anchor='w', padx=26, pady=2)
+    tk.Label(left, text="→ 끝나면 수익 1위를 자동 추천", bg=PANEL,
              fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=26)
 
     run_btn = tk.Button(left, text="▶️ 백테스트 시작", bg='#0066cc', fg='#ffffff',
@@ -761,9 +816,11 @@ def launch_gui():
         running[0] = True
         run_btn.config(state='disabled', text="⏳ 실행 중...")
 
+        compare_mode = COMPARE_OPTS.get(compare_label_var.get(), 'vs')
+
         def work():
             try:
-                run_all(sel, p, compare_var.get(), log=gui_log,
+                run_all(sel, p, compare_mode, log=gui_log,
                         on_row=lambda row: log_q.put(('row', row)))
             except Exception as e:
                 gui_log(f"❌ 오류: {e}")
@@ -800,7 +857,8 @@ def run_cli():
     ap.add_argument('--adx-interval', default=DEFAULTS['adx_interval'],
                     help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
-    ap.add_argument('--compare', action='store_true')
+    ap.add_argument('--compare', default='vs', choices=['off', 'vs', 'full'],
+                    help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종")
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
     args = ap.parse_args()
 
