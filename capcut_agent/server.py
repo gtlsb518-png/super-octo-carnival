@@ -258,13 +258,14 @@ def build_word_stream(segments: list[dict]) -> list[dict]:
         text_words = text.split()
         if words and len(words) == len(text_words):
             for w, tw in zip(words, text_words):
-                stream.append({"time": (w["start"] + w["end"]) / 2, "start": w["start"], "word": tw})
+                stream.append({"time": (w["start"] + w["end"]) / 2, "start": w["start"], "end": w["end"], "word": tw})
         else:
             n = len(text_words)
             seg_dur = max(seg["end"] - seg["start"], 0.01)
             for wi, tw in enumerate(text_words):
                 ws = seg["start"] + seg_dur * wi / n
-                stream.append({"time": ws + seg_dur / (2 * n), "start": ws, "word": tw})
+                we = seg["start"] + seg_dur * (wi + 1) / n
+                stream.append({"time": (ws + we) / 2, "start": ws, "end": we, "word": tw})
     stream.sort(key=lambda x: x["time"])
     return stream
 
@@ -273,9 +274,10 @@ def words_for_clips(stream: list[dict],
                     keep_ranges: list[tuple[float, float, int, int]]) -> dict[int, list[dict]]:
     """
     단어 스트림을 각 keep 구간(영상 클립)에 배분.
-    - 클립 시간 안에서 발화된 단어는 그 클립으로
-    - 잘려나간 무음 구간에 걸친 단어는 앞/뒤 중 더 가까운 클립으로
-    → 발화가 있는 모든 클립 위에 자막이 올라간다.
+    - 각 단어의 발화 구간 [start, end]와 '가장 많이 겹치는' 클립에 배정
+      → 클립 경계 근처에서 타임스탬프가 조금 흔들려도 올바른 클립에 붙는다
+    - 어느 클립과도 안 겹치면(잘린 무음 안) 발화 중간점 기준 가장 가까운 클립으로
+    → 발화가 있는 모든 클립 위에, 그 클립에서 실제 발화된 단어가 올라간다.
     반환: {클립 인덱스: [단어 dict, ...]} (발화 시각 포함)
     """
     if not keep_ranges:
@@ -283,25 +285,31 @@ def words_for_clips(stream: list[dict],
     clip_words: dict[int, list[dict]] = {i: [] for i in range(len(keep_ranges))}
 
     for w in stream:
-        t = w["time"]
-        target = None
-        for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
-            if t < ks:
-                # 잘린 구간(무음) 안 → 앞 클립 끝과 뒤 클립 시작 중 가까운 쪽
-                if i == 0:
-                    target = 0
-                else:
-                    prev_end = keep_ranges[i - 1][1]
-                    target = i - 1 if (t - prev_end) < (ks - t) else i
-                break
-            if t <= ke:
-                target = i
-                break
-        if target is None:
-            target = len(keep_ranges) - 1
-        clip_words[target].append(w)
+        ws = w["start"]
+        we = w.get("end", w["start"])
+        if we < ws:
+            we = ws
 
-    return {i: ws for i, ws in clip_words.items() if ws}
+        # 1) 겹침이 가장 큰 클립 찾기
+        best_i, best_ov = None, 0.0
+        for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+            ov = min(we, ke) - max(ws, ks)
+            if ov > best_ov:
+                best_ov, best_i = ov, i
+
+        if best_i is None:
+            # 2) 겹침 없음(무음 안) → 중간점 기준 가장 가까운 클립
+            t = w["time"]
+            best_i, best_dist = 0, float("inf")
+            for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+                dist = 0.0 if ks <= t <= ke else min(abs(t - ks), abs(t - ke))
+                if dist < best_dist:
+                    best_dist, best_i = dist, i
+
+        clip_words[best_i].append(w)
+
+    # 각 클립 내 단어는 발화 시각 순으로 정렬
+    return {i: sorted(ws, key=lambda x: x["start"]) for i, ws in clip_words.items() if ws}
 
 
 def chunk_word_groups(words: list[dict], max_chars: int, tolerance: int = 3) -> list[list[dict]]:
