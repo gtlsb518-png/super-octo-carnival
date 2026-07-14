@@ -566,9 +566,12 @@ def launch_gui():
     BG, PANEL, FG, ACCENT = '#1e1e1e', '#2d2d2d', '#ffffff', '#00ff88'
 
     root = tk.Tk()
-    root.title("📊 바이낸스 선물 백테스터")
-    root.geometry("1150x760")
+    root.title("📊 바이낸스 선물 백테스터 (메인넷 실제 데이터)")
+    root.geometry("1150x780")
     root.configure(bg=BG)
+
+    tk.Label(root, text="🌐 데이터 출처: 바이낸스 선물 메인넷 실제 시세 (fapi.binance.com)",
+             bg='#0a3d2e', fg='#00ff88', font=('Arial', 9, 'bold')).pack(fill='x')
 
     log_q = queue.Queue()
     running = [False]
@@ -782,15 +785,33 @@ def launch_gui():
 
     # ---------- 실행 ----------
     def read_params():
+        """빈칸/공백/쉼표 등 관대하게 처리 — 이상하면 기본값으로 대체(안 죽음)"""
         p = dict(DEFAULTS)
         int_keys = {'leverage', 'adx_period', 'ut_atr', 'ema_fast', 'ema_slow',
                     'days', 'hybrid_fast', 'hybrid_slow'}
+        fixed = []
         for key, v in vars_.items():
-            raw = v.get().strip()
-            p[key] = int(float(raw)) if key in int_keys else float(raw)
+            raw = (v.get() or '').strip().replace(',', '')
+            if raw == '':
+                p[key] = DEFAULTS[key]
+                v.set(str(DEFAULTS[key]))
+                continue
+            try:
+                p[key] = int(round(float(raw))) if key in int_keys else float(raw)
+            except ValueError:
+                p[key] = DEFAULTS[key]
+                v.set(str(DEFAULTS[key]))
+                fixed.append(key)
+        # 상식 보정 (유연하게 — 막지 않고 조용히 정리)
+        p['leverage'] = max(1, min(125, p['leverage']))
+        p['days'] = max(1, p['days'])
+        if p['ema_fast'] >= p['ema_slow']:
+            fixed.append('ema_fast/slow')
         p['interval'] = interval_var.get()
         p['adx_interval'] = adx_interval_var.get()
         p['hybrid'] = hybrid_var.get()
+        if fixed:
+            gui_log(f"ℹ️ 잘못된 입력 자동 보정: {', '.join(fixed)}")
         return p
 
     def start():
@@ -873,13 +894,51 @@ def run_cli():
     run_all(symbols, p, args.compare)
 
 
+def _pause_exit(code=0):
+    """더블클릭 실행 시 창이 그냥 닫히지 않도록 대기 (원인 확인용)"""
+    try:
+        input("\n[엔터]를 누르면 종료합니다...")
+    except Exception:
+        pass
+    sys.exit(code)
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1:
-        run_cli()
+        # CLI 모드
+        try:
+            run_cli()
+        except KeyboardInterrupt:
+            print("\n중단됨.")
+        except Exception as e:
+            import traceback
+            print("\n❌ 오류 발생:")
+            traceback.print_exc()
+            print(f"\n요약: {e}")
     else:
+        # GUI 모드 — 어떤 오류에도 창이 조용히 닫히지 않게
         try:
             launch_gui()
         except ImportError:
-            print("⚠️ tkinter 없음 → CLI 모드로 실행합니다.")
-            print("   (GUI를 쓰려면: Linux는 sudo apt install python3-tk)")
-            run_cli()
+            print("=" * 55)
+            print("⚠️ 이 파이썬에 tkinter(GUI)가 없습니다.")
+            print("   Windows: python.org 정식 설치본을 쓰면 기본 포함")
+            print("   Linux:   sudo apt install python3-tk")
+            print("=" * 55)
+            print("→ 우선 CLI 모드로 실행합니다 (BTC/XRP/DOGE, 설정값 vs 하이브리드)\n")
+            try:
+                sys.argv = [sys.argv[0], '--compare', 'vs']
+                run_cli()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"\n요약: {e}")
+            _pause_exit(1)
+        except KeyboardInterrupt:
+            print("\n중단됨.")
+        except Exception as e:
+            import traceback
+            print("\n❌ 프로그램 오류 (아래 내용을 캡처해 문의하세요):")
+            traceback.print_exc()
+            print(f"\n요약: {e}")
+            _pause_exit(1)
