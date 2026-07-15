@@ -40,13 +40,25 @@ tkinter가 없는 리눅스에서는 `sudo apt-get install python3-tk`로 설치
 - `backtest_v2.py` — **대안 전략 실험실** (GUI/CLI, 독립 실행형): 돈치안 추세추종(ATR 손절 + 트레일링 + 리스크 사이징), BB+RSI 역추세(횡보장 전용), ADX 국면 라우터, 기존 UT+EMA 비교 모드. 결과에 전반부/후반부 분리 표시로 과최적화 점검 가능.
 - `bot_v2.py` — **국면 라우터 실전 봇** (GUI, 독립 실행형): ADX로 추세/횡보를 판정해 돈치안 돌파(추세) ↔ BB+RSI 역추세(횡보)를 자동 전환. 거래소 STOP_MARKET 손절, 리스크 사이징, 일일 손실 서킷브레이커, 상태 저장 내장.
 - `synth_backtest_v2.py` — 실데이터 없이 5개 인공 장세로 전략 강약을 비교하는 검증 스크립트 (결정론적/재현 가능).
+- `backtest_v3_rider.py` — **"승률보다 길게·크게" 추세 라이딩 전략(RIDER)** 백테스터. Supertrend(트레일링) + EMA200 기울기(상위 추세 필터) + ADX 상승 + MACD 합의 진입, 고정 익절 없이 추세 끝까지 보유. 피라미딩(수익 포지션에 추가 진입) 옵션. 승률 30~45%로 낮지만 손익비(평균익/평균손)를 크게 가져가는 구조.
 
 ```bash
 python backtest_v2.py        # 전략 백테스트 GUI
 python backtest_v2.py --cli  # 콘솔
 python bot_v2.py             # 국면 라우터 실전 봇 (테스트넷 권장)
 python synth_backtest_v2.py  # 합성 데이터 전략 비교
+python backtest_v3_rider.py --synth            # RIDER 전략 합성 비교
+python backtest_v3_rider.py --synth --pyramid  # 피라미딩 켜고 비교
+python backtest_v3_rider.py --cli --interval 4h  # RIDER 실데이터 백테스트
 ```
+
+### backtest_v3 RIDER 전략 (승률 ↓, 손익비 ↑ — "길게·크게")
+
+- **진입(합의)**: Supertrend 방향 + 종가가 EMA200 위 + EMA200 우상향 + ADX 상승 + MACD 히스토그램 방향 일치 → 롱 (하락은 반대). 조건이 까다로워 거래는 적지만 각 거래는 강한 추세.
+- **청산**: 고정 익절 없음. Supertrend 라인이 트레일링 스탑 → 추세 전환/이탈 시 청산. 이길 때 오래 보유.
+- **피라미딩(옵션)**: 수익이 +1 ATR씩 날 때마다 추가 진입(최대 3유닛). 큰 추세를 극대화.
+- **리스크**: 손절거리 기반 사이징으로 1회 손실을 자본 %로 고정. Supertrend 스탑이 넓어(≈3×ATR) 잔흔들림에 잘 안 털림.
+- **주의**: 승률이 24~45%로 낮고 연속 손실이 길 수 있음(심리적 감내 필요). 횡보/난조장에서는 상위 추세 필터가 손실을 줄여주지만 여전히 마이너스일 수 있음.
 
 ### bot_v2 전략 (1번 + 2번 결합)
 
