@@ -69,14 +69,9 @@ def now_us() -> int:
 
 FPS = 30.0
 
-# 자막 클립 사이 간격 (마이크로초). 0이면 자막이 다음 자막 시작까지 꽉 차서
-# 참고 SRT처럼 끊김 없이 이어진다. 클립 끝마다 빈 틈을 주고 싶으면 100_000(0.1초)로.
-SUBTITLE_GAP_US = 0
-
-# 자막 한 클립당 최대 글자 수 (기본값, UI에서 조절 가능).
-# 초과하면 단어 단위로 잘라서 같은 영상 클립 위에 여러 자막 클립으로 나눠 넣는다.
-# 참고 SRT(숏츠 스타일) 기준 조각당 7~12자가 읽기 좋다.
-MAX_SUBTITLE_CHARS = 12
+# 자막 한 조각의 목표 글자 수 (기본값, UI에서 조절 가능).
+# 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
+MAX_SUBTITLE_CHARS = 10
 
 def snap_to_frame(sec: float) -> float:
     """초 단위 시간을 가장 가까운 프레임 경계로 스냅 (30fps 기준)"""
@@ -270,82 +265,94 @@ def build_word_stream(segments: list[dict]) -> list[dict]:
     return stream
 
 
-def words_for_clips(stream: list[dict],
-                    keep_ranges: list[tuple[float, float, int, int]]) -> dict[int, list[dict]]:
+def map_words_to_timeline(stream: list[dict],
+                          keep_ranges: list[tuple[float, float, int, int]]) -> list[dict]:
     """
-    단어 스트림을 각 keep 구간(영상 클립)에 배분.
-    - 각 단어의 발화 구간 [start, end]와 '가장 많이 겹치는' 클립에 배정
-      → 클립 경계 근처에서 타임스탬프가 조금 흔들려도 올바른 클립에 붙는다
-    - 어느 클립과도 안 겹치면(잘린 무음 안) 발화 중간점 기준 가장 가까운 클립으로
-    → 발화가 있는 모든 클립 위에, 그 클립에서 실제 발화된 단어가 올라간다.
-    반환: {클립 인덱스: [단어 dict, ...]} (발화 시각 포함)
+    각 단어(원본 발화 시각)를 컷편집된 타임라인 시각(us)으로 매핑.
+    - 단어 [start,end]와 가장 많이 겹치는 클립을 골라, 그 클립 안 상대위치로 변환
+      → 무음 컷으로 시간이 당겨져도 자막이 실제 화면(발화)과 맞는다
+    - 겹치는 클립이 없으면(잘린 무음 안) 중간점 기준 가장 가까운 클립에 붙임
+    반환: [{"word", "tl_start"(us), "tl_end"(us)}, ...] tl_start 순 정렬
     """
     if not keep_ranges:
-        return {}
-    clip_words: dict[int, list[dict]] = {i: [] for i in range(len(keep_ranges))}
-
+        return []
+    mapped = []
     for w in stream:
         ws = w["start"]
-        we = w.get("end", w["start"])
+        we = w.get("end", ws)
         if we < ws:
             we = ws
-
-        # 1) 겹침이 가장 큰 클립 찾기
         best_i, best_ov = None, 0.0
-        for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+        for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
             ov = min(we, ke) - max(ws, ks)
             if ov > best_ov:
                 best_ov, best_i = ov, i
-
         if best_i is None:
-            # 2) 겹침 없음(무음 안) → 중간점 기준 가장 가까운 클립
             t = w["time"]
-            best_i, best_dist = 0, float("inf")
-            for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
-                dist = 0.0 if ks <= t <= ke else min(abs(t - ks), abs(t - ke))
-                if dist < best_dist:
-                    best_dist, best_i = dist, i
+            best_i, best_d = 0, float("inf")
+            for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+                d = 0.0 if ks <= t <= ke else min(abs(t - ks), abs(t - ke))
+                if d < best_d:
+                    best_d, best_i = d, i
+        ks, ke, tl_s, tl_e = keep_ranges[best_i]
+        cs = min(max(ws, ks), ke)  # 클립 범위로 클램프
+        ce = min(max(we, ks), ke)
+        s_us = tl_s + sec_to_us(cs - ks)
+        e_us = tl_s + sec_to_us(ce - ks)
+        mapped.append({"word": w["word"], "tl_start": s_us, "tl_end": max(e_us, s_us)})
+    mapped.sort(key=lambda x: x["tl_start"])
+    return mapped
 
-        clip_words[best_i].append(w)
 
-    # 각 클립 내 단어는 발화 시각 순으로 정렬
-    return {i: sorted(ws, key=lambda x: x["start"]) for i, ws in clip_words.items() if ws}
+def _ends_clause(word: str) -> bool:
+    """한국어 구절 끝(구두점)인지 — 여기서 끊으면 자연스럽다."""
+    return word[-1:] in ",.?!…\"”)"
 
 
-def chunk_word_groups(words: list[dict], max_chars: int, tolerance: int = 3) -> list[list[dict]]:
+def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
+                       gap_break_us: int = 700_000) -> list[list[dict]]:
     """
-    단어 리스트를 자막 조각(단어 그룹)으로 균형 분할.
-    각 조각의 텍스트 길이(공백 포함)가 max_chars ±tolerance 수준이 되도록
-    필요한 조각 수를 먼저 계산해 목표 길이로 나눈다 (짧은 꼬리 조각 방지).
+    연속된 단어열을 한국어 자막 조각으로 분할.
+    - 단어(어절) 경계에서만 끊음 → 한국어 어미로 자연스럽게 끝남
+    - 조각 길이 목표 max_chars, 최대 max_chars+tolerance
+    - 구두점(쉼표/마침표 등)으로 끝나면 조금 이르게 끊어 구절 유지
+    - 단어 사이 시간 간격이 gap_break_us 이상이면(말 사이 쉼) 무조건 끊음
+      → 시간상 멀리 떨어진 단어가 한 자막에 뭉치지 않음
+    - 너무 짧은 꼬리 조각은 직전 조각에 합침
     """
-    total = sum(len(w["word"]) for w in words) + max(0, len(words) - 1)
-    hard_max = max_chars + tolerance
-    if total <= hard_max:
-        return [words]
-
-    n_chunks = max(1, math.ceil(total / max_chars))
-    target = math.ceil(total / n_chunks)
-
+    hard = max_chars + tolerance
     groups: list[list[dict]] = []
-    current: list[dict] = []
-    cur_len = 0
-    for w in words:
-        add = len(w["word"]) + (1 if current else 0)
-        if current and cur_len + add > min(target + tolerance, hard_max):
-            groups.append(current)
-            current, cur_len = [w], len(w["word"])
+    cur: list[dict] = []
+    cl = 0
+    for wd in words:
+        # 직전 단어와 시간 간격이 크면 먼저 끊기
+        if cur and "tl_start" in wd and "tl_end" in cur[-1]:
+            if wd["tl_start"] - cur[-1]["tl_end"] >= gap_break_us:
+                groups.append(cur)
+                cur, cl = [], 0
+        wl = len(wd["word"])
+        add = wl + (1 if cur else 0)
+        if cur and cl + add > hard:
+            groups.append(cur)
+            cur, cl = [wd], wl
         else:
-            current.append(w)
-            cur_len += add
-            if cur_len >= target:
-                groups.append(current)
-                current, cur_len = [], 0
-    if current:
-        prev_len = (sum(len(x["word"]) for x in groups[-1]) + len(groups[-1]) - 1) if groups else 0
-        if groups and cur_len <= tolerance + 2 and prev_len + 1 + cur_len <= hard_max:
-            groups[-1].extend(current)  # 너무 짧은 꼬리는 직전 조각에 합침
-        else:
-            groups.append(current)
+            cur.append(wd)
+            cl += add
+        last = cur[-1]["word"]
+        if cl >= hard or cl >= max_chars or (_ends_clause(last) and cl >= max_chars - tolerance):
+            groups.append(cur)
+            cur, cl = [], 0
+    if cur:
+        if groups and cl <= tolerance + 2:
+            prev = groups[-1]
+            plen = sum(len(x["word"]) for x in prev) + len(prev) - 1
+            # 시간 간격이 크지 않을 때만 꼬리 합침
+            close = "tl_start" not in cur[0] or (cur[0]["tl_start"] - prev[-1].get("tl_end", cur[0]["tl_start"]) < gap_break_us)
+            if plen + 1 + cl <= hard and close:
+                groups[-1] = prev + cur
+                cur = []
+        if cur:
+            groups.append(cur)
     return groups
 
 
@@ -354,67 +361,52 @@ def subtitle_chunks_for_timeline(segments: list[dict],
                                  max_chars: int = MAX_SUBTITLE_CHARS,
                                  script_text: str = "") -> list[dict]:
     """
-    최종 자막 클립 목록 생성 (draft 텍스트 트랙 + SRT 공용).
-    영상 클립을 하나씩 돌면서, 그 클립에서 발화된 내용을 '그대로' 자막으로 얹는다.
-    - 중복되는 단어/내용이라도 그 클립 위에 그대로 넣는다 (건너뛰거나 합치지 않음)
-    - 발화가 있는 모든 클립이 자막을 받는다
-    - 조각 경계는 실제 단어 발화 시각을 사용 (참고 SRT 스타일)
-    - 대본(script_text)이 있으면 단어 '철자만' 대본으로 교정 (내용·개수·순서는 유지)
-    - 첫 조각은 클립 시작에 정렬, 마지막 조각 끝 = 클립 끝
-      (SUBTITLE_GAP_US=0이면 다음 자막까지 끊김 없이 이어짐)
+    최종 자막 목록 생성 (draft 텍스트 트랙 + SRT 공용).
+    참고 완성본처럼, 클립 경계와 무관하게 '말 전체'를 연속 자막으로 만든다.
+    - 발화된 모든 단어가 순서대로 자막에 들어감 (중복 단어·문장도 그대로, 누락 없음)
+    - 한국어 어절 경계에서 max_chars(±3) 길이로 끊음
+    - 각 조각 시각 = 그 조각 단어들의 실제 발화 시각(타임라인 매핑)
+    - 자막끼리는 끊김 없이 이어지되(작은 틈은 다음 자막까지 연장),
+      말이 없는 큰 공백(무발화 구간)은 자막 없이 비움
+    - 대본(script_text)이 있으면 단어 '철자만' 교정 (내용·개수·순서 유지)
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
-    MIN_STEP_US = 66_667  # 최소 2프레임 간격 (조각 시각이 겹치지 않게)
-    stream = build_word_stream(segments)
-    clip_words = words_for_clips(stream, keep_ranges)
+    MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
+    BRIDGE_US = 500_000      # 이보다 작은 자막 사이 틈은 이어붙임(연속), 크면 공백 유지
 
-    script_words = script_text.split() if script_text.strip() else []
-    script_norm = [_norm_token(w) for w in script_words] if script_words else []
+    stream = build_word_stream(segments)
+    if script_text.strip():
+        script_words = script_text.split()
+        script_norm = [_norm_token(w) for w in script_words]
+        stream = spell_correct_words(stream, script_words, script_norm)
+
+    mapped = map_words_to_timeline(stream, keep_ranges)
+    if not mapped:
+        return []
+
+    groups = chunk_words_korean(mapped, max_chars)
 
     out = []
-    for i, (ks, _ke, tl_s, tl_e) in enumerate(keep_ranges):
-        words = clip_words.get(i)
-        if not words:
-            continue
-        if script_norm:  # 철자만 대본으로 교정 (클립 내용 그대로)
-            words = spell_correct_words(words, script_words, script_norm)
-
-        clip_dur = tl_e - tl_s
-        end_us = tl_e - SUBTITLE_GAP_US if clip_dur > 2 * SUBTITLE_GAP_US else tl_e
-
-        groups = chunk_word_groups(words, max_chars)
-        src_s = sec_to_us(snap_to_frame(ks))
-
-        # 조각 시작 시각: 첫 단어의 발화 시각을 타임라인으로 매핑
-        starts = [tl_s]
-        word_timing_ok = True
-        for g in groups[1:]:
-            mapped = tl_s + (sec_to_us(g[0]["start"]) - src_s)
-            mapped = max(mapped, starts[-1] + MIN_STEP_US)
-            if mapped >= end_us:
-                word_timing_ok = False
-                break
-            starts.append(mapped)
-
-        if not word_timing_ok:
-            # 단어 시각이 클립 범위와 안 맞으면 글자 수 비례 배분으로 폴백
-            total_chars = sum(sum(len(w["word"]) for w in g) for g in groups) or 1
-            starts = [tl_s]
-            cursor = tl_s
-            for g in groups[:-1]:
-                step = max(MIN_STEP_US, int((end_us - tl_s) * sum(len(w["word"]) for w in g) / total_chars))
-                cursor = min(cursor + step, end_us)
-                starts.append(cursor)
-
-        boundaries = starts + [end_us]
-        for gi, g in enumerate(groups):
-            s, e = boundaries[gi], boundaries[gi + 1]
-            text = " ".join(w["word"] for w in g)
-            if e <= s:
-                if out:
-                    out[-1]["text"] += " " + text
-                continue
-            out.append({"start_us": s, "end_us": e, "text": text})
+    prev_end = 0
+    for gi, g in enumerate(groups):
+        s = max(g[0]["tl_start"], prev_end)
+        e = g[-1]["tl_end"]
+        # 다음 조각 시작까지 틈이 작으면 이어붙여 연속되게, 크면 그대로(공백 유지)
+        if gi + 1 < len(groups):
+            nxt = groups[gi + 1][0]["tl_start"]
+            if nxt > e and nxt - e <= BRIDGE_US:
+                e = nxt
+            elif nxt < e:  # 겹치면 다음 시작 전까지로 제한
+                e = nxt
+        e = max(e, s + MIN_DUR_US)
+        # 프레임 스냅
+        s = sec_to_us(snap_to_frame(s / 1_000_000))
+        e = sec_to_us(snap_to_frame(e / 1_000_000))
+        if e <= s:
+            e = s + MIN_DUR_US
+        text = " ".join(w["word"] for w in g)
+        out.append({"start_us": s, "end_us": e, "text": text})
+        prev_end = e
     return out
 
 def _make_text_material(text_id: str, text: str, task_id: str = "") -> dict:
