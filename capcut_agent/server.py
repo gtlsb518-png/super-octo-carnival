@@ -238,11 +238,23 @@ def spell_correct_words(words: list[dict], script_words: list[str],
     return out
 
 
+# 자막에 허용할 문자: 한글(음절+자모)/영문/숫자/공백/기본 문장부호(. , ? ! % -)
+# 그 외(이모지, ♪·♫ 같은 음악기호, 화살표 등 특수문자)는 전부 제거한다.
+_SUBTITLE_DROP_RE = re.compile(r"[^가-힣ㄱ-ㅣa-zA-Z0-9\s,.?!%\-]")
+
+
+def sanitize_word(word: str) -> str:
+    """한 단어에서 이모지·특수문자 제거 (자막에 이상한 기호가 들어가지 않게)."""
+    word = _SUBTITLE_DROP_RE.sub("", word)
+    return word.strip()
+
+
 def build_word_stream(segments: list[dict]) -> list[dict]:
     """
     Whisper 세그먼트 → 단어 스트림 [{"time": 발화_중간(초), "start": 발화_시작(초), "word": str}, ...].
     - 단어별 타임스탬프(word_timestamps)가 있으면 실제 발화 시각 사용
     - 없으면(대본 보정으로 텍스트가 교체된 경우 등) 세그먼트 구간에 균등 배분
+    - 이모지·특수문자는 제거하고, 비어버린 단어는 버린다
     """
     stream = []
     for seg in segments:
@@ -253,11 +265,16 @@ def build_word_stream(segments: list[dict]) -> list[dict]:
         text_words = text.split()
         if words and len(words) == len(text_words):
             for w, tw in zip(words, text_words):
-                stream.append({"time": (w["start"] + w["end"]) / 2, "start": w["start"], "end": w["end"], "word": tw})
+                tw = sanitize_word(tw)
+                if tw:
+                    stream.append({"time": (w["start"] + w["end"]) / 2, "start": w["start"], "end": w["end"], "word": tw})
         else:
             n = len(text_words)
             seg_dur = max(seg["end"] - seg["start"], 0.01)
             for wi, tw in enumerate(text_words):
+                tw = sanitize_word(tw)
+                if not tw:
+                    continue
                 ws = seg["start"] + seg_dur * wi / n
                 we = seg["start"] + seg_dur * (wi + 1) / n
                 stream.append({"time": (ws + we) / 2, "start": ws, "end": we, "word": tw})
