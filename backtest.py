@@ -143,7 +143,27 @@ def fetch_symbols(log=print):
         return list(FALLBACK_SYMBOLS)
 
 
-def fetch_klines(symbol, days, interval='5m', cache_dir=None, log=print):
+def _parse_date_ms(s):
+    """'2024-01-01' 또는 '2024/01/01' 등 → epoch ms. 빈값이면 None."""
+    if s is None or not str(s).strip():
+        return None
+    txt = str(s).strip().replace('/', '-').replace('.', '-')
+    try:
+        return int(pd.Timestamp(txt).timestamp() * 1000)
+    except Exception:
+        raise ValueError(f"날짜 형식 오류: '{s}' (예: 2024-01-01)")
+
+
+def fetch_klines(symbol, days, interval='5m', cache_dir=None, log=print,
+                 start_date=None, end_date=None):
+    """기간 지정 방식 두 가지:
+       - days: 최근 N일 (start_date/end_date 없을 때)
+       - start_date/end_date: 'YYYY-MM-DD' 구간 (있으면 우선)
+    """
+    start_ms = _parse_date_ms(start_date)
+    end_ms = _parse_date_ms(end_date)
+    use_range = start_ms is not None or end_ms is not None
+
     # 🔥 쓰기 가능한 폴더 안에 캐시 저장 (권한 오류 방지)
     base = get_workdir(log)
     cache = None
@@ -151,7 +171,11 @@ def fetch_klines(symbol, days, interval='5m', cache_dir=None, log=print):
         cache_dir = os.path.join(base, 'backtest_data')
         try:
             os.makedirs(cache_dir, exist_ok=True)
-            cache = os.path.join(cache_dir, f"{symbol}_{interval}_{days}d.csv")
+            if use_range:
+                tag = f"{start_date or 'x'}_{end_date or 'now'}".replace(':', '').replace(' ', '')
+                cache = os.path.join(cache_dir, f"{symbol}_{interval}_{tag}.csv")
+            else:
+                cache = os.path.join(cache_dir, f"{symbol}_{interval}_{days}d.csv")
         except Exception as e:
             log(f"  ⚠️ 캐시 폴더 생성 실패({e}) — 캐시 없이 진행")
             cache = None
@@ -161,8 +185,15 @@ def fetch_klines(symbol, days, interval='5m', cache_dir=None, log=print):
         return df
 
     url = "https://fapi.binance.com/fapi/v1/klines"
-    end = int(time.time() * 1000)
-    start = end - days * 86400 * 1000
+    now_ms = int(time.time() * 1000)
+    if use_range:
+        end = end_ms if end_ms is not None else now_ms
+        start = start_ms if start_ms is not None else end - 365 * 86400 * 1000
+        if start >= end:
+            raise ValueError(f"{symbol}: 시작일이 종료일보다 늦습니다")
+    else:
+        end = now_ms
+        start = end - days * 86400 * 1000
     rows = []
     cur = start
     last_log = 0
@@ -470,8 +501,12 @@ def make_configs(p, compare):
 def run_all(symbols, p, compare, log=print, on_row=None):
     """심볼 목록 전체 백테스트. on_row(row)로 결과 행 전달"""
     configs = make_configs(p, compare)
+    if p.get('start_date') or p.get('end_date'):
+        period = f"{p.get('start_date') or '처음'} ~ {p.get('end_date') or '현재'}"
+    else:
+        period = f"최근 {p['days']}일"
     log("=" * 50)
-    log(f"🔬 백테스트: {len(symbols)}개 심볼 | {p['days']}일 | 매매 {p['interval']}봉"
+    log(f"🔬 백테스트: {len(symbols)}개 심볼 | {period} | 매매 {p['interval']}봉"
         f" | ADX {p.get('adx_interval', p['interval'])}봉")
     log(f"   설정 {len(configs)}종: {', '.join(c['name'] for c in configs)}")
     log("=" * 50)
@@ -494,7 +529,9 @@ def run_all(symbols, p, compare, log=print, on_row=None):
     for k, sym in enumerate(symbols, 1):
         log(f"\n[{k}/{len(symbols)}] {sym} 데이터 준비...")
         try:
-            df = fetch_klines(sym, p['days'], p['interval'], log=log)
+            df = fetch_klines(sym, p['days'], p['interval'], log=log,
+                              start_date=p.get('start_date'),
+                              end_date=p.get('end_date'))
         except Exception as e:
             log(f"  ❌ {sym} 건너뜀: {e}")
             continue
@@ -567,7 +604,7 @@ def launch_gui():
 
     root = tk.Tk()
     root.title("📊 바이낸스 선물 백테스터 (메인넷 실제 데이터)")
-    root.geometry("1150x780")
+    root.geometry("1150x860")
     root.configure(bg=BG)
 
     tk.Label(root, text="🌐 데이터 출처: 바이낸스 선물 메인넷 실제 시세 (fapi.binance.com)",
@@ -593,7 +630,7 @@ def launch_gui():
         ('횡보장 TP %', 'tp_sideways'), ('ADX 기간', 'adx_period'),
         ('ADX 추세 기준', 'adx_th'), ('UT Key Value', 'ut_sens'),
         ('UT ATR 기간', 'ut_atr'), ('EMA Fast', 'ema_fast'),
-        ('EMA Slow', 'ema_slow'), ('기간 (일)', 'days'),
+        ('EMA Slow', 'ema_slow'),
     ]
     vars_ = {}
     for r, (label, key) in enumerate(fields):
@@ -615,6 +652,50 @@ def launch_gui():
     adx_interval_var = tk.StringVar(value=DEFAULTS['adx_interval'])
     ttk.Combobox(form, textvariable=adx_interval_var, values=INTERVALS, width=8,
                  state='readonly').grid(row=len(fields) + 1, column=1, padx=6, pady=2)
+
+    # ---------- 기간 지정 ----------
+    tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
+    tk.Label(left, text="📅 백테스트 기간", bg=PANEL, fg='#00ffff',
+             font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
+
+    days_var = tk.StringVar(value=str(DEFAULTS['days']))
+    start_var = tk.StringVar(value='')
+    end_var = tk.StringVar(value='')
+
+    # 빠른 버튼 (최근 N일 → days 설정 + 날짜칸 비움)
+    quick = tk.Frame(left, bg=PANEL)
+    quick.pack(anchor='w', padx=22, pady=2)
+
+    def set_days(d):
+        days_var.set(str(d))
+        start_var.set('')
+        end_var.set('')
+
+    for label, d in [('1개월', 30), ('3개월', 90), ('6개월', 180),
+                     ('1년', 365), ('2년', 730)]:
+        tk.Button(quick, text=label, command=lambda d=d: set_days(d),
+                  bg='#3d3d3d', fg=FG, font=('Arial', 8), width=5,
+                  padx=1, pady=1).pack(side='left', padx=1)
+
+    drow = tk.Frame(left, bg=PANEL)
+    drow.pack(anchor='w', padx=22, pady=2)
+    tk.Label(drow, text='최근', bg=PANEL, fg=FG, font=('Arial', 9)).pack(side='left')
+    tk.Entry(drow, textvariable=days_var, width=6, font=('Arial', 9),
+             justify='center').pack(side='left', padx=3)
+    tk.Label(drow, text='일', bg=PANEL, fg=FG, font=('Arial', 9)).pack(side='left')
+
+    tk.Label(left, text="또는 날짜 직접 지정 (비우면 위 '최근 N일' 사용)",
+             bg=PANEL, fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
+    drow2 = tk.Frame(left, bg=PANEL)
+    drow2.pack(anchor='w', padx=22, pady=2)
+    tk.Label(drow2, text='시작', bg=PANEL, fg=FG, font=('Arial', 9)).pack(side='left')
+    tk.Entry(drow2, textvariable=start_var, width=11, font=('Arial', 9),
+             justify='center').pack(side='left', padx=3)
+    tk.Label(drow2, text='끝', bg=PANEL, fg=FG, font=('Arial', 9)).pack(side='left')
+    tk.Entry(drow2, textvariable=end_var, width=11, font=('Arial', 9),
+             justify='center').pack(side='left', padx=3)
+    tk.Label(left, text="예: 2024-01-01   (끝 비우면 오늘까지)",
+             bg=PANEL, fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
 
     # 하이브리드
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
@@ -802,9 +883,20 @@ def launch_gui():
                 p[key] = DEFAULTS[key]
                 v.set(str(DEFAULTS[key]))
                 fixed.append(key)
+        # 기간: 날짜(시작/끝) 우선, 없으면 최근 N일
+        sd = (start_var.get() or '').strip()
+        ed = (end_var.get() or '').strip()
+        p['start_date'] = sd or None
+        p['end_date'] = ed or None
+        if not sd and not ed:
+            try:
+                p['days'] = max(1, int(round(float((days_var.get() or '').strip().replace(',', '')))))
+            except ValueError:
+                p['days'] = DEFAULTS['days']
+                days_var.set(str(DEFAULTS['days']))
+                fixed.append('기간(일)')
         # 상식 보정 (유연하게 — 막지 않고 조용히 정리)
         p['leverage'] = max(1, min(125, p['leverage']))
-        p['days'] = max(1, p['days'])
         if p['ema_fast'] >= p['ema_slow']:
             fixed.append('ema_fast/slow')
         p['interval'] = interval_var.get()
@@ -880,11 +972,15 @@ def run_cli():
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
     ap.add_argument('--compare', default='vs', choices=['off', 'vs', 'full'],
                     help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종")
+    ap.add_argument('--start', default=None, help='시작일 YYYY-MM-DD (지정 시 --days 무시)')
+    ap.add_argument('--end', default=None, help='종료일 YYYY-MM-DD (기본 오늘)')
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
     args = ap.parse_args()
 
     p = dict(DEFAULTS)
     p['days'] = args.days
+    p['start_date'] = args.start
+    p['end_date'] = args.end
     p['interval'] = args.interval
     p['adx_interval'] = args.adx_interval
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
