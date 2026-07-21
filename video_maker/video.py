@@ -49,7 +49,7 @@ def _build_scene_clip(image: Path, audio: Path, duration: float,
 
 
 def build_video(script: Script, workdir: Path, cfg: VideoConfig,
-                out_path: Path) -> Path:
+                out_path: Path, *, tts_engine: str | None = None) -> Path:
     """대본 전체를 영상으로 만들어 out_path에 저장하고 경로를 반환한다."""
     workdir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
@@ -57,11 +57,11 @@ def build_video(script: Script, workdir: Path, cfg: VideoConfig,
     for i, scene in enumerate(script.scenes):
         print(f"[{i+1}/{len(script.scenes)}] 장면 생성: {scene.headline}")
         img = workdir / f"scene_{i:02d}.png"
-        aud = workdir / f"scene_{i:02d}.mp3"
+        aud_base = workdir / f"scene_{i:02d}"
         clip = workdir / f"scene_{i:02d}.mp4"
 
         render_scene_image(scene, cfg, i, len(script.scenes), img)
-        dur = synthesize(scene.narration, aud)
+        aud, dur = synthesize(scene.narration, aud_base, engine=tts_engine)
         dur = max(dur + 0.6, 2.0)  # 말끝에 약간 여유
         _build_scene_clip(img, aud, dur, cfg, clip)
         clips.append(clip)

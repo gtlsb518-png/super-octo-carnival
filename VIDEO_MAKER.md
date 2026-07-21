@@ -47,11 +47,47 @@ export VIDEO_MAKER_MODEL=claude-opus-4-8   # 선택
 python make.py "제주도 여행 코스"
 ```
 
-## 나레이션(TTS)
+## 나레이션(TTS) — 여러 엔진 지원
 
-- 기본은 **gTTS**(구글 TTS, 한국어)로 음성을 만듭니다. **네트워크가 필요**합니다.
-- TTS에 실패하면(오프라인 등) 글자 수에 맞춘 **무음 트랙**으로 대체해
-  영상은 끝까지 생성됩니다. 자막은 화면에 그대로 표시됩니다.
+`--tts` 옵션(또는 환경변수 `VIDEO_MAKER_TTS`)으로 음성 엔진을 고릅니다.
+기본값 `auto`는 **가능한 것부터 순서대로 시도**하고, 모두 실패하면
+글자 수에 맞춘 **무음 트랙**으로 대체해 영상은 끝까지 생성됩니다.
+
+| 엔진 | 품질 | 필요 조건 | 비고 |
+|------|------|-----------|------|
+| `openai` | ★★★ | `OPENAI_API_KEY` | 자연스러운 한국어 |
+| `elevenlabs` | ★★★ | `ELEVENLABS_API_KEY` | 다국어 뉴럴 |
+| `edge` | ★★★ | 없음(무료), 네트워크 | MS 뉴럴 음성, **추천 기본** |
+| `gtts` | ★★ | 없음(무료), 네트워크 | 구글 TTS |
+| `espeak` | ★ | `espeak-ng` 설치 | **오프라인**, 로봇 톤이지만 확실 |
+
+auto 시도 순서: `openai → elevenlabs → edge → gtts → espeak → (무음)`
+
+```bash
+python make.py "커피의 역사" --tts edge        # 무료 고품질(네트워크 필요)
+python make.py "커피의 역사" --tts espeak      # 오프라인
+OPENAI_API_KEY=sk-... python make.py "커피의 역사" --tts openai
+```
+
+### 엔진별 환경변수 (선택)
+
+```bash
+# OpenAI
+export OPENAI_TTS_MODEL=gpt-4o-mini-tts      # 기본
+export OPENAI_TTS_VOICE=alloy                # alloy/nova/shimmer ...
+# ElevenLabs
+export ELEVENLABS_VOICE_ID=...               # 음성 ID
+export ELEVENLABS_MODEL=eleven_multilingual_v2
+# edge-tts
+export EDGE_TTS_VOICE=ko-KR-SunHiNeural      # ko-KR-InJoonNeural(남성) 등
+# espeak-ng (오프라인)
+export ESPEAK_NG_BIN=/path/to/espeak-ng      # PATH에 없을 때
+export ESPEAK_NG_SPEED=150                   # 말 속도
+```
+
+> 사내/샌드박스 프록시가 커스텀 CA를 쓰는 경우 edge-tts가 인증서 오류를 낼 수
+> 있는데, `SSL_CERT_FILE`(또는 `REQUESTS_CA_BUNDLE`)에 CA 번들 경로가 있으면
+> 자동으로 신뢰하도록 처리돼 있습니다.
 
 ## 구조
 
@@ -60,7 +96,8 @@ make.py                  CLI 진입점 (오케스트레이션)
 video_maker/
   config.py              해상도/폰트/색상 등 설정
   script_gen.py          주제 → 대본 (Claude 또는 템플릿)
-  narration.py           문장 → 음성(mp3), 실패 시 무음 대체
+  tts_engines.py         TTS 백엔드 모음 (openai/elevenlabs/edge/gtts/espeak)
+  narration.py           엔진 선택 + 자동 폴백, 실패 시 무음 대체
   visuals.py             장면 → 타이틀 카드 PNG (Pillow)
   video.py               이미지+음성 → 클립 → 이어붙이기 (ffmpeg)
 ```

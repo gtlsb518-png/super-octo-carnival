@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
                    default="vertical", help="세로(쇼츠) 또는 가로(유튜브)")
     p.add_argument("--no-api", action="store_true",
                    help="Claude API를 쓰지 않고 템플릿 대본 사용")
+    p.add_argument("--tts", default=None,
+                   choices=["auto", "openai", "elevenlabs", "edge", "gtts", "espeak"],
+                   help="TTS 엔진 (기본 auto: 가능한 것부터 시도). 환경변수 VIDEO_MAKER_TTS로도 지정 가능")
     p.add_argument("--script-only", action="store_true",
                    help="대본만 생성하고 영상은 만들지 않음")
     p.add_argument("-o", "--out", default=None, help="출력 mp4 경로")
@@ -64,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = VideoConfig(orientation=args.orientation)
     out_path = Path(args.out) if args.out else out_dir / f"{_slug(args.topic)}.mp4"
     print("■ 영상 생성 중... (TTS + 이미지 + 합성)")
-    result = build_video(script, out_dir / "work", cfg, out_path)
+    result = build_video(script, out_dir / "work", cfg, out_path, tts_engine=args.tts)
     print(f"\n✅ 완료: {result}")
     return 0
 

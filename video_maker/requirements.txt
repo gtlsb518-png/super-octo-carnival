@@ -1,6 +1,13 @@
 # video_maker 의존성
 Pillow>=10.0        # 장면 이미지(타이틀 카드) 렌더링
-gTTS>=2.5           # 한국어 나레이션 TTS (네트워크 필요)
+requests>=2.28      # OpenAI / ElevenLabs TTS HTTP 호출
+
+# --- TTS 엔진 (필요한 것만 설치해도 됨) ---
+edge-tts>=7.0       # 무료 MS 뉴럴 음성 (키 불필요, 네트워크 필요)  ← 추천 기본
+gTTS>=2.5           # 구글 TTS (무료, 네트워크 필요)
 anthropic>=0.40     # 선택: ANTHROPIC_API_KEY 있을 때 Claude 대본 생성
-# 시스템 의존성: ffmpeg, ffprobe (별도 설치 필요)
-# 한글 폰트: fonts-nanum (또는 WenQuanYi) 권장
+
+# 시스템 의존성:
+#   ffmpeg, ffprobe         (필수)
+#   espeak-ng               (선택: 오프라인 음성 폴백)
+#   fonts-nanum / WenQuanYi (한글 폰트)
