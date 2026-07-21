@@ -8,3 +8,7 @@ bot_stats.json
 bot_running.json
 trade_history.xlsx
 trade_backup_*.csv
+
+# video_maker 생성물
+output/
+*.mp4

@@ -1,0 +1,6 @@
+# video_maker 의존성
+Pillow>=10.0        # 장면 이미지(타이틀 카드) 렌더링
+gTTS>=2.5           # 한국어 나레이션 TTS (네트워크 필요)
+anthropic>=0.40     # 선택: ANTHROPIC_API_KEY 있을 때 Claude 대본 생성
+# 시스템 의존성: ffmpeg, ffprobe (별도 설치 필요)
+# 한글 폰트: fonts-nanum (또는 WenQuanYi) 권장
