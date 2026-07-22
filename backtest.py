@@ -13,7 +13,8 @@
 - 모든 수치(진입금/레버리지/수수료/TP/ADX/UT/EMA/기간/시간봉) GUI에서 수정 가능
   → 기본값은 현재 봇 설정과 동일
 - 바이낸스 USDT 선물 전체 코인 목록 자동 로드, 검색/다중선택/전체선택
-- EMA 4종 비교 모드 (설정값 / 12,26 / 9,21 / 하이브리드)
+- 비교 모드: 설정값vs하이브리드 / 볼륨필터OFFvsON / EMA4종 / 단일
+- 거래량(볼륨) 필터 ON/OFF + 배수·평균기간 조절 가능
 - 결과는 표로 표시 + backtest_result.csv / backtest_trades_{심볼}_{설정}.csv 저장
 
 전략 (봇 5_gui.py와 동일 로직):
@@ -66,6 +67,9 @@ DEFAULTS = {
     'hybrid_fast': 9,      # 하이브리드 빠른 EMA Fast
     'hybrid_slow': 21,     # 하이브리드 빠른 EMA Slow
     'hybrid_roi_th': -5.0, # 조기청산 발동 ROI % (이하 손실일 때만)
+    'vol_filter': False,   # 🔥 거래량 필터 ON/OFF
+    'vol_mult': 1.5,       # 거래량 배수 (현재봉 ≥ 평균 × 배수일 때만 진입)
+    'vol_ma': 20,          # 거래량 평균 기간 (봉)
 }
 
 DEFAULT_SYMBOLS = ['BTCUSDT', 'XRPUSDT', 'DOGEUSDT']
@@ -345,6 +349,16 @@ def run_backtest(df, p):
     long_sig = (ut == 1) & ema_long
     short_sig = (ut == -1) & ema_short
 
+    # 🔥 거래량 필터: 현재봉 거래량 >= 평균(vol_ma봉) × vol_mult 일 때만 진입 허용
+    #    (봇 3_indicators.check_volume과 동일 로직, 매매봉 기준)
+    if p.get('vol_filter'):
+        vma = int(p.get('vol_ma', 20))
+        vol_avg = df['volume'].rolling(vma).mean()
+        vol_ok = (df['volume'] >= vol_avg * p.get('vol_mult', 1.5))
+        vol_ok = vol_ok.fillna(False).values  # 평균 계산 전(NaN) 구간은 진입 차단
+        long_sig = long_sig & vol_ok
+        short_sig = short_sig & vol_ok
+
     if p.get('hybrid'):
         hf, hs = ema_pair(df, p['hybrid_fast'], p['hybrid_slow'])
         h_dead = (hf < hs).values
@@ -469,6 +483,7 @@ def make_configs(p, compare):
     compare: 'off'  → 현재 설정 1종
              'vs'   → 설정값 vs 하이브리드 (2종)  ← 기본 추천
              'full' → EMA 4종 비교
+             'vol'  → 거래량 필터 OFF vs ON (2종)
     (하위호환: True=='full', False=='off')
     """
     if compare is True:
@@ -488,6 +503,13 @@ def make_configs(p, compare):
         return [
             dict(p, name=setval_name, hybrid=False),
             dict(p, name='하이브리드', hybrid=True),
+        ]
+
+    if compare == 'vol':
+        mult = p.get('vol_mult', 1.5)
+        return [
+            dict(p, name='볼륨필터 OFF', vol_filter=False),
+            dict(p, name=f'볼륨필터 ON(x{mult:g})', vol_filter=True),
         ]
 
     return [
@@ -715,11 +737,31 @@ def launch_gui():
                  justify='center').grid(row=r, column=1, padx=6, pady=1)
         vars_[key] = v
 
+    # 거래량 필터
+    tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
+    vol_filter_var = tk.BooleanVar(value=DEFAULTS['vol_filter'])
+    tk.Checkbutton(left, text="거래량(볼륨) 필터 사용", variable=vol_filter_var,
+                   bg=PANEL, fg='#00ffff', selectcolor=BG, font=('Arial', 10, 'bold'),
+                   activebackground=PANEL).pack(anchor='w', padx=10)
+    vform = tk.Frame(left, bg=PANEL)
+    vform.pack(padx=10)
+    vfields = [('거래량 배수 (×평균)', 'vol_mult'), ('평균 기간 (봉)', 'vol_ma')]
+    for r, (label, key) in enumerate(vfields):
+        tk.Label(vform, text=label, bg=PANEL, fg='#aaaaaa', font=('Arial', 9),
+                 anchor='w').grid(row=r, column=0, sticky='w', pady=1)
+        v = tk.StringVar(value=str(DEFAULTS[key]))
+        tk.Entry(vform, textvariable=v, width=10, font=('Arial', 9),
+                 justify='center').grid(row=r, column=1, padx=6, pady=1)
+        vars_[key] = v
+    tk.Label(left, text="(현재봉 거래량 ≥ 평균 × 배수일 때만 진입)", bg=PANEL,
+             fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
+
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
     tk.Label(left, text="🔬 비교 모드", bg=PANEL, fg='#00ffff',
              font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
     COMPARE_OPTS = {
         '설정값 vs 하이브리드': 'vs',
+        '볼륨필터 OFF vs ON': 'vol',
         'EMA 4종 비교': 'full',
         '단일 (현재 설정만)': 'off',
     }
@@ -869,7 +911,7 @@ def launch_gui():
         """빈칸/공백/쉼표 등 관대하게 처리 — 이상하면 기본값으로 대체(안 죽음)"""
         p = dict(DEFAULTS)
         int_keys = {'leverage', 'adx_period', 'ut_atr', 'ema_fast', 'ema_slow',
-                    'days', 'hybrid_fast', 'hybrid_slow'}
+                    'days', 'hybrid_fast', 'hybrid_slow', 'vol_ma'}
         fixed = []
         for key, v in vars_.items():
             raw = (v.get() or '').strip().replace(',', '')
@@ -902,6 +944,8 @@ def launch_gui():
         p['interval'] = interval_var.get()
         p['adx_interval'] = adx_interval_var.get()
         p['hybrid'] = hybrid_var.get()
+        p['vol_filter'] = vol_filter_var.get()
+        p['vol_ma'] = max(1, int(p['vol_ma']))
         if fixed:
             gui_log(f"ℹ️ 잘못된 입력 자동 보정: {', '.join(fixed)}")
         return p
@@ -970,10 +1014,13 @@ def run_cli():
     ap.add_argument('--adx-interval', default=DEFAULTS['adx_interval'],
                     help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
-    ap.add_argument('--compare', default='vs', choices=['off', 'vs', 'full'],
-                    help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종")
+    ap.add_argument('--compare', default='vs', choices=['off', 'vs', 'full', 'vol'],
+                    help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종 / vol=볼륨필터OFFvsON")
     ap.add_argument('--start', default=None, help='시작일 YYYY-MM-DD (지정 시 --days 무시)')
     ap.add_argument('--end', default=None, help='종료일 YYYY-MM-DD (기본 오늘)')
+    ap.add_argument('--vol', action='store_true', help='거래량 필터 ON')
+    ap.add_argument('--vol-mult', type=float, default=DEFAULTS['vol_mult'],
+                    help='거래량 배수 (기본 1.5)')
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
     args = ap.parse_args()
 
@@ -983,6 +1030,8 @@ def run_cli():
     p['end_date'] = args.end
     p['interval'] = args.interval
     p['adx_interval'] = args.adx_interval
+    p['vol_filter'] = args.vol
+    p['vol_mult'] = args.vol_mult
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
 
     symbols = fetch_symbols() if args.all else \
