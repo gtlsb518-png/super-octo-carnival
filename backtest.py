@@ -15,7 +15,8 @@
 - 바이낸스 USDT 선물 전체 코인 목록 자동 로드, 검색/다중선택/전체선택
 - 비교 모드: 설정값vs하이브리드 / 볼륨필터OFFvsON / EMA4종 / 단일
 - 거래량(볼륨) 필터 ON/OFF + 배수·평균기간 조절 가능
-- 결과는 표로 표시 + backtest_result.csv / backtest_trades_{심볼}_{설정}.csv 저장
+- 결과: 화면 표 + backtest_result.csv + 거래내역 CSV
+- 📅 월별 수익/수수료/손실 집계 엑셀(backtest_월별집계.xlsx) 자동 생성
 
 전략 (봇 5_gui.py와 동일 로직):
 - 진입: 완성봉 기준 UT Bot 방향 + EMA 크로스 AND 조건
@@ -35,17 +36,26 @@ import threading
 import time
 
 # ==================== 라이브러리 자동 설치 ====================
-for _mod in ['pandas', 'numpy', 'requests']:
+for _mod in ['pandas', 'numpy', 'requests', 'openpyxl']:
     try:
         __import__(_mod)
     except ImportError:
         print(f"📦 {_mod} 설치 중...")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', _mod],
-                              stdout=subprocess.DEVNULL)
+        try:
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', _mod],
+                                  stdout=subprocess.DEVNULL)
+        except Exception:
+            pass  # openpyxl 설치 실패해도 CSV는 됨 (엑셀만 생략)
 
 import numpy as np
 import pandas as pd
 import requests
+
+try:
+    import openpyxl  # noqa: F401
+    OPENPYXL_OK = True
+except ImportError:
+    OPENPYXL_OK = False
 
 # ==================== 기본값 (현재 봇 설정과 동일) ====================
 DEFAULTS = {
@@ -520,6 +530,139 @@ def make_configs(p, compare):
     ]
 
 
+def monthly_table(trades):
+    """거래 내역(trades DF) → 월별 집계 DataFrame
+
+    컬럼: 년-월 | 거래수 | 승 | 패 | 승률% | 수익 | 손실 | 수수료 | 순손익 | 누적순손익
+    """
+    if trades is None or trades.empty:
+        return pd.DataFrame()
+    t = trades.copy()
+    t['시각'] = pd.to_datetime(t['시각'])
+    t['년월'] = t['시각'].dt.strftime('%Y-%m')
+    rows = []
+    cum = 0.0
+    for ym, g in t.groupby('년월', sort=True):
+        wins = int((g['순손익'] > 0).sum())
+        losses = len(g) - wins
+        profit = g.loc[g['순손익'] > 0, '순손익'].sum()
+        loss = g.loc[g['순손익'] <= 0, '순손익'].sum()  # 음수
+        fee = g['수수료'].sum()
+        net = g['순손익'].sum()
+        cum += net
+        rows.append({
+            '년-월': ym, '거래수': len(g), '승': wins, '패': losses,
+            '승률%': round(wins / len(g) * 100, 1) if len(g) else 0,
+            '수익(USDT)': round(profit, 2), '손실(USDT)': round(loss, 2),
+            '수수료(USDT)': round(fee, 2), '순손익(USDT)': round(net, 2),
+            '누적순손익': round(cum, 2),
+        })
+    df = pd.DataFrame(rows)
+    # 합계 행
+    total = {
+        '년-월': '합계', '거래수': int(df['거래수'].sum()),
+        '승': int(df['승'].sum()), '패': int(df['패'].sum()),
+        '승률%': round(df['승'].sum() / df['거래수'].sum() * 100, 1) if df['거래수'].sum() else 0,
+        '수익(USDT)': round(df['수익(USDT)'].sum(), 2),
+        '손실(USDT)': round(df['손실(USDT)'].sum(), 2),
+        '수수료(USDT)': round(df['수수료(USDT)'].sum(), 2),
+        '순손익(USDT)': round(df['순손익(USDT)'].sum(), 2),
+        '누적순손익': round(cum, 2),
+    }
+    return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
+
+
+def write_monthly_excel(all_trades, path, log=print):
+    """(심볼, 설정명, trades) 목록 → 월별 집계 엑셀 생성.
+
+    - 시트 1개당 (심볼 × 설정) 하나, 월별 표
+    - 색상: 순손익 양수 초록 / 음수 빨강, 합계행 강조
+    - openpyxl 없으면 CSV로 폴백
+    """
+    tables = [(sym, name, monthly_table(tr)) for sym, name, tr in all_trades]
+    tables = [(s, n, t) for s, n, t in tables if not t.empty]
+    if not tables:
+        return
+
+    if not OPENPYXL_OK:
+        # 폴백: 월별 표를 CSV로
+        try:
+            for sym, name, mt in tables:
+                safe = f"{sym}_{name}".replace('/', '-').replace('(', '').replace(')', '')
+                mt.to_csv(path.replace('.xlsx', f'_{safe}.csv'),
+                          index=False, encoding='utf-8-sig')
+            log(f"📅 월별 집계 CSV 저장 (openpyxl 미설치): {os.path.dirname(path)}")
+        except Exception as e:
+            log(f"  ⚠️ 월별 CSV 저장 실패: {e}")
+        return
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        wb = Workbook()
+        wb.remove(wb.active)
+        hdr_font = Font(bold=True, color='FFFFFF')
+        hdr_fill = PatternFill('solid', fgColor='305496')
+        tot_fill = PatternFill('solid', fgColor='FFF2CC')
+        pos_font = Font(color='1F7A1F', bold=True)
+        neg_font = Font(color='C00000', bold=True)
+        center = Alignment(horizontal='center')
+        thin = Side(style='thin', color='D9D9D9')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        used_names = set()
+
+        for sym, cfg_name, mt in tables:
+            title = f"{sym}_{cfg_name}"[:31].replace('/', '-').replace('*', '')
+            base_title = title
+            n = 1
+            while title in used_names:
+                n += 1
+                title = f"{base_title[:28]}_{n}"
+            used_names.add(title)
+            ws = wb.create_sheet(title=title)
+
+            cols = list(mt.columns)
+            for c, col in enumerate(cols, 1):
+                cell = ws.cell(row=1, column=c, value=col)
+                cell.font = hdr_font
+                cell.fill = hdr_fill
+                cell.alignment = center
+                cell.border = border
+
+            net_idx = cols.index('순손익(USDT)') + 1
+            for r, (_, row) in enumerate(mt.iterrows(), 2):
+                is_total = (row['년-월'] == '합계')
+                for c, col in enumerate(cols, 1):
+                    cell = ws.cell(row=r, column=c, value=row[col])
+                    cell.alignment = center
+                    cell.border = border
+                    if is_total:
+                        cell.fill = tot_fill
+                        cell.font = Font(bold=True)
+                # 순손익 색상
+                nv = row['순손익(USDT)']
+                ws.cell(row=r, column=net_idx).font = pos_font if nv >= 0 else neg_font
+
+            # 열 너비
+            for c, col in enumerate(cols, 1):
+                ws.column_dimensions[get_column_letter(c)].width = max(10, len(str(col)) + 2)
+            ws.freeze_panes = 'A2'
+
+        wb.save(path)
+        log(f"📅 월별 집계 엑셀 저장 완료:\n   {path}")
+    except Exception as e:
+        log(f"  ⚠️ 월별 엑셀 생성 실패({e}) — CSV로 대체 시도")
+        try:
+            for sym, name, mt in tables:
+                safe = f"{sym}_{name}".replace('/', '-').replace('(', '').replace(')', '')
+                mt.to_csv(path.replace('.xlsx', f'_{safe}.csv'),
+                          index=False, encoding='utf-8-sig')
+        except Exception:
+            pass
+
+
 def run_all(symbols, p, compare, log=print, on_row=None):
     """심볼 목록 전체 백테스트. on_row(row)로 결과 행 전달"""
     configs = make_configs(p, compare)
@@ -548,6 +691,7 @@ def run_all(symbols, p, compare, log=print, on_row=None):
             return None
 
     summaries = []
+    all_trades = []  # (심볼, 설정명, trades_df) — 월별 엑셀용
     for k, sym in enumerate(symbols, 1):
         log(f"\n[{k}/{len(symbols)}] {sym} 데이터 준비...")
         try:
@@ -565,6 +709,7 @@ def run_all(symbols, p, compare, log=print, on_row=None):
             row = summarize(trades, sym, cfg['name'], max_dd, cfg)
             if row:
                 summaries.append(row)
+                all_trades.append((sym, cfg['name'], trades))
                 if on_row:
                     on_row(row)
                 log(f"  ▶ [{cfg['name']}] {row['거래수']}회 | 승률 {row['승률%']}% "
@@ -612,6 +757,11 @@ def run_all(symbols, p, compare, log=print, on_row=None):
                 if gap / base < 0.1:
                     log("   ⚠️ 1·2위 차이가 10% 미만 — 우열 크지 않음(우연일 수 있음). "
                         "여러 코인·기간으로 재확인 권장.")
+
+        # 📅 월별 수익/수수료/손실 엑셀 자동 생성
+        if base:
+            xlsx_path = os.path.join(base, 'backtest_월별집계.xlsx')
+            write_monthly_excel(all_trades, xlsx_path, log)
     else:
         log("\n⚠️ 결과 없음")
     return summaries
