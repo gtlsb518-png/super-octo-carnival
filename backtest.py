@@ -80,6 +80,10 @@ DEFAULTS = {
     'vol_filter': False,   # 🔥 거래량 필터 ON/OFF
     'vol_mult': 1.5,       # 거래량 배수 (현재봉 ≥ 평균 × 배수일 때만 진입)
     'vol_ma': 20,          # 거래량 평균 기간 (봉)
+    # 🔥 익절 방식: 'adx'=지금(ADX 고정 TP) / 'atr'=변동성 기반 / 'switch'=TP없이 스위칭만
+    'tp_mode': 'adx',
+    'atr_tp_period': 14,   # ATR TP용 ATR 기간
+    'atr_tp_mult': 1.5,    # ATR TP 배수 (TP거리 = ATR × 배수) ← 중간값 기본
 }
 
 DEFAULT_SYMBOLS = ['BTCUSDT', 'XRPUSDT', 'DOGEUSDT']
@@ -375,6 +379,11 @@ def run_backtest(df, p):
         h_gold = (hf > hs).values
         roi_th = p['hybrid_roi_th']
 
+    # 🔥 익절 방식
+    tp_mode = p.get('tp_mode', 'adx')
+    if tp_mode == 'atr':
+        atr_tp = atr_rma(df, int(p.get('atr_tp_period', 14))).values  # TP거리 계산용 ATR
+
     trades = []
     pos = None
     equity = 0.0
@@ -386,10 +395,23 @@ def run_backtest(df, p):
 
     def open_pos(side, i):
         entry = o[i + 1]
-        tp = tp_pct_at(i)
+        if tp_mode == 'switch':
+            # TP 없음 — 반대신호(스위칭)나 강제청산으로만 나감
+            return {'side': side, 'entry': entry, 'qty': amount * lev / entry,
+                    'tp_price': None, 'tp_pct': 0.0, 'entry_i': i + 1, 'min_roi': 0.0}
+        if tp_mode == 'atr':
+            # TP 거리 = ATR × 배수 (신호봉 i의 ATR 사용 = 완성봉)
+            atr_val = atr_tp[i]
+            if np.isnan(atr_val) or atr_val <= 0:
+                dist_pct = p['tp_sideways']  # ATR 아직이면 안전값
+            else:
+                dist_pct = (atr_val * p.get('atr_tp_mult', 1.5)) / entry * 100
+            tp = dist_pct
+        else:  # 'adx'
+            tp = tp_pct_at(i)
         tp_price = entry * (1 + tp / 100) if side == 'LONG' else entry * (1 - tp / 100)
         return {'side': side, 'entry': entry, 'qty': amount * lev / entry,
-                'tp_price': tp_price, 'tp_pct': tp, 'entry_i': i + 1, 'min_roi': 0.0}
+                'tp_price': tp_price, 'tp_pct': round(tp, 3), 'entry_i': i + 1, 'min_roi': 0.0}
 
     def close_pos(pp, exit_price, exit_i, reason):
         nonlocal equity, peak, max_dd
@@ -433,7 +455,7 @@ def run_backtest(df, p):
             if l[j] <= liq_price:
                 close_pos(pos, liq_price, j, '강제청산')
                 pos = None
-            elif h[j] >= pos['tp_price']:
+            elif pos['tp_price'] is not None and h[j] >= pos['tp_price']:
                 close_pos(pos, max(pos['tp_price'], o[j]), j, 'TP익절')
                 pos = None
             elif short_sig[j]:
@@ -450,7 +472,7 @@ def run_backtest(df, p):
             if h[j] >= liq_price:
                 close_pos(pos, liq_price, j, '강제청산')
                 pos = None
-            elif l[j] <= pos['tp_price']:
+            elif pos['tp_price'] is not None and l[j] <= pos['tp_price']:
                 close_pos(pos, min(pos['tp_price'], o[j]), j, 'TP익절')
                 pos = None
             elif long_sig[j]:
@@ -494,6 +516,7 @@ def make_configs(p, compare):
              'vs'   → 설정값 vs 하이브리드 (2종)  ← 기본 추천
              'full' → EMA 4종 비교
              'vol'  → 거래량 필터 OFF vs ON (2종)
+             'tp'   → 익절방식 비교: 지금(ADX) vs 스위칭만 vs ATR(여러 배수)
     (하위호환: True=='full', False=='off')
     """
     if compare is True:
@@ -520,6 +543,17 @@ def make_configs(p, compare):
         return [
             dict(p, name='볼륨필터 OFF', vol_filter=False),
             dict(p, name=f'볼륨필터 ON(x{mult:g})', vol_filter=True),
+        ]
+
+    if compare == 'tp':
+        # 익절 방식 비교: 지금(ADX 고정) vs 스위칭만(TP없음) vs ATR(배수 4종)
+        return [
+            dict(p, name='지금(ADX TP)', tp_mode='adx'),
+            dict(p, name='스위칭만(TP없음)', tp_mode='switch'),
+            dict(p, name='ATR TP x1.0', tp_mode='atr', atr_tp_mult=1.0),
+            dict(p, name='ATR TP x1.5', tp_mode='atr', atr_tp_mult=1.5),
+            dict(p, name='ATR TP x2.0', tp_mode='atr', atr_tp_mult=2.0),
+            dict(p, name='ATR TP x2.5', tp_mode='atr', atr_tp_mult=2.5),
         ]
 
     return [
@@ -751,10 +785,10 @@ def run_all(symbols, p, compare, log=print, on_row=None):
             if len(agg) > 1:
                 second = agg[1]
                 gap = best['순손익'] - second['순손익']
-                base = abs(second['순손익']) or 1
+                denom = abs(second['순손익']) or 1
                 log(f"   2위 [{second['설정']}] 대비 {gap:+,.2f} USDT"
-                    f" ({gap / base * 100:+.1f}%) 우위")
-                if gap / base < 0.1:
+                    f" ({gap / denom * 100:+.1f}%) 우위")
+                if gap / denom < 0.1:
                     log("   ⚠️ 1·2위 차이가 10% 미만 — 우열 크지 않음(우연일 수 있음). "
                         "여러 코인·기간으로 재확인 권장.")
 
@@ -906,11 +940,45 @@ def launch_gui():
     tk.Label(left, text="(현재봉 거래량 ≥ 평균 × 배수일 때만 진입)", bg=PANEL,
              fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
 
+    # 익절(TP) 방식
+    tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
+    tk.Label(left, text="🎯 익절(TP) 방식", bg=PANEL, fg='#00ffff',
+             font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
+    TP_MODE_OPTS = {
+        '지금 방식 (ADX 고정 1.2/1.0%)': 'adx',
+        'ATR (변동성 기반)': 'atr',
+        '스위칭만 (TP 없음)': 'switch',
+    }
+    tp_mode_label_var = tk.StringVar(value='지금 방식 (ADX 고정 1.2/1.0%)')
+    ttk.Combobox(left, textvariable=tp_mode_label_var,
+                 values=list(TP_MODE_OPTS.keys()), width=26,
+                 state='readonly').pack(anchor='w', padx=22, pady=2)
+
+    aform = tk.Frame(left, bg=PANEL)
+    aform.pack(padx=10)
+    afields = [('ATR 기간', 'atr_tp_period'), ('ATR 배수 (×ATR)', 'atr_tp_mult')]
+    for r, (label, key) in enumerate(afields):
+        tk.Label(aform, text=label, bg=PANEL, fg='#aaaaaa', font=('Arial', 9),
+                 anchor='w').grid(row=r, column=0, sticky='w', pady=1)
+        v = tk.StringVar(value=str(DEFAULTS[key]))
+        tk.Entry(aform, textvariable=v, width=10, font=('Arial', 9),
+                 justify='center').grid(row=r, column=1, padx=6, pady=1)
+        vars_[key] = v
+    # 예시 가이드
+    tk.Label(left, text="📌 ATR 배수 예시 (TP거리 = ATR × 배수):", bg=PANEL,
+             fg='#ffaa00', font=('Arial', 8, 'bold')).pack(anchor='w', padx=22)
+    for ex in ["  1.0 = 짧게·자주 익절 (박리다매)",
+               "  1.5 = 중간 (기본값·추천 시작점)",
+               "  2.0~2.5 = 길게·크게 (큰 추세 노림)"]:
+        tk.Label(left, text=ex, bg=PANEL, fg='#888888',
+                 font=('Arial', 8)).pack(anchor='w', padx=22)
+
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
     tk.Label(left, text="🔬 비교 모드", bg=PANEL, fg='#00ffff',
              font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
     COMPARE_OPTS = {
         '설정값 vs 하이브리드': 'vs',
+        '익절방식 비교(ADX/스위칭/ATR)': 'tp',
         '볼륨필터 OFF vs ON': 'vol',
         'EMA 4종 비교': 'full',
         '단일 (현재 설정만)': 'off',
@@ -1061,7 +1129,7 @@ def launch_gui():
         """빈칸/공백/쉼표 등 관대하게 처리 — 이상하면 기본값으로 대체(안 죽음)"""
         p = dict(DEFAULTS)
         int_keys = {'leverage', 'adx_period', 'ut_atr', 'ema_fast', 'ema_slow',
-                    'days', 'hybrid_fast', 'hybrid_slow', 'vol_ma'}
+                    'days', 'hybrid_fast', 'hybrid_slow', 'vol_ma', 'atr_tp_period'}
         fixed = []
         for key, v in vars_.items():
             raw = (v.get() or '').strip().replace(',', '')
@@ -1096,6 +1164,8 @@ def launch_gui():
         p['hybrid'] = hybrid_var.get()
         p['vol_filter'] = vol_filter_var.get()
         p['vol_ma'] = max(1, int(p['vol_ma']))
+        p['tp_mode'] = TP_MODE_OPTS.get(tp_mode_label_var.get(), 'adx')
+        p['atr_tp_period'] = max(1, int(p['atr_tp_period']))
         if fixed:
             gui_log(f"ℹ️ 잘못된 입력 자동 보정: {', '.join(fixed)}")
         return p
@@ -1164,13 +1234,20 @@ def run_cli():
     ap.add_argument('--adx-interval', default=DEFAULTS['adx_interval'],
                     help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
-    ap.add_argument('--compare', default='vs', choices=['off', 'vs', 'full', 'vol'],
-                    help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종 / vol=볼륨필터OFFvsON")
+    ap.add_argument('--compare', default='vs',
+                    choices=['off', 'vs', 'full', 'vol', 'tp'],
+                    help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종 / "
+                         "vol=볼륨OFFvsON / tp=익절방식(ADX/스위칭/ATR)")
     ap.add_argument('--start', default=None, help='시작일 YYYY-MM-DD (지정 시 --days 무시)')
     ap.add_argument('--end', default=None, help='종료일 YYYY-MM-DD (기본 오늘)')
     ap.add_argument('--vol', action='store_true', help='거래량 필터 ON')
     ap.add_argument('--vol-mult', type=float, default=DEFAULTS['vol_mult'],
                     help='거래량 배수 (기본 1.5)')
+    ap.add_argument('--tp-mode', default=DEFAULTS['tp_mode'],
+                    choices=['adx', 'atr', 'switch'],
+                    help='익절 방식: adx(기본)/atr/switch')
+    ap.add_argument('--atr-mult', type=float, default=DEFAULTS['atr_tp_mult'],
+                    help='ATR TP 배수 (기본 1.5)')
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
     args = ap.parse_args()
 
@@ -1182,6 +1259,8 @@ def run_cli():
     p['adx_interval'] = args.adx_interval
     p['vol_filter'] = args.vol
     p['vol_mult'] = args.vol_mult
+    p['tp_mode'] = args.tp_mode
+    p['atr_tp_mult'] = args.atr_mult
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
 
     symbols = fetch_symbols() if args.all else \
