@@ -22,19 +22,43 @@ if errorlevel 1 (
     exit /b 1
 )
 
+set "PY=%~dp0runtime\python\python.exe"
+
+if not exist "%PY%" (
+    echo.
+    echo  [ERROR] Python was not installed correctly.
+    echo  Delete the "runtime" folder and run this file again.
+    pause
+    exit /b 1
+)
+
+echo.
+echo  Checking packages...
+"%PY%" -c "import fastapi, uvicorn; print('  packages OK')"
+if errorlevel 1 (
+    echo.
+    echo  [ERROR] Required packages are missing.
+    echo  Delete the "runtime" folder and run this file again.
+    pause
+    exit /b 1
+)
+
 if not exist "outputs" mkdir outputs
 if not exist "uploads" mkdir uploads
 
 set "PATH=%~dp0runtime\ffmpeg\bin;%PATH%"
-set "PYTHONPATH=%~dp0"
 
 echo.
 echo  ============================================
-echo    Server starting!
-echo    Your browser opens at  http://localhost:8765
+echo    Starting server - your browser will open.
 echo    (Press Ctrl+C in this window to stop)
 echo  ============================================
 echo.
 
-"%~dp0runtime\python\python.exe" "%~dp0server.py"
+"%PY%" "%~dp0server.py"
+
+echo.
+echo  Server stopped.
+echo  If there was an error, see the message above
+echo  and the file  error_log.txt  in this folder.
 pause

@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -1438,10 +1439,61 @@ async def download_draft(draft_name: str):
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+def _find_free_port(host: str, start: int, tries: int = 20) -> int:
+    """start 포트부터 비어 있는 포트를 찾는다 (이전 서버가 떠 있어도 실행되게)."""
+    import socket
+    for p in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, p))
+                return p
+            except OSError:
+                continue
+    return start
+
+
 if __name__ == "__main__":
-    import threading, webbrowser
-    def _open(): 
-        time.sleep(1.5)
-        webbrowser.open("http://localhost:8765")
-    threading.Thread(target=_open, daemon=True).start()
-    uvicorn.run("server:app", host="127.0.0.1", port=8765, reload=False)
+    # 포터블(embeddable) Python은 격리 모드라 스크립트 폴더가 sys.path에 없다.
+    # 앱 객체를 직접 넘기고(문자열 "server:app" 금지), 경로도 넣어 둔다.
+    sys.path.insert(0, str(BASE_DIR))
+    try:
+        host = "127.0.0.1"
+        port = _find_free_port(host, 8765)
+        url = f"http://localhost:{port}"
+
+        import threading, webbrowser
+        def _open():
+            time.sleep(1.5)
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        threading.Thread(target=_open, daemon=True).start()
+
+        print("=" * 52)
+        print("  CapCut Agent 실행 중")
+        print(f"  브라우저에서 접속: {url}")
+        print("  종료: 이 창에서 Ctrl+C")
+        print("=" * 52, flush=True)
+
+        uvicorn.run(app, host=host, port=port, log_level="info")
+
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        import traceback
+        err = traceback.format_exc()
+        try:
+            (BASE_DIR / "error_log.txt").write_text(err, encoding="utf-8")
+        except Exception:
+            pass
+        print("\n" + "=" * 52)
+        print("  실행 오류가 발생했습니다.")
+        print("  아래 내용과 error_log.txt 파일을 알려주세요.")
+        print("=" * 52)
+        print(err)
+        try:
+            input("\n닫으려면 Enter를 누르세요...")
+        except Exception:
+            pass
