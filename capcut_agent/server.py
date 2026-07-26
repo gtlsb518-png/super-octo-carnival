@@ -606,6 +606,216 @@ CANVAS_PRESETS = {
     "16:9":  {"width": 1920, "height": 1080, "subtitle_y": -0.6907},  # 가로
 }
 
+# 이미지로 취급할 확장자 (나머지는 영상으로 간주)
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".tif", ".tiff"}
+IMAGE_SOURCE_DUR_US = 10_800_000_000   # 이미지 material의 소스 길이 (3시간, CapCut 관례)
+DEFAULT_IMAGE_DUR_SEC = 3.0            # 이미지 1장 타임라인 기본 노출 시간
+
+
+def get_media_info(path: Path) -> tuple[int, int, float | None, bool]:
+    """(width, height, duration_sec|None, is_image). 이미지는 duration None."""
+    is_image = path.suffix.lower() in IMAGE_EXTS
+    w, h = get_video_resolution(path)
+    if is_image:
+        return w, h, None, True
+    try:
+        dur = get_video_duration(path)
+    except Exception:
+        dur = None
+    return w, h, dur, False
+
+
+def _media_material_dict(material_id: str, path: Path, width: int, height: int,
+                         source_dur_us: int, is_image: bool) -> dict:
+    """영상/이미지 material dict (CapCut 8.7.0). 기존 비디오 material 구조와 동일, 타입만 분기."""
+    p = str(path).replace("\\", "/")
+    return {
+        "id": material_id, "type": "photo" if is_image else "video",
+        "path": p, "media_path": p,
+        "duration": source_dur_us, "width": width, "height": height,
+        "material_name": path.name,
+        "category_id": "", "category_name": "local",
+        "has_audio": (not is_image), "source": "none", "source_platform": 0,
+        "is_ai_generate_content": False, "is_copyright": False,
+        "is_text_edit_overdub": False, "is_unified_beauty_mode": False,
+        "local_id": "", "local_material_id": "", "origin_material_id": "",
+        "request_id": "", "team_id": "", "text_task_id": "",
+        "audio_fade": None, "cartoon_path": "", "check_flag": 63,
+        "crop": {"lower_left_x": 0.0, "lower_left_y": 1.0, "lower_right_x": 1.0, "lower_right_y": 1.0,
+                 "upper_left_x": 0.0, "upper_left_y": 0.0, "upper_right_x": 1.0, "upper_right_y": 0.0},
+        "crop_ratio": "free", "crop_scale": 1.0,
+        "extra_type_option": 0, "formula_id": "", "freeze": None,
+        "intensifies_audio_path": "", "material_id": material_id, "material_url": p,
+        "matting": {"flag": 0, "has_use_quick_brush": False, "has_use_quick_eraser": False,
+                    "interactiveTime": [], "path": "", "strokes": []},
+        "object_locked": None,
+        "picture_from": "none", "picture_set_category_id": "", "picture_set_category_name": "",
+        "reverse_intensifies_path": "", "reverse_path": "", "smart_motion": None,
+        "stable": {"matrix_path": "", "stable_level": 0, "time_range": {"duration": 0, "start": 0}},
+        "text_camera_move": [],
+        "video_algorithm": {"algorithms": [], "deflicker": None, "motion_blur_config": None,
+                            "noise_reduction": None, "path": "", "time_range": None}
+    }
+
+
+def _media_segment_dict(seg_id: str, material_id: str, src_start_us: int, dur_us: int,
+                        tl_start_us: int, is_image: bool) -> dict:
+    """메인 트랙 영상/이미지 세그먼트 dict."""
+    return {
+        "id": seg_id, "material_id": material_id,
+        "source_timerange": {"start": src_start_us, "duration": dur_us},
+        "target_timerange": {"start": tl_start_us, "duration": dur_us},
+        "clip": {"alpha": 1.0, "flip": {"horizontal": False, "vertical": False},
+                 "rotation": 0.0, "scale": {"x": 1.0, "y": 1.0}, "transform": {"x": 0.0, "y": 0.0}},
+        "cartoon": False, "enable_adjust": True, "enable_color_correct_adjust": False,
+        "enable_color_curves": True, "enable_lut": True, "enable_smart_color_adjust": False,
+        "extra_material_refs": [], "is_placeholder": False, "is_tone_modify": False,
+        "last_nonzero_volume": 1.0, "render_index": 0, "reverse": False, "speed": 1.0,
+        "template_id": "", "template_scene": "default", "track_attribute": 0, "track_render_index": 0,
+        "type": "photo" if is_image else "video",
+        "uniform_scale": {"on": True, "value": 1.0}, "visible": True,
+        "volume": 0.0 if is_image else 1.0, "hdr_settings": None,
+        "intensifies_audio": False, "loop": False,
+    }
+
+
+def _finalize_draft(output_dir: Path, draft_name: str, ratio: str, canvas: dict,
+                    videos_materials: list, text_materials: list, tracks: list,
+                    final_duration: int, source_paths: list[Path],
+                    timeline_id: str, project_id: str, draft_id: str, ts: int) -> Path:
+    """draft_content/project/meta 조립 + 폴더 저장 (컷편집·시퀀스 공용)."""
+    platform = {"os": "windows", "os_version": "10.0.26200", "app_id": 359289,
+                "app_version": "8.7.0", "app_source": "cc",
+                "device_id": "", "hard_disk_id": "", "mac_address": ""}
+
+    draft_content = {
+        "id": timeline_id, "version": 360000, "new_version": "171.0.0", "name": "",
+        "duration": final_duration, "create_time": 0, "update_time": 0,
+        "fps": 30.0, "is_drop_frame_timecode": False, "color_space": -1,
+        "config": {
+            "video_mute": False, "record_audio_last_index": 1,
+            "extract_audio_last_index": 1, "original_sound_last_index": 1,
+            "subtitle_recognition_id": "", "subtitle_taskinfo": [],
+            "lyrics_recognition_id": "", "lyrics_taskinfo": [],
+            "subtitle_sync": True, "lyrics_sync": True, "voice_change_sync": False,
+            "sticker_max_index": 1, "adjust_max_index": 1, "material_save_mode": 0,
+            "export_range": None, "maintrack_adsorb": True, "combination_max_index": 1,
+            "attachment_info": [], "zoom_info_params": None, "system_font_list": [],
+            "multi_language_mode": "none", "multi_language_main": "none",
+            "multi_language_current": "none", "multi_language_list": [],
+            "subtitle_keywords_config": None, "use_float_render": False},
+        "canvas_config": {"ratio": ratio, "width": canvas["width"], "height": canvas["height"], "background": None},
+        "tracks": tracks, "group_container": None,
+        "materials": {
+            "flowers": [], "videos": videos_materials, "texts": text_materials,
+            "tail_leaders": [], "audios": [], "images": [],
+            "effects": [], "stickers": [], "canvases": [], "transitions": [],
+            "audio_effects": [], "audio_fades": [], "beats": [],
+            "material_animations": [], "placeholders": [], "placeholder_infos": [],
+            "speeds": [], "common_mask": [], "chromas": [], "text_templates": [],
+            "realtime_denoises": [], "audio_pannings": [], "audio_pitch_shifts": [],
+            "video_trackings": [], "hsl": [], "drafts": [], "color_curves": [],
+            "hsl_curves": [], "primary_color_wheels": [], "log_color_wheels": [],
+            "video_effects": [], "audio_balances": [], "handwrites": [],
+            "manual_deformations": [], "manual_beautys": [], "plugin_effects": [],
+            "sound_channel_mappings": [], "green_screens": [], "shapes": [],
+            "material_colors": [], "digital_humans": [], "digital_human_model_dressing": [],
+            "smart_crops": [], "ai_translates": [], "audio_track_indexes": [],
+            "loudnesses": [], "vocal_beautifys": [], "vocal_separations": [],
+            "smart_relights": [], "time_marks": [], "multi_language_refs": [],
+            "video_shadows": [], "video_strokes": [], "video_radius": []},
+        "keyframes": {"videos": [], "audios": [], "texts": [], "stickers": [],
+                      "filters": [], "adjusts": [], "handwrites": [], "effects": []},
+        "keyframe_graph_list": [], "platform": platform, "last_modified_platform": platform,
+        "mutable_config": None, "cover": None, "retouch_cover": None,
+        "extra_info": None, "relationships": [],
+        "render_index_track_mode_on": True, "free_render_index_mode_on": False,
+        "static_cover_image_path": "", "source": "default", "time_marks": None,
+        "path": "", "lyrics_effects": [],
+        "uneven_animation_template_info": {"composition": "", "content": "", "order": "", "sub_template_info_list": []},
+        "draft_type": "video", "smart_ads_info": {"page_from": "", "routine": "", "draft_url": ""},
+        "function_assistant_info": {
+            "smart_rec_applied": False, "fixed_rec_applied": False, "auto_adjust": False,
+            "auto_adjust_segid_list": [], "color_correction": False, "color_correction_segid_list": [],
+            "enhance_quality": False, "smooth_slow_motion": False, "deflicker_segid_list": [],
+            "video_noise_segid_list": [], "enhance_quality_segid_list": [], "smart_segid_list": [],
+            "retouch": False, "retouch_segid_list": [], "enhande_voice": False,
+            "enhance_voice_segid_list": [], "audio_noise_segid_list": [], "auto_caption": False,
+            "auto_caption_segid_list": [], "auto_caption_template_id": "", "caption_opt": False,
+            "caption_opt_segid_list": [], "eye_correction": False, "eye_correction_segid_list": [],
+            "normalize_loudness": False, "normalize_loudness_segid_list": [],
+            "normalize_loudness_audio_denoise_segid_list": [], "auto_adjust_fixed": False,
+            "auto_adjust_fixed_value": 50.0, "color_correction_fixed": False,
+            "color_correction_fixed_value": 50.0, "normalize_loudness_fixed": False,
+            "enhande_voice_fixed": False, "retouch_fixed": False, "enhance_quality_fixed": False,
+            "smooth_slow_motion_fixed": False, "fps": {"num": 0, "den": 1}}}
+
+    project_json = {
+        "config": {"color_space": -1, "render_index_track_mode_on": False, "use_float_render": False},
+        "create_time": ts, "id": project_id, "main_timeline_id": timeline_id,
+        "timelines": [{"create_time": ts, "id": timeline_id, "is_marked_delete": False, "name": "타임라인 01", "update_time": ts}],
+        "update_time": ts, "version": 0}
+
+    capcut_root = Path(os.environ.get("USERPROFILE", "")) / \
+        "AppData" / "Local" / "CapCut" / "User Data" / "Projects" / "com.lveditor.draft"
+    draft_folder_path = capcut_root / draft_name
+    src_values = [str(p).replace("\\", "/") for p in source_paths]
+
+    draft_meta_info = {
+        "cloud_draft_cover": False, "cloud_draft_sync": False, "cloud_package_completed_time": "",
+        "draft_cloud_capcut_purchase_info": "", "draft_cloud_last_action_download": False,
+        "draft_cloud_package_type": "", "draft_cloud_purchase_info": "",
+        "draft_cloud_template_id": "", "draft_cloud_tutorial_info": "",
+        "draft_cloud_videocut_purchase_info": "",
+        "draft_cover": "draft_cover.jpg", "draft_deeplink_url": "",
+        "draft_enterprise_info": {"draft_enterprise_extra": "", "draft_enterprise_id": "", "draft_enterprise_name": "", "enterprise_material": []},
+        "draft_fold_path": str(draft_folder_path).replace("\\", "/"), "draft_id": draft_id,
+        "draft_is_ae_produce": False, "draft_is_ai_packaging_used": False,
+        "draft_is_ai_shorts": False, "draft_is_ai_translate": False,
+        "draft_is_article_video_draft": False, "draft_is_cloud_temp_draft": False,
+        "draft_is_from_deeplink": "false", "draft_is_invisible": False,
+        "draft_is_pippit_draft": False, "draft_is_web_article_video": False,
+        "draft_materials": [
+            {"type": 0, "value": src_values},
+            {"type": 1, "value": []}, {"type": 2, "value": []}, {"type": 3, "value": []},
+            {"type": 6, "value": []}, {"type": 7, "value": []}, {"type": 8, "value": []}],
+        "draft_materials_copied_info": [], "draft_name": draft_name,
+        "draft_need_rename_folder": False, "draft_new_version": "",
+        "draft_removable_storage_device": "",
+        "draft_root_path": str(capcut_root).replace("/", "\\"),
+        "draft_segment_extra_info": [], "draft_timeline_materials_size_": 0,
+        "draft_type": "", "draft_web_article_video_enter_from": "",
+        "tm_draft_cloud_completed": "", "tm_draft_cloud_entry_id": -1,
+        "tm_draft_cloud_modified": 0, "tm_draft_cloud_parent_entry_id": -1,
+        "tm_draft_cloud_space_id": -1, "tm_draft_cloud_user_id": -1,
+        "tm_draft_create": ts, "tm_draft_modified": ts,
+        "tm_draft_removed": 0, "tm_duration": final_duration}
+
+    draft_dir = output_dir / draft_name
+    if draft_dir.exists():
+        shutil.rmtree(draft_dir)
+    draft_dir.mkdir(parents=True)
+
+    def write(name, data):
+        (draft_dir / name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    write("draft_content.json", draft_content)
+    write("draft_meta_info.json", draft_meta_info)
+    write("project.json", project_json)
+    write("attachment_pc_common.json", {
+        "ai_packaging_infos": [], "ai_packaging_report_info": {"caption_id_list": [], "commercial_material": "", "material_source": "", "method": "", "page_from": "", "style": "", "task_id": "", "text_style": "", "tos_id": "", "video_category": ""},
+        "broll": {"ai_packaging_infos": [], "ai_packaging_report_info": {"caption_id_list": [], "commercial_material": "", "material_source": "", "method": "", "page_from": "", "style": "", "task_id": "", "text_style": "", "tos_id": "", "video_category": ""}},
+        "commercial_music_category_ids": [], "pc_feature_flag": 0, "recognize_tasks": [],
+        "reference_lines_config": {"horizontal_lines": [], "is_lock": False, "is_visible": False, "vertical_lines": []},
+        "safe_area_type": 0, "template_item_infos": [], "unlock_template_ids": []})
+    write("attachment_pc_timeline.json", {"reference_lines_config": {"horizontal_lines": [], "is_lock": False, "is_visible": False, "vertical_lines": []}, "safe_area_type": 0})
+    write("timeline_layout.json", {"dockItems": [{"dockIndex": 0, "ratio": 1, "timelineIds": [timeline_id], "timelineNames": ["타임라인 01"]}], "layoutOrientation": 1})
+    write("performance_opt_info.json", {"manual_cancle_precombine_segs": None, "need_auto_precombine_segs": None})
+    write("draft_agency_config.json", {"is_auto_agency_enabled": False, "is_auto_agency_popup": False, "is_single_agency_mode": False, "marterials": None, "use_converter": True, "video_resolution": 720})
+    write("draft_biz_config.json", {})
+    (draft_dir / "draft_cover.jpg").write_bytes(b"")
+    return draft_dir
+
 
 def build_draft(
     video_path: Path,
@@ -617,6 +827,8 @@ def build_draft(
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
     script_text: str = "",
+    append_files: list[Path] | None = None,
+    image_dur_sec: float = DEFAULT_IMAGE_DUR_SEC,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -624,6 +836,8 @@ def build_draft(
     ratio:         "9:16" (숏츠 1080x1920, 기본) 또는 "16:9" (가로 1920x1080)
     max_sub_chars: 자막 한 조각 최대 글자 수 (±3자 허용)
     script_text:   대본. 있으면 정답 텍스트로 정렬해 오탈자 교정 + 반복 제거
+    append_files:  컷편집 영상 뒤에 순서대로 이어붙일 영상/이미지 파일들 (통합 모드)
+    image_dur_sec: 이어붙일 이미지 1장의 노출 시간(초)
     """
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
     src_width, src_height = get_video_resolution(video_path)
@@ -685,6 +899,26 @@ def build_draft(
             "loop": False,
         })
         timeline_cursor_us += dur
+
+    # ── 이어붙일 파일들(통합 모드): 컷편집 영상 뒤에 순서대로 배치 ──
+    extra_materials = []
+    for f in (append_files or []):
+        mat_id = str(uuid.uuid4()).upper()
+        w, h, dsec, is_img = get_media_info(f)
+        if is_img:
+            src_dur_us = IMAGE_SOURCE_DUR_US
+            seg_dur = sec_to_us(image_dur_sec)
+        else:
+            if not dsec:
+                continue
+            src_dur_us = sec_to_us(dsec)
+            seg_dur = src_dur_us
+        if seg_dur < 100_000:
+            continue
+        extra_materials.append(_media_material_dict(mat_id, f, w, h, src_dur_us, is_img))
+        segments.append(_media_segment_dict(
+            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img))
+        timeline_cursor_us += seg_dur
 
     final_duration = timeline_cursor_us
 
@@ -790,7 +1024,7 @@ def build_draft(
                 "video_algorithm": {"algorithms": [], "deflicker": None,
                                     "motion_blur_config": None, "noise_reduction": None,
                                     "path": "", "time_range": None}
-            }],
+            }] + extra_materials,
             "texts": text_materials,
             "tail_leaders": [], "audios": [], "images": [],
             "effects": [], "stickers": [], "canvases": [], "transitions": [],
@@ -876,7 +1110,7 @@ def build_draft(
         "draft_is_from_deeplink": "false", "draft_is_invisible": False,
         "draft_is_pippit_draft": False, "draft_is_web_article_video": False,
         "draft_materials": [
-            {"type": 0, "value": [video_str]},
+            {"type": 0, "value": [video_str] + [str(f).replace("\\", "/") for f in (append_files or [])]},
             {"type": 1, "value": []}, {"type": 2, "value": []},
             {"type": 3, "value": []}, {"type": 6, "value": []},
             {"type": 7, "value": []}, {"type": 8, "value": []}
@@ -923,6 +1157,75 @@ def build_draft(
     return draft_dir
 
 
+def sort_files_by_download_time(paths: list[Path]) -> list[Path]:
+    """다운로드(저장) 시간 순 정렬 — 파일 생성/수정 시각 중 이른 값 기준, 오름차순."""
+    def key(p: Path):
+        try:
+            st = p.stat()
+            # Windows는 st_ctime이 생성시각, mtime과 함께 더 이른 쪽을 다운로드 시각으로
+            return min(getattr(st, "st_ctime", st.st_mtime), st.st_mtime)
+        except Exception:
+            return 0.0
+    return sorted(paths, key=key)
+
+
+def build_sequence_draft(
+    files: list[Path],
+    output_dir: Path,
+    draft_name: str = "CapCut_Sequence",
+    ratio: str = "9:16",
+    image_dur_sec: float = DEFAULT_IMAGE_DUR_SEC,
+) -> tuple[Path, list[str]]:
+    """
+    선택한 영상/이미지 파일들을 다운로드(저장) 시간 순으로 메인 트랙에 이어붙인 draft 생성.
+    반환: (draft 폴더, 배치된 파일명 순서 목록)
+    """
+    canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
+    ordered = sort_files_by_download_time(list(files))
+
+    timeline_id = str(uuid.uuid4()).upper()
+    project_id  = str(uuid.uuid4()).upper()
+    draft_id    = str(uuid.uuid4()).upper()
+    track_id    = str(uuid.uuid4()).upper()
+    ts = now_us()
+
+    segments = []
+    videos_materials = []
+    placed = []
+    cursor = 0
+    for f in ordered:
+        if not f.exists():
+            continue
+        w, h, dsec, is_img = get_media_info(f)
+        if is_img:
+            src_dur_us = IMAGE_SOURCE_DUR_US
+            seg_dur = sec_to_us(image_dur_sec)
+        else:
+            if not dsec:
+                continue
+            src_dur_us = sec_to_us(dsec)
+            seg_dur = src_dur_us
+        if seg_dur < 100_000:
+            continue
+        mat_id = str(uuid.uuid4()).upper()
+        videos_materials.append(_media_material_dict(mat_id, f, w, h, src_dur_us, is_img))
+        segments.append(_media_segment_dict(str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img))
+        cursor += seg_dur
+        placed.append(f.name)
+
+    if not segments:
+        raise ValueError("배치할 수 있는 영상/이미지 파일이 없습니다.")
+
+    final_duration = cursor
+    tracks = [{"attribute": 0, "flag": 0, "id": track_id,
+               "is_default_name": True, "name": "", "segments": segments, "type": "video"}]
+
+    draft_dir = _finalize_draft(output_dir, draft_name, ratio, canvas,
+                                videos_materials, [], tracks, final_duration,
+                                ordered, timeline_id, project_id, draft_id, ts)
+    return draft_dir, placed
+
+
 # ══════════════════════════════════════════════════════════
 # API
 # ══════════════════════════════════════════════════════════
@@ -942,13 +1245,18 @@ async def process_video(
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
 ):
-    # 대본은 길이 제한 없는 POST body(JSON)로 받는다: {"script": "..."}
-    # FastAPI Body 파싱 대신 raw body를 직접 읽어 파싱 문제를 원천 차단
+    # POST body(JSON)로 대본 + 이어붙일 파일 목록을 받는다:
+    #   {"script": "...", "append_files": ["C:/a.mp4", "C:/b.jpg"], "image_dur": 3.0}
     script_text = ""
+    append_files: list[Path] = []
+    image_dur = DEFAULT_IMAGE_DUR_SEC
     try:
         raw = await request.body()
         if raw:
-            script_text = (json.loads(raw.decode("utf-8")).get("script") or "").strip()
+            body = json.loads(raw.decode("utf-8"))
+            script_text = (body.get("script") or "").strip()
+            append_files = [Path(p) for p in (body.get("append_files") or []) if p]
+            image_dur = float(body.get("image_dur") or DEFAULT_IMAGE_DUR_SEC)
     except Exception:
         script_text = ""
 
@@ -996,11 +1304,19 @@ async def process_video(
                 srt_name = video.stem + ".srt"
                 yield f"data: {json.dumps({'step': 'asr_done', 'msg': f'자막 {subtitle_count}개 생성 완료', 'srt_name': srt_name})}\n\n"
 
+            valid_appends = [f for f in append_files if f.exists()]
+            if valid_appends:
+                ordered = sort_files_by_download_time(valid_appends)
+                names = ", ".join(f.name for f in ordered)
+                yield f"data: {json.dumps({'step': 'draft', 'msg': f'뒤에 이어붙일 파일 {len(ordered)}개 (다운로드 순): {names}'})}\n\n"
+                valid_appends = ordered
+
             yield f"data: {json.dumps({'step': 'draft', 'msg': f'CapCut draft 생성 중... ({ratio})'})}\n\n"
             name = video.stem
-            draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio, max_sub_chars, script_text)
+            draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
+                                    max_sub_chars, script_text, valid_appends, image_dur)
 
-            yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count})}\n\n"
+            yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'step': 'error', 'msg': str(e)})}\n\n"
@@ -1024,6 +1340,46 @@ async def browse_file():
         return JSONResponse({"path": path or ""})
     except Exception as e:
         return JSONResponse({"path": "", "error": str(e)})
+
+
+@app.get("/api/browse-multi")
+async def browse_files():
+    """파일 여러 개 선택 (영상+이미지). 다운로드(저장) 시간 순으로 정렬해서 반환."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", True)
+        paths = filedialog.askopenfilenames(
+            title="영상·이미지 파일 여러 개 선택",
+            filetypes=[("영상·이미지", "*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.jpg *.jpeg *.png *.webp *.bmp *.gif *.heic"),
+                       ("모든 파일", "*.*")]
+        )
+        root.destroy()
+        ordered = sort_files_by_download_time([Path(p) for p in paths])
+        return JSONResponse({"files": [str(p) for p in ordered]})
+    except Exception as e:
+        return JSONResponse({"files": [], "error": str(e)})
+
+
+@app.post("/api/build-sequence")
+async def build_sequence(request: Request):
+    """선택 파일들만으로 순서대로 배치한 새 캡컷 draft 생성 (별도 기능)."""
+    body = await request.json()
+    files = [Path(p) for p in (body.get("files") or []) if p]
+    ratio = body.get("ratio") or "9:16"
+    image_dur = float(body.get("image_dur") or DEFAULT_IMAGE_DUR_SEC)
+    name = (body.get("name") or "CapCut_Sequence").strip() or "CapCut_Sequence"
+    files = [f for f in files if f.exists()]
+    if not files:
+        raise HTTPException(400, "선택된 파일이 없습니다.")
+    try:
+        draft_dir, placed = build_sequence_draft(files, OUTPUT_DIR, name, ratio, image_dur)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse({"success": True, "draft_dir": str(draft_dir),
+                         "draft_name": name, "count": len(placed), "order": placed})
 
 
 @app.post("/api/copy-to-capcut/{draft_name}")
