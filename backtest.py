@@ -407,10 +407,17 @@ def run_backtest(df, p):
     strategy = p.get('strategy', 'base')
     sl_pct = float(p.get('sl_pct', 0.0))    # 손절 % (0=끔)
     warmup = max(60, int(p['ema_slow']) + 5, STRAT_WARMUP.get(strategy, 60))
+    long_only = strategy in ('goldfib', 'bollinger')
 
-    # ADX는 TP 결정에 항상 필요
-    adx = adx_on_interval(df, p['adx_period'],
-                          p.get('adx_interval', p['interval']), p['interval']).values
+    # 🔥 익절 방식 — 롱전용 전략(황금피보/볼린저)은 고정 TP만 사용
+    #    (UT·EMA·ADX·ADX시간봉은 이 전략들에 적용 안 됨 = 아래에서 계산조차 안 함)
+    tp_mode = 'fixed' if long_only else p.get('tp_mode', 'adx')
+
+    # ADX는 base 전략의 ADX TP일 때만 필요 (롱전용 전략엔 미적용)
+    adx = None
+    if tp_mode == 'adx':
+        adx = adx_on_interval(df, p['adx_period'],
+                              p.get('adx_interval', p['interval']), p['interval']).values
 
     # 🔥 진입 신호 = 선택한 전략
     if strategy == 'goldfib':
@@ -443,8 +450,6 @@ def run_backtest(df, p):
         h_gold = (hf > hs).values
         roi_th = p['hybrid_roi_th']
 
-    # 🔥 익절 방식
-    tp_mode = p.get('tp_mode', 'adx')
     if tp_mode == 'atr':
         atr_tp = atr_rma(df, int(p.get('atr_tp_period', 14))).values  # TP거리 계산용 ATR
 
@@ -641,14 +646,14 @@ def make_configs(p, compare):
         ]
 
     if compare == 'strat':
-        # 진입전략 비교: 내 기본 vs 황금피보(R:R 2:1) vs 볼린저(R:R 2:1)
-        # 롱전용 전략은 고정TP+손절로 청산 (손익비 가이드 반영)
+        # 진입전략 비교: 내 기본 vs 황금피보 vs 볼린저
+        # 롱전용 전략은 설정한 TP%·손절%로 청산 (UT/EMA/ADX는 미적용)
+        tp = p.get('fixed_tp_pct', 1.2)
+        sl = p.get('sl_pct', 0.0) or 2.0
         return [
             dict(p, name='기본(UT+EMA)', strategy='base'),
-            dict(p, name='황금피보(TP3/SL1.5)', strategy='goldfib',
-                 tp_mode='fixed', fixed_tp_pct=3.0, sl_pct=1.5),
-            dict(p, name='볼린저(TP2/SL1)', strategy='bollinger',
-                 tp_mode='fixed', fixed_tp_pct=2.0, sl_pct=1.0),
+            dict(p, name=f'황금피보(TP{tp:g}/SL{sl:g})', strategy='goldfib', sl_pct=sl),
+            dict(p, name=f'볼린저(TP{tp:g}/SL{sl:g})', strategy='bollinger', sl_pct=sl),
         ]
 
     return [
@@ -1002,14 +1007,18 @@ def launch_gui():
                  state='readonly').pack(anchor='w', padx=22, pady=2)
     sform = tk.Frame(left, bg=PANEL)
     sform.pack(padx=10)
-    tk.Label(sform, text='손절 % (0=끔)', bg=PANEL, fg='#aaaaaa', font=('Arial', 9),
-             anchor='w').grid(row=0, column=0, sticky='w', pady=1)
-    v = tk.StringVar(value=str(DEFAULTS['sl_pct']))
-    tk.Entry(sform, textvariable=v, width=10, font=('Arial', 9),
-             justify='center').grid(row=0, column=1, padx=6, pady=1)
-    vars_['sl_pct'] = v
-    tk.Label(left, text="※ 황금피보·볼린저는 롱 전용 → 손절 필요", bg=PANEL,
+    sfields = [('익절 TP % (황금피보/볼린저)', 'fixed_tp_pct'), ('손절 % (0=끔)', 'sl_pct')]
+    for r, (label, key) in enumerate(sfields):
+        tk.Label(sform, text=label, bg=PANEL, fg='#aaaaaa', font=('Arial', 9),
+                 anchor='w').grid(row=r, column=0, sticky='w', pady=1)
+        v = tk.StringVar(value=str(DEFAULTS[key]))
+        tk.Entry(sform, textvariable=v, width=8, font=('Arial', 9),
+                 justify='center').grid(row=r, column=1, padx=6, pady=1)
+        vars_[key] = v
+    tk.Label(left, text="※ 황금피보·볼린저에는 위 TP%·손절%·수수료·레버리지·", bg=PANEL,
              fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
+    tk.Label(left, text="   진입금·시간봉만 적용 (UT·EMA·ADX·ADX시간봉 미적용)",
+             bg=PANEL, fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
     tk.Label(left, text="※ 통합거래량 지표는 다거래소 합산이라 백테스트 불가(제외)",
              bg=PANEL, fg='#666666', font=('Arial', 8)).pack(anchor='w', padx=22)
 
