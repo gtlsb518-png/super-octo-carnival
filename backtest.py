@@ -408,6 +408,9 @@ def run_backtest(df, p):
     sl_pct = float(p.get('sl_pct', 0.0))    # 손절 % (0=끔)
     warmup = max(60, int(p['ema_slow']) + 5, STRAT_WARMUP.get(strategy, 60))
     long_only = strategy in ('goldfib', 'bollinger')
+    # 🔥 롱전용 전략은 스위칭이 없어 손절이 필수 — 0이면 강제청산까지 물림 → 안전 2% 적용
+    if long_only and sl_pct <= 0:
+        sl_pct = 2.0
 
     # 🔥 익절 방식 — 롱전용 전략(황금피보/볼린저)은 고정 TP만 사용
     #    (UT·EMA·ADX·ADX시간봉은 이 전략들에 적용 안 됨 = 아래에서 계산조차 안 함)
@@ -635,7 +638,13 @@ def make_configs(p, compare):
         ]
 
     if compare == 'tp':
-        # 익절 방식 비교: 지금(ADX 고정) vs 스위칭만(TP없음) vs ATR(배수 4종)
+        if p.get('strategy') in ('goldfib', 'bollinger'):
+            # 롱전용 전략은 TP방식(ADX/ATR/스위칭)을 안 씀 → TP% 값들을 비교
+            sl = p.get('sl_pct', 0.0) or 2.0
+            return [dict(p, name=f'TP{tp:g}% (손절{sl:g}%)',
+                         tp_mode='fixed', fixed_tp_pct=tp, sl_pct=sl)
+                    for tp in (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)]
+        # 기본 전략: 익절 방식 비교
         return [
             dict(p, name='지금(ADX TP)', tp_mode='adx'),
             dict(p, name='스위칭만(TP없음)', tp_mode='switch'),
