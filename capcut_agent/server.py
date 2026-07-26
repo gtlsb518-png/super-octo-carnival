@@ -1324,20 +1324,44 @@ async def process_video(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _pick_files_windows(multi: bool, title: str, filt: str) -> list[str]:
+    """
+    Windows 기본 파일 열기 대화상자(.NET WinForms)를 PowerShell로 띄워 경로를 받는다.
+    tkinter가 없는 포터블 Python에서도 동작한다. 비Windows/실패 시 빈 리스트.
+    filt 형식: "영상·이미지|*.mp4;*.png|모든 파일|*.*"
+    """
+    ps = (
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$f=New-Object System.Windows.Forms.OpenFileDialog;"
+        f"$f.Multiselect=${'true' if multi else 'false'};"
+        f"$f.Title='{title}';"
+        f"$f.Filter='{filt}';"
+        "$f.RestoreDirectory=$true;"
+        "$owner=New-Object System.Windows.Forms.Form; $owner.TopMost=$true;"
+        "if($f.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK)"
+        "{[Console]::Out.Write($f.FileNames -join \"`n\")}"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        out = (r.stdout or "").strip()
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+_VIDEO_FILTER = "영상 파일|*.mp4;*.mov;*.avi;*.mkv;*.webm;*.m4v|모든 파일|*.*"
+_MEDIA_FILTER = ("영상·이미지|*.mp4;*.mov;*.avi;*.mkv;*.webm;*.m4v;"
+                 "*.jpg;*.jpeg;*.png;*.webp;*.bmp;*.gif;*.heic|모든 파일|*.*")
+
+
 @app.get("/api/browse")
 async def browse_file():
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", True)
-        path = filedialog.askopenfilename(
-            title="영상 파일 선택",
-            filetypes=[("영상 파일", "*.mp4 *.mov *.avi *.mkv *.webm *.m4v"), ("모든 파일", "*.*")]
-        )
-        root.destroy()
-        return JSONResponse({"path": path or ""})
+        picked = _pick_files_windows(False, "영상 파일 선택", _VIDEO_FILTER)
+        return JSONResponse({"path": picked[0] if picked else ""})
     except Exception as e:
         return JSONResponse({"path": "", "error": str(e)})
 
@@ -1346,18 +1370,8 @@ async def browse_file():
 async def browse_files():
     """파일 여러 개 선택 (영상+이미지). 다운로드(저장) 시간 순으로 정렬해서 반환."""
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", True)
-        paths = filedialog.askopenfilenames(
-            title="영상·이미지 파일 여러 개 선택",
-            filetypes=[("영상·이미지", "*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.jpg *.jpeg *.png *.webp *.bmp *.gif *.heic"),
-                       ("모든 파일", "*.*")]
-        )
-        root.destroy()
-        ordered = sort_files_by_download_time([Path(p) for p in paths])
+        picked = _pick_files_windows(True, "영상·이미지 파일 여러 개 선택", _MEDIA_FILTER)
+        ordered = sort_files_by_download_time([Path(p) for p in picked])
         return JSONResponse({"files": [str(p) for p in ordered]})
     except Exception as e:
         return JSONResponse({"files": [], "error": str(e)})

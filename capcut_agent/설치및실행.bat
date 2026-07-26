@@ -1,55 +1,44 @@
 @echo off
 chcp 65001 > nul
 title CapCut Agent - 설치 및 실행
+cd /d "%~dp0"
 
 echo.
 echo  ============================================
-echo   CapCut Agent v2.0  -  무음 자동 컷편집
+echo   CapCut Agent  -  무음 자동 컷편집 + 자막
 echo  ============================================
 echo.
+echo  처음 실행이면 Python과 ffmpeg를 자동으로 내려받습니다.
+echo  (관리자 권한 필요 없음, 이 폴더의 runtime\ 안에만 설치됨)
+echo  인터넷이 되는 상태에서 잠시 기다려 주세요...
+echo.
 
-:: Python 확인
-python --version > nul 2>&1
+:: ── 자동 설치 (portable Python + ffmpeg + 패키지) ──
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1"
 if errorlevel 1 (
-    echo [오류] Python이 설치되어 있지 않습니다.
-    echo        https://python.org 에서 Python 3.10 이상을 설치하세요.
+    echo.
+    echo  [오류] 설치에 실패했습니다.
+    echo         인터넷 연결을 확인한 뒤 이 파일을 다시 실행하세요.
+    echo         회사망/방화벽 때문이면 다른 네트워크에서 한 번만 실행하면 됩니다.
     pause
     exit /b 1
 )
 
-:: ffmpeg 확인
-ffmpeg -version > nul 2>&1
-if errorlevel 1 (
-    echo [경고] ffmpeg을 찾을 수 없습니다.
-    echo  winget install Gyan.FFmpeg 실행 후 재시작하세요.
-    pause
-    exit /b 1
-)
-
-:: 패키지 설치 (pip upgrade 먼저)
-echo [1/3] Python 패키지 설치 중... (시간이 걸릴 수 있습니다)
-python -m pip install --upgrade pip --quiet
-python -m pip install fastapi uvicorn python-multipart faster-whisper
-if errorlevel 1 (
-    echo [오류] 패키지 설치 실패
-    pause
-    exit /b 1
-)
-echo       완료
-
-:: 폴더 생성
+:: ── 폴더 준비 ──
 if not exist "outputs" mkdir outputs
 if not exist "uploads" mkdir uploads
-echo [2/3] 폴더 생성 완료
 
-:: 서버 실행
-echo [3/3] 서버 시작 중...
+:: ── 로컬 runtime 을 이 세션 PATH 앞에 추가 ──
+set "PATH=%~dp0runtime\ffmpeg\bin;%PATH%"
+set "PYTHONPATH=%~dp0"
+
 echo.
-echo  브라우저에서 접속: http://localhost:8765
-echo  종료: Ctrl+C
+echo  ============================================
+echo   서버 시작!  브라우저에서 자동으로 열립니다.
+echo   안 열리면 직접 접속: http://localhost:8765
+echo   종료하려면 이 창에서 Ctrl+C
+echo  ============================================
 echo.
 
-start "" /min cmd /c "timeout /t 3 > nul && start http://localhost:8765"
-
-python server.py
+"%~dp0runtime\python\python.exe" "%~dp0server.py"
 pause

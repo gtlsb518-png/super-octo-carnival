@@ -449,16 +449,14 @@
 
   <!-- 설치 안내 -->
   <div class="card">
-    <div class="card-title">설치 방법 (처음 한 번만)</div>
-    <p style="color:var(--muted); font-size:12px; margin-bottom:12px;">아래 명령어를 CMD에서 실행하세요:</p>
-    <div class="copy-box" onclick="copyCmd(this, 'pip install fastapi uvicorn python-multipart faster-whisper')">
-      pip install fastapi uvicorn python-multipart faster-whisper
-    </div>
-    <div class="copy-box" style="margin-top:8px;" onclick="copyCmd(this, 'python server.py')">
-      python server.py
-    </div>
-    <p style="color:var(--muted); font-size:11px; margin-top:10px;">
-      ※ ffmpeg이 PATH에 있어야 합니다. 없으면 <a href="https://ffmpeg.org/download.html" target="_blank" style="color:var(--accent);">ffmpeg.org</a>에서 다운로드
+    <div class="card-title">설치 방법</div>
+    <p style="color:var(--text); font-size:12px; margin-bottom:8px;">
+      압축을 푼 뒤 <strong style="color:var(--accent);">설치및실행.bat</strong> 을 더블클릭하세요.
+    </p>
+    <p style="color:var(--muted); font-size:11px; line-height:1.7;">
+      · 처음 한 번은 Python·ffmpeg를 자동으로 내려받습니다 (인터넷 필요, 관리자 권한 불필요).<br>
+      · 아무것도 미리 깔 필요 없이 이 폴더의 <code style="color:var(--accent);">runtime\</code> 안에만 설치됩니다.<br>
+      · 자막(음성인식)까지 쓰려면 <strong style="color:var(--accent);">자막기능_추가설치.bat</strong> 을 한 번 실행하세요 (용량 큼).
     </p>
   </div>
 
