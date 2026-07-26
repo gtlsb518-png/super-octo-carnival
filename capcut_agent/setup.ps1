@@ -5,7 +5,8 @@
 $ErrorActionPreference = "Stop"
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
 
-$root    = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$root    = $PSScriptRoot
+if (-not $root) { $root = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $runtime = Join-Path $root "runtime"
 $pyDir   = Join-Path $runtime "python"
 $py      = Join-Path $pyDir "python.exe"
