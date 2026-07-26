@@ -202,41 +202,92 @@ def _norm_token(s: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]", "", s.lower())
 
 
-def spell_correct_words(words: list[dict], script_words: list[str],
-                        script_norm: list[str]) -> list[dict]:
+def _best_script_window(clip_norm: list[str], script_norm: list[str],
+                        near: int = 0) -> tuple[int, int, float]:
     """
-    각 단어의 '철자만' 대본 단어로 교정 (내용·순서·개수는 그대로 유지).
-    - 단어별로 대본 전체에서 가장 비슷한 단어를 찾아 유사도가 충분하면 교체
-      (실하냐→실화냐, 대표선수→대표지수, 1회를→1위를 등)
-    - 비슷한 대본 단어가 없으면 원래 인식 단어를 그대로 둠 (버리지 않음)
-    - 단어를 소모하지 않으므로 중복 클립의 같은 단어도 똑같이 교정됨
+    클립에서 인식된 단어열과 가장 잘 맞는 대본의 '연속 구간'을 찾는다.
+    대본 구간을 소모하지 않으므로 같은 문장을 여러 번 찍은 엔지컷도 각자 매칭된다.
+    반환: (대본 시작 index, 길이, 유사도)
     """
     import difflib
-    if not script_norm:
-        return words
+    target = "".join(clip_norm)
+    ns = len(script_norm)
+    if not target or ns == 0:
+        return 0, 0, 0.0
+    n = len(clip_norm)
     sm = difflib.SequenceMatcher(None, autojunk=False)
-    out = []
-    for wd in words:
-        wnorm = _norm_token(wd["word"])
-        if not wnorm:
-            out.append(wd)
-            continue
-        sm.set_seq1(wnorm)
-        best_r, best_j = 0.0, -1
-        for j, sn in enumerate(script_norm):
-            if not sn:
-                continue
-            sm.set_seq2(sn)
-            if sm.quick_ratio() <= best_r:
-                continue
+    sm.set_seq1(target)
+    best = (0, 0, 0.0)
+    for start in range(ns):
+        maxlen = min(ns - start, n + 3)
+        for length in range(max(1, n - 2), maxlen + 1):
+            sm.set_seq2("".join(script_norm[start:start + length]))
+            if sm.quick_ratio() <= best[2]:
+                continue          # 상한값으로 가지치기
             r = sm.ratio()
-            if r > best_r:
-                best_r, best_j = r, j
-        if best_j >= 0 and best_r >= 0.55:
-            out.append({**wd, "word": script_words[best_j]})
-        else:
-            out.append(wd)
+            if near:
+                r -= 0.0005 * min(abs(start - near), 60)  # 동점일 때만 순서 우대
+            if r > best[2]:
+                best = (start, length, r)
+    return best
+
+
+def _retime_words(src: list[dict], new_words: list[str]) -> list[dict]:
+    """src 단어들의 시간 구간을 new_words에 글자 수 비례로 재분배."""
+    if not new_words:
+        return src
+    s, e = src[0]["tl_start"], src[-1]["tl_end"]
+    span = max(e - s, 0)
+    total = sum(len(t) for t in new_words) or 1
+    out, cur = [], s
+    for i, t in enumerate(new_words):
+        we = e if i == len(new_words) - 1 else cur + int(span * len(t) / total)
+        out.append({**src[0], "word": t, "tl_start": cur, "tl_end": max(we, cur)})
+        cur = we
     return out
+
+
+def align_clip_to_script(words: list[dict], script_words: list[str], script_norm: list[str],
+                         near: int = 0, threshold: float = 0.5) -> tuple[list[dict], int, int]:
+    """
+    한 영상 클립에서 인식된 단어열을, 대본의 '해당 문맥 구간'에 정렬해서 철자를 교정.
+    문맥으로 맞추므로 단어 하나씩 비교하는 것보다 오타가 훨씬 줄고,
+    띄어쓰기가 달라도(삼성이주가 → 삼성이 주가) 바로잡힌다.
+
+    규칙 (엔지컷 편집을 위해 내용은 절대 바꾸지 않음):
+      - 일치/불일치: 대본 단어로 교체 (철자 교정)
+      - 대본에만 있는 단어: 말하지 않았으므로 추가하지 않음 (엔지컷 유지)
+      - 인식에만 있는 단어: 대본에 없는 애드립 → 원문 그대로 유지
+      - 대본에서 맞는 구간을 못 찾으면 클립 전체를 원문 그대로 유지
+    반환: (교정된 단어열, 다음 클립 탐색 힌트, 교정된 단어 수)
+    """
+    import difflib
+    clip_norm = [_norm_token(w["word"]) for w in words]
+    if not any(clip_norm) or not script_norm:
+        return words, near, 0
+
+    start, length, ratio = _best_script_window(clip_norm, script_norm, near)
+    if length == 0 or ratio < threshold:
+        return words, near, 0      # 대본에 없는 발화 → 손대지 않음
+
+    win_words = script_words[start:start + length]
+    win_norm = script_norm[start:start + length]
+    sm = difflib.SequenceMatcher(None, clip_norm, win_norm, autojunk=False)
+
+    out, fixed = [], 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                if words[i1 + k]["word"] != win_words[j1 + k]:
+                    fixed += 1
+                out.append({**words[i1 + k], "word": win_words[j1 + k]})
+        elif tag == "replace":
+            out.extend(_retime_words(words[i1:i2], win_words[j1:j2]))
+            fixed += (i2 - i1)
+        elif tag == "delete":
+            out.extend(words[i1:i2])   # 애드립 → 그대로
+        # insert(대본에만 있는 단어): 말하지 않았으므로 넣지 않음
+    return out, start + length, fixed
 
 
 # 자막에 허용할 문자: 한글(음절+자모)/영문/숫자/공백/기본 문장부호(. , ? ! % -)
@@ -378,7 +429,8 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
 def subtitle_chunks_for_timeline(segments: list[dict],
                                  keep_ranges: list[tuple[float, float, int, int]],
                                  max_chars: int = MAX_SUBTITLE_CHARS,
-                                 script_text: str = "") -> list[dict]:
+                                 script_text: str = "",
+                                 stats: dict | None = None) -> list[dict]:
     """
     최종 자막 목록 생성 (draft 텍스트 트랙 + SRT 공용).
 
@@ -391,20 +443,20 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     - 클립 안에서만 한국어 어절 경계로 max_chars(±3) 분할
     - 클립의 자막은 클립 시작~끝을 빈틈없이 채움 (조각 경계는 실제 발화 시각)
     - 말이 없는 클립은 자막 없음
-    - 대본(script_text)이 있으면 단어 '철자만' 교정 (내용·개수·순서 유지)
+    - 대본(script_text)이 있으면 클립마다 대본의 해당 문맥 구간에 정렬해 철자 교정
+      (내용·순서는 유지, 대본에 없는 애드립은 원문 그대로)
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
     MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
 
     stream = build_word_stream(segments)
-    if script_text.strip():
-        script_words = script_text.split()
-        script_norm = [_norm_token(w) for w in script_words]
-        stream = spell_correct_words(stream, script_words, script_norm)
-
     mapped = map_words_to_timeline(stream, keep_ranges)
     if not mapped:
         return []
+
+    script_words = script_text.split() if script_text.strip() else []
+    script_norm = [_norm_token(w) for w in script_words] if script_words else []
+    near, total_fixed = 0, 0
 
     # 클립별로 단어를 모은다 (자막이 클립을 넘지 않도록)
     per_clip: dict[int, list[dict]] = {}
@@ -415,6 +467,14 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     for ci in sorted(per_clip):
         words = per_clip[ci]
         _ks, _ke, clip_start, clip_end = keep_ranges[ci]
+
+        # 대본 참고 교정: 이 클립이 대본의 어느 부분인지 찾아 문맥에 맞춰 철자만 교정
+        if script_norm:
+            words, near, fixed = align_clip_to_script(words, script_words, script_norm, near)
+            total_fixed += fixed
+            if not words:
+                continue
+
         groups = chunk_words_korean(words, max_chars)
         if not groups:
             continue
@@ -438,6 +498,9 @@ def subtitle_chunks_for_timeline(segments: list[dict],
                 if e <= s:
                     continue
             out.append({"start_us": s, "end_us": e, "text": text})
+
+    if stats is not None:
+        stats["corrected"] = total_fixed
     return out
 
 def _make_text_material(text_id: str, text: str, task_id: str = "") -> dict:
@@ -1301,16 +1364,15 @@ async def process_video(
                     loop = asyncio.get_event_loop()
                     raw_subs = await loop.run_in_executor(None, transcribe, video, script_text)
                 if script_text:
-                    # 진단: 대본이 실제로 수신됐는지 + 철자 교정이 몇 개 걸리는지 표시
-                    _sw = script_text.split()
-                    _sn = [_norm_token(w) for w in _sw]
-                    _all = build_word_stream(raw_subs)
-                    _corr = spell_correct_words(_all, _sw, _sn)
-                    _nfix = sum(1 for a, b in zip(_all, _corr) if a["word"] != b["word"])
-                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 {len(script_text)}자 수신 → 철자 교정 {_nfix}개 적용'})}\n\n"
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 {len(script_text)}자 수신 → 문맥 대조 교정 중...'})}\n\n"
                 else:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 없음 → Whisper 인식 그대로 사용'})}\n\n"
-                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars, script_text)
+                _stats: dict = {}
+                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars,
+                                                          script_text, _stats)
+                if script_text:
+                    n_fixed = _stats.get("corrected", 0)
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 참고 철자 교정 {n_fixed}개 적용'})}\n\n"
                 subtitle_count = len(sub_chunks)
                 srt_content = make_srt(sub_chunks)
                 srt_path = OUTPUT_DIR / f"{video.stem}.srt"
