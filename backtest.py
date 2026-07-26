@@ -820,9 +820,42 @@ def launch_gui():
     running = [False]
     all_symbols = list(FALLBACK_SYMBOLS)
 
-    # ---------- 좌측: 설정 ----------
-    left = tk.Frame(root, bg=PANEL)
-    left.pack(side='left', fill='y', padx=8, pady=8)
+    # ---------- 좌측: 설정 (스크롤 가능) ----------
+    left_wrap = tk.Frame(root, bg=PANEL)
+    left_wrap.pack(side='left', fill='y', padx=8, pady=8)
+    left_canvas = tk.Canvas(left_wrap, bg=PANEL, highlightthickness=0, width=310)
+    left_scroll = tk.Scrollbar(left_wrap, orient='vertical',
+                               command=left_canvas.yview)
+    left_canvas.configure(yscrollcommand=left_scroll.set)
+    left_scroll.pack(side='right', fill='y')
+    left_canvas.pack(side='left', fill='both', expand=True)
+    left = tk.Frame(left_canvas, bg=PANEL)   # 실제 설정 위젯들이 담기는 내부 프레임
+    left_canvas.create_window((0, 0), window=left, anchor='nw')
+
+    def _left_configure(_e=None):
+        left_canvas.configure(scrollregion=left_canvas.bbox('all'))
+    left.bind('<Configure>', _left_configure)
+
+    def _left_wheel(e):
+        left_canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+
+    def _left_wheel_up(_e):
+        left_canvas.yview_scroll(-1, 'units')
+
+    def _left_wheel_down(_e):
+        left_canvas.yview_scroll(1, 'units')
+
+    def _left_enter(_e):   # 마우스가 왼쪽 패널 위에 있을 때만 휠 작동
+        left_canvas.bind_all('<MouseWheel>', _left_wheel)      # Windows/Mac
+        left_canvas.bind_all('<Button-4>', _left_wheel_up)     # Linux
+        left_canvas.bind_all('<Button-5>', _left_wheel_down)
+
+    def _left_leave(_e):
+        left_canvas.unbind_all('<MouseWheel>')
+        left_canvas.unbind_all('<Button-4>')
+        left_canvas.unbind_all('<Button-5>')
+    left_canvas.bind('<Enter>', _left_enter)
+    left_canvas.bind('<Leave>', _left_leave)
 
     tk.Label(left, text="⚙️ 설정 (모두 수정 가능)", bg=PANEL, fg=ACCENT,
              font=('Arial', 12, 'bold')).pack(pady=(8, 4))
