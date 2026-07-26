@@ -317,8 +317,9 @@ def map_words_to_timeline(stream: list[dict],
         ce = min(max(we, ks), ke)
         s_us = tl_s + sec_to_us(cs - ks)
         e_us = tl_s + sec_to_us(ce - ks)
-        mapped.append({"word": w["word"], "tl_start": s_us, "tl_end": max(e_us, s_us)})
-    mapped.sort(key=lambda x: x["tl_start"])
+        mapped.append({"word": w["word"], "clip": best_i,
+                       "tl_start": s_us, "tl_end": max(e_us, s_us)})
+    mapped.sort(key=lambda x: (x["clip"], x["tl_start"]))
     return mapped
 
 
@@ -380,17 +381,20 @@ def subtitle_chunks_for_timeline(segments: list[dict],
                                  script_text: str = "") -> list[dict]:
     """
     최종 자막 목록 생성 (draft 텍스트 트랙 + SRT 공용).
-    참고 완성본처럼, 클립 경계와 무관하게 '말 전체'를 연속 자막으로 만든다.
-    - 발화된 모든 단어가 순서대로 자막에 들어감 (중복 단어·문장도 그대로, 누락 없음)
-    - 한국어 어절 경계에서 max_chars(±3) 길이로 끊음
-    - 각 조각 시각 = 그 조각 단어들의 실제 발화 시각(타임라인 매핑)
-    - 자막끼리는 끊김 없이 이어지되(작은 틈은 다음 자막까지 연장),
-      말이 없는 큰 공백(무발화 구간)은 자막 없이 비움
+
+    ★ 자막은 영상 클립 경계를 절대 넘지 않는다.
+      촬영 중 같은 문장을 여러 번 말한 엔지컷("삼성이" / "삼성" / "삼성이 주가" ...)이
+      각각 별도 클립이 되는데, 클립마다 그 클립에서 실제로 말한 내용이
+      자기 자막으로 붙어야 나중에 테이크를 골라내는 편집이 가능하다.
+
+    - 각 단어는 겹침이 가장 큰 클립 하나에 배정 (중복 발화도 그대로 유지)
+    - 클립 안에서만 한국어 어절 경계로 max_chars(±3) 분할
+    - 클립의 자막은 클립 시작~끝을 빈틈없이 채움 (조각 경계는 실제 발화 시각)
+    - 말이 없는 클립은 자막 없음
     - 대본(script_text)이 있으면 단어 '철자만' 교정 (내용·개수·순서 유지)
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
     MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
-    BRIDGE_US = 500_000      # 이보다 작은 자막 사이 틈은 이어붙임(연속), 크면 공백 유지
 
     stream = build_word_stream(segments)
     if script_text.strip():
@@ -402,29 +406,38 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     if not mapped:
         return []
 
-    groups = chunk_words_korean(mapped, max_chars)
+    # 클립별로 단어를 모은다 (자막이 클립을 넘지 않도록)
+    per_clip: dict[int, list[dict]] = {}
+    for w in mapped:
+        per_clip.setdefault(w["clip"], []).append(w)
 
     out = []
-    prev_end = 0
-    for gi, g in enumerate(groups):
-        s = max(g[0]["tl_start"], prev_end)
-        e = g[-1]["tl_end"]
-        # 다음 조각 시작까지 틈이 작으면 이어붙여 연속되게, 크면 그대로(공백 유지)
-        if gi + 1 < len(groups):
-            nxt = groups[gi + 1][0]["tl_start"]
-            if nxt > e and nxt - e <= BRIDGE_US:
-                e = nxt
-            elif nxt < e:  # 겹치면 다음 시작 전까지로 제한
-                e = nxt
-        e = max(e, s + MIN_DUR_US)
-        # 프레임 스냅
-        s = sec_to_us(snap_to_frame(s / 1_000_000))
-        e = sec_to_us(snap_to_frame(e / 1_000_000))
-        if e <= s:
-            e = s + MIN_DUR_US
-        text = " ".join(w["word"] for w in g)
-        out.append({"start_us": s, "end_us": e, "text": text})
-        prev_end = e
+    for ci in sorted(per_clip):
+        words = per_clip[ci]
+        _ks, _ke, clip_start, clip_end = keep_ranges[ci]
+        groups = chunk_words_korean(words, max_chars)
+        if not groups:
+            continue
+
+        # 조각 경계: 첫 조각은 클립 시작, 마지막 조각은 클립 끝까지 채운다
+        bounds = [clip_start]
+        for g in groups[1:]:
+            b = min(max(g[0]["tl_start"], bounds[-1] + MIN_DUR_US), clip_end)
+            bounds.append(b)
+        bounds.append(clip_end)
+
+        for gi, g in enumerate(groups):
+            s, e = bounds[gi], bounds[gi + 1]
+            text = " ".join(w["word"] for w in g)
+            if e - s < MIN_DUR_US:
+                # 자리가 부족하면 직전 자막에 합쳐 단어 유실 방지
+                if out and out[-1]["start_us"] >= clip_start:
+                    out[-1]["text"] += " " + text
+                    continue
+                e = min(s + MIN_DUR_US, clip_end)
+                if e <= s:
+                    continue
+            out.append({"start_us": s, "end_us": e, "text": text})
     return out
 
 def _make_text_material(text_id: str, text: str, task_id: str = "") -> dict:
