@@ -84,6 +84,13 @@ DEFAULTS = {
     'tp_mode': 'adx',
     'atr_tp_period': 14,   # ATR TP용 ATR 기간
     'atr_tp_mult': 1.5,    # ATR TP 배수 (TP거리 = ATR × 배수) ← 중간값 기본
+    'fixed_tp_pct': 1.2,   # 고정 TP % (tp_mode='fixed'일 때)
+    # 🔥 진입 전략: 'base'=UT+EMA(+스위칭) / 'goldfib'=황금피보 / 'bollinger'=볼린저
+    'strategy': 'base',
+    'sl_pct': 0.0,         # 손절 % (0=끔). 롱전용 전략(goldfib/bollinger)에 사용
+    'bb_len': 20,          # 볼린저 기간
+    'bb_mult': 2.0,        # 볼린저 표준편차 배수
+    'bb_squeeze': 125,     # 볼린저 스퀴즈 판단 기간
 }
 
 DEFAULT_SYMBOLS = ['BTCUSDT', 'XRPUSDT', 'DOGEUSDT']
@@ -339,6 +346,52 @@ def adx_full_series(df, period):
     return dx.ewm(alpha=1 / period, adjust=False).mean().fillna(20.0)
 
 
+# ==================== 추가 진입 전략 (롱 전용) ====================
+def goldfib_signals(df):
+    """황금 피보나치 클러스터 매수 신호 (TradingView 스크립트 복제)
+
+    매수 = 20선>60선(정배열) AND V반전(최근3봉 중 직전봉 최저 + 양봉이 5일선 상향돌파)
+           AND 거래량>평균20×1.1   (피보구역·시간클러스터는 화면표시용이라 신호 제외)
+    → 롱 전용 (숏 신호 없음)
+    """
+    close, low, opn, vol = df['close'], df['low'], df['open'], df['volume']
+    m5 = close.rolling(5).mean()
+    m20 = close.rolling(20).mean()
+    m60 = close.rolling(60).mean()
+    t_ok = m20 > m60
+    is_low_pass = low.rolling(3).min() == low.shift(1)
+    crossover = (close > m5) & (close.shift(1) <= m5.shift(1))
+    conf_green = (close > opn) & crossover
+    v_ok = vol > vol.rolling(20).mean() * 1.1
+    buy = t_ok & is_low_pass & conf_green & v_ok
+    return buy.fillna(False).values
+
+
+def bollinger_signals(df, length=20, mult=2.0, squeeze=125):
+    """볼린저밴드 스퀴즈 돌파 + 하단 2봉 반전 매수 신호 (스크립트 복제)
+
+    매수 = (스퀴즈 후 상단 돌파 + 거래량) OR (하단 이탈 후 2봉 반전 + 거래량)
+    → 롱 전용
+    """
+    close, low, opn, vol = df['close'], df['low'], df['open'], df['volume']
+    mid = close.rolling(length).mean()
+    std = close.rolling(length).std(ddof=0)   # Pine ta.stdev = 모표준편차(ddof=0)
+    upper = mid + mult * std
+    lower = mid - mult * std
+    bandwidth = (upper - lower) / mid
+    is_squeeze = bandwidth == bandwidth.rolling(squeeze).min()
+    v_avg = vol.rolling(20).mean()
+    cross_up = (close > upper) & (close.shift(1) <= upper.shift(1))
+    squeeze_break = is_squeeze.shift(1).fillna(False) & cross_up & (vol > v_avg)
+    two_bar = ((low.shift(1) < lower.shift(1)) & (close.shift(1) < lower.shift(1))
+               & (close > lower) & (close > opn) & (vol > v_avg))
+    buy = squeeze_break | two_bar
+    return buy.fillna(False).values
+
+
+STRAT_WARMUP = {'base': 60, 'goldfib': 245, 'bollinger': 150}
+
+
 # ==================== 시뮬레이션 ====================
 def run_backtest(df, p):
     """p: 파라미터 dict (DEFAULTS 형식)"""
@@ -351,17 +404,28 @@ def run_backtest(df, p):
     amount = p['amount']
     lev = p['leverage']
     liq_move = 100.0 / lev
-    warmup = max(60, int(p['ema_slow']) + 5)
+    strategy = p.get('strategy', 'base')
+    sl_pct = float(p.get('sl_pct', 0.0))    # 손절 % (0=끔)
+    warmup = max(60, int(p['ema_slow']) + 5, STRAT_WARMUP.get(strategy, 60))
 
-    ut = ut_bot(df, p['ut_sens'], p['ut_atr'])
-    fast, slow = ema_pair(df, p['ema_fast'], p['ema_slow'])
-    ema_long = (fast > slow).values
-    ema_short = (fast < slow).values
+    # ADX는 TP 결정에 항상 필요
     adx = adx_on_interval(df, p['adx_period'],
                           p.get('adx_interval', p['interval']), p['interval']).values
 
-    long_sig = (ut == 1) & ema_long
-    short_sig = (ut == -1) & ema_short
+    # 🔥 진입 신호 = 선택한 전략
+    if strategy == 'goldfib':
+        long_sig = goldfib_signals(df)
+        short_sig = np.zeros(len(df), dtype=bool)   # 롱 전용
+    elif strategy == 'bollinger':
+        long_sig = bollinger_signals(df, int(p.get('bb_len', 20)),
+                                     float(p.get('bb_mult', 2.0)),
+                                     int(p.get('bb_squeeze', 125)))
+        short_sig = np.zeros(len(df), dtype=bool)   # 롱 전용
+    else:  # base (UT + EMA)
+        ut = ut_bot(df, p['ut_sens'], p['ut_atr'])
+        fast, slow = ema_pair(df, p['ema_fast'], p['ema_slow'])
+        long_sig = (ut == 1) & (fast > slow).values
+        short_sig = (ut == -1) & (fast < slow).values
 
     # 🔥 거래량 필터: 현재봉 거래량 >= 평균(vol_ma봉) × vol_mult 일 때만 진입 허용
     #    (봇 3_indicators.check_volume과 동일 로직, 매매봉 기준)
@@ -396,9 +460,13 @@ def run_backtest(df, p):
     def open_pos(side, i):
         entry = o[i + 1]
         if tp_mode == 'switch':
-            # TP 없음 — 반대신호(스위칭)나 강제청산으로만 나감
+            # TP 없음 — 반대신호(스위칭)나 강제청산(또는 SL)으로만 나감
+            sl_price = None
+            if sl_pct > 0:
+                sl_price = entry * (1 - sl_pct / 100) if side == 'LONG' else entry * (1 + sl_pct / 100)
             return {'side': side, 'entry': entry, 'qty': amount * lev / entry,
-                    'tp_price': None, 'tp_pct': 0.0, 'entry_i': i + 1, 'min_roi': 0.0}
+                    'tp_price': None, 'tp_pct': 0.0, 'sl_price': sl_price,
+                    'entry_i': i + 1, 'min_roi': 0.0}
         if tp_mode == 'atr':
             # TP 거리 = ATR × 배수 (신호봉 i의 ATR 사용 = 완성봉)
             atr_val = atr_tp[i]
@@ -407,11 +475,17 @@ def run_backtest(df, p):
             else:
                 dist_pct = (atr_val * p.get('atr_tp_mult', 1.5)) / entry * 100
             tp = dist_pct
+        elif tp_mode == 'fixed':
+            tp = p.get('fixed_tp_pct', 1.2)
         else:  # 'adx'
             tp = tp_pct_at(i)
         tp_price = entry * (1 + tp / 100) if side == 'LONG' else entry * (1 - tp / 100)
+        sl_price = None
+        if sl_pct > 0:
+            sl_price = entry * (1 - sl_pct / 100) if side == 'LONG' else entry * (1 + sl_pct / 100)
         return {'side': side, 'entry': entry, 'qty': amount * lev / entry,
-                'tp_price': tp_price, 'tp_pct': round(tp, 3), 'entry_i': i + 1, 'min_roi': 0.0}
+                'tp_price': tp_price, 'tp_pct': round(tp, 3), 'sl_price': sl_price,
+                'entry_i': i + 1, 'min_roi': 0.0}
 
     def close_pos(pp, exit_price, exit_i, reason):
         nonlocal equity, peak, max_dd
@@ -452,8 +526,12 @@ def run_backtest(df, p):
             roi_low = (l[j] - pos['entry']) / pos['entry'] * 100 * lev
             roi_close = (c[j] - pos['entry']) / pos['entry'] * 100 * lev
             pos['min_roi'] = min(pos['min_roi'], roi_low)
+            sl = pos.get('sl_price')
             if l[j] <= liq_price:
                 close_pos(pos, liq_price, j, '강제청산')
+                pos = None
+            elif sl is not None and l[j] <= sl:   # 손절(SL) — 보수적으로 TP보다 먼저
+                close_pos(pos, min(sl, o[j]), j, '손절')
                 pos = None
             elif pos['tp_price'] is not None and h[j] >= pos['tp_price']:
                 close_pos(pos, max(pos['tp_price'], o[j]), j, 'TP익절')
@@ -469,8 +547,12 @@ def run_backtest(df, p):
             roi_low = (pos['entry'] - h[j]) / pos['entry'] * 100 * lev
             roi_close = (pos['entry'] - c[j]) / pos['entry'] * 100 * lev
             pos['min_roi'] = min(pos['min_roi'], roi_low)
+            sl = pos.get('sl_price')
             if h[j] >= liq_price:
                 close_pos(pos, liq_price, j, '강제청산')
+                pos = None
+            elif sl is not None and h[j] >= sl:   # 손절(SL)
+                close_pos(pos, max(sl, o[j]), j, '손절')
                 pos = None
             elif pos['tp_price'] is not None and l[j] <= pos['tp_price']:
                 close_pos(pos, min(pos['tp_price'], o[j]), j, 'TP익절')
@@ -498,6 +580,7 @@ def summarize(trades, symbol, cfg_name, max_dd, p):
         '승률%': round(win_rate, 1),
         'TP익절': int((trades['유형'] == 'TP익절').sum()),
         '스위칭': int((trades['유형'] == '스위칭').sum()),
+        '손절': int((trades['유형'] == '손절').sum()),
         '조기청산': int((trades['유형'] == '조기청산').sum()),
         '강제청산': int((trades['유형'] == '강제청산').sum()),
         '총수익': round(trades['수익'].sum(), 2),
@@ -517,6 +600,7 @@ def make_configs(p, compare):
              'full' → EMA 4종 비교
              'vol'  → 거래량 필터 OFF vs ON (2종)
              'tp'   → 익절방식 비교: 지금(ADX) vs 스위칭만 vs ATR(여러 배수)
+             'strat'→ 진입전략 비교: 기본(UT+EMA) vs 황금피보 vs 볼린저
     (하위호환: True=='full', False=='off')
     """
     if compare is True:
@@ -554,6 +638,17 @@ def make_configs(p, compare):
             dict(p, name='ATR TP x1.5', tp_mode='atr', atr_tp_mult=1.5),
             dict(p, name='ATR TP x2.0', tp_mode='atr', atr_tp_mult=2.0),
             dict(p, name='ATR TP x2.5', tp_mode='atr', atr_tp_mult=2.5),
+        ]
+
+    if compare == 'strat':
+        # 진입전략 비교: 내 기본 vs 황금피보(R:R 2:1) vs 볼린저(R:R 2:1)
+        # 롱전용 전략은 고정TP+손절로 청산 (손익비 가이드 반영)
+        return [
+            dict(p, name='기본(UT+EMA)', strategy='base'),
+            dict(p, name='황금피보(TP3/SL1.5)', strategy='goldfib',
+                 tp_mode='fixed', fixed_tp_pct=3.0, sl_pct=1.5),
+            dict(p, name='볼린저(TP2/SL1)', strategy='bollinger',
+                 tp_mode='fixed', fixed_tp_pct=2.0, sl_pct=1.0),
         ]
 
     return [
@@ -892,6 +987,32 @@ def launch_gui():
     ttk.Combobox(form, textvariable=adx_interval_var, values=INTERVALS, width=8,
                  state='readonly').grid(row=len(fields) + 1, column=1, padx=6, pady=2)
 
+    # ---------- 진입 전략 ----------
+    tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
+    tk.Label(left, text="🧭 진입 전략", bg=PANEL, fg='#00ffff',
+             font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
+    STRATEGY_OPTS = {
+        '기본 (UT+EMA + 스위칭)': 'base',
+        '황금피보 (5선정배열 V반전)': 'goldfib',
+        '볼린저 (스퀴즈돌파/밴드반전)': 'bollinger',
+    }
+    strategy_label_var = tk.StringVar(value='기본 (UT+EMA + 스위칭)')
+    ttk.Combobox(left, textvariable=strategy_label_var,
+                 values=list(STRATEGY_OPTS.keys()), width=26,
+                 state='readonly').pack(anchor='w', padx=22, pady=2)
+    sform = tk.Frame(left, bg=PANEL)
+    sform.pack(padx=10)
+    tk.Label(sform, text='손절 % (0=끔)', bg=PANEL, fg='#aaaaaa', font=('Arial', 9),
+             anchor='w').grid(row=0, column=0, sticky='w', pady=1)
+    v = tk.StringVar(value=str(DEFAULTS['sl_pct']))
+    tk.Entry(sform, textvariable=v, width=10, font=('Arial', 9),
+             justify='center').grid(row=0, column=1, padx=6, pady=1)
+    vars_['sl_pct'] = v
+    tk.Label(left, text="※ 황금피보·볼린저는 롱 전용 → 손절 필요", bg=PANEL,
+             fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
+    tk.Label(left, text="※ 통합거래량 지표는 다거래소 합산이라 백테스트 불가(제외)",
+             bg=PANEL, fg='#666666', font=('Arial', 8)).pack(anchor='w', padx=22)
+
     # ---------- 기간 지정 ----------
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
     tk.Label(left, text="📅 백테스트 기간", bg=PANEL, fg='#00ffff',
@@ -1011,6 +1132,7 @@ def launch_gui():
              font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
     COMPARE_OPTS = {
         '설정값 vs 하이브리드': 'vs',
+        '진입전략 비교(기본/황금피보/볼린저)': 'strat',
         '익절방식 비교(ADX/스위칭/ATR)': 'tp',
         '볼륨필터 OFF vs ON': 'vol',
         'EMA 4종 비교': 'full',
@@ -1023,9 +1145,31 @@ def launch_gui():
     tk.Label(left, text="→ 끝나면 수익 1위를 자동 추천", bg=PANEL,
              fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=26)
 
-    run_btn = tk.Button(left, text="▶️ 백테스트 시작", bg='#0066cc', fg='#ffffff',
-                        font=('Arial', 13, 'bold'), padx=20, pady=8)
-    run_btn.pack(pady=12)
+    btn_row = tk.Frame(left, bg=PANEL)
+    btn_row.pack(pady=12)
+    run_btn = tk.Button(btn_row, text="▶️ 백테스트 시작", bg='#0066cc', fg='#ffffff',
+                        font=('Arial', 13, 'bold'), padx=16, pady=8)
+    run_btn.pack(side='left', padx=(0, 6))
+
+    def reset_defaults():
+        # 모든 수치 입력을 기본값(= 내 현재 설정)으로 복원
+        for key, var in vars_.items():
+            if key in DEFAULTS:
+                var.set(str(DEFAULTS[key]))
+        interval_var.set(DEFAULTS['interval'])
+        adx_interval_var.set(DEFAULTS['adx_interval'])
+        hybrid_var.set(DEFAULTS['hybrid'])
+        vol_filter_var.set(DEFAULTS['vol_filter'])
+        tp_mode_label_var.set('지금 방식 (ADX 고정 1.2/1.0%)')
+        strategy_label_var.set('기본 (UT+EMA + 스위칭)')
+        days_var.set(str(DEFAULTS['days']))
+        start_var.set('')
+        end_var.set('')
+        gui_log("↩️ 설정을 기본값(내 설정)으로 초기화했습니다.")
+
+    tk.Button(btn_row, text="↩️ 초기화", command=reset_defaults,
+              bg='#555555', fg='#ffffff', font=('Arial', 11, 'bold'),
+              padx=10, pady=8).pack(side='left')
 
     # ---------- 중앙: 코인 선택 ----------
     mid = tk.Frame(root, bg=PANEL)
@@ -1097,7 +1241,7 @@ def launch_gui():
     tk.Label(right, text="📊 결과 (CSV 자동 저장 — 로그에 저장 위치 표시)", bg=BG, fg=ACCENT,
              font=('Arial', 12, 'bold')).pack(anchor='w')
 
-    cols = ['심볼', '설정', '거래수', '승률%', 'TP익절', '스위칭', '조기청산',
+    cols = ['심볼', '설정', '거래수', '승률%', 'TP익절', '스위칭', '손절', '조기청산',
             '강제청산', '총수익', '수수료', '순손익', '최대낙폭', '최저ROI%']
     style = ttk.Style()
     try:
@@ -1199,6 +1343,12 @@ def launch_gui():
         p['vol_ma'] = max(1, int(p['vol_ma']))
         p['tp_mode'] = TP_MODE_OPTS.get(tp_mode_label_var.get(), 'adx')
         p['atr_tp_period'] = max(1, int(p['atr_tp_period']))
+        p['strategy'] = STRATEGY_OPTS.get(strategy_label_var.get(), 'base')
+        p['sl_pct'] = max(0.0, p.get('sl_pct', 0.0))
+        # 롱전용 전략인데 손절 0이면 안전 기본값 적용 (강제청산까지 물림 방지)
+        if p['strategy'] in ('goldfib', 'bollinger') and p['sl_pct'] <= 0:
+            p['sl_pct'] = 2.0
+            gui_log("ℹ️ 롱전용 전략 손절이 0 → 안전하게 2%로 적용 (원하면 손절%칸 수정)")
         if fixed:
             gui_log(f"ℹ️ 잘못된 입력 자동 보정: {', '.join(fixed)}")
         return p
@@ -1268,7 +1418,7 @@ def run_cli():
                     help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
     ap.add_argument('--compare', default='vs',
-                    choices=['off', 'vs', 'full', 'vol', 'tp'],
+                    choices=['off', 'vs', 'full', 'vol', 'tp', 'strat'],
                     help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종 / "
                          "vol=볼륨OFFvsON / tp=익절방식(ADX/스위칭/ATR)")
     ap.add_argument('--start', default=None, help='시작일 YYYY-MM-DD (지정 시 --days 무시)')
@@ -1281,6 +1431,11 @@ def run_cli():
                     help='익절 방식: adx(기본)/atr/switch')
     ap.add_argument('--atr-mult', type=float, default=DEFAULTS['atr_tp_mult'],
                     help='ATR TP 배수 (기본 1.5)')
+    ap.add_argument('--strategy', default=DEFAULTS['strategy'],
+                    choices=['base', 'goldfib', 'bollinger'],
+                    help='진입 전략: base(기본)/goldfib(황금피보)/bollinger(볼린저)')
+    ap.add_argument('--sl', type=float, default=DEFAULTS['sl_pct'],
+                    help='손절 %% (0=끔, 롱전용 전략에 권장)')
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
     args = ap.parse_args()
 
@@ -1294,6 +1449,10 @@ def run_cli():
     p['vol_mult'] = args.vol_mult
     p['tp_mode'] = args.tp_mode
     p['atr_tp_mult'] = args.atr_mult
+    p['strategy'] = args.strategy
+    p['sl_pct'] = args.sl
+    if p['strategy'] in ('goldfib', 'bollinger') and p['sl_pct'] <= 0:
+        p['sl_pct'] = 2.0
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
 
     symbols = fetch_symbols() if args.all else \
