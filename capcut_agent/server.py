@@ -194,7 +194,9 @@ def transcribe(video_path: Path, script_text: str = "") -> list[dict]:
         language="ko",
         beam_size=5,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300},
+        # 짧은 엔지컷 조각이 통째로 버려지지 않도록 VAD를 느슨하게:
+        # 긴 침묵만 제거하고, 발화 앞뒤에 여유(pad)를 둔다.
+        vad_parameters={"min_silence_duration_ms": 1000, "speech_pad_ms": 400},
         word_timestamps=True,          # 단어별 발화 시각 → 클립별 자막 배분에 사용
         condition_on_previous_text=False,  # 직전 문장 반복(할루시네이션 루프) 방지
         no_repeat_ngram_size=3,        # 같은 3-gram 반복 금지
@@ -205,6 +207,68 @@ def transcribe(video_path: Path, script_text: str = "") -> list[dict]:
         "start": s.start, "end": s.end, "text": s.text.strip(),
         "words": [{"start": w.start, "end": w.end, "word": w.word.strip()} for w in (s.words or [])],
     } for s in segments]
+
+
+def transcribe_clip(video_path: Path, start: float, end: float) -> str:
+    """
+    영상의 [start, end] 구간만 잘라내 따로 인식한다.
+    전체 인식에서 빠진(자막이 안 붙은) 클립을 보완하는 용도.
+    """
+    import tempfile
+    model = get_whisper_model()
+    tmp_dir = Path(tempfile.gettempdir())
+    tmp = tmp_dir / f"_capcut_clip_{uuid.uuid4().hex}.wav"
+    try:
+        cmd = ["ffmpeg", "-y", "-v", "error",
+               "-ss", f"{max(start - 0.05, 0):.3f}", "-to", f"{end + 0.05:.3f}",
+               "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(tmp)]
+        subprocess.run(cmd, capture_output=True)
+        if not tmp.exists() or tmp.stat().st_size < 2000:
+            return ""
+        segs, _ = model.transcribe(
+            str(tmp), language="ko", beam_size=1,
+            vad_filter=False,                 # 이미 잘라낸 구간이라 VAD 불필요
+            condition_on_previous_text=False,
+            no_repeat_ngram_size=3,
+        )
+        return " ".join(s.text.strip() for s in segs).strip()
+    except Exception:
+        return ""
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
+def fill_missing_clips(video_path: Path, segments: list[dict],
+                       keep_ranges: list[tuple[float, float, int, int]],
+                       max_fill: int = 400) -> tuple[list[dict], int]:
+    """
+    전체 인식 결과에서 단어가 하나도 배정되지 않은 영상 클립을 찾아,
+    그 구간만 다시 인식해서 채워 넣는다.
+    → 짧은 엔지컷도 자기 자막을 갖게 된다.
+    반환: (보완된 segments, 채운 클립 수)
+    """
+    if not keep_ranges:
+        return segments, 0
+    mapped = map_words_to_timeline(build_word_stream(segments), keep_ranges)
+    covered = {w["clip"] for w in mapped}
+
+    extra, filled = [], 0
+    for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+        if i in covered or filled >= max_fill:
+            continue
+        if ke - ks < 0.2:          # 너무 짧은 조각은 인식 불가
+            continue
+        text = transcribe_clip(video_path, ks, ke)
+        text = " ".join(w for w in (sanitize_word(t) for t in text.split()) if w).strip()
+        if not text:
+            continue
+        # 단어 시각이 없으므로 클립 구간에 균등 배분되게 둔다 (build_word_stream이 처리)
+        extra.append({"start": ks, "end": ke, "text": text, "words": []})
+        filled += 1
+    return segments + extra, filled
 
 
 
@@ -1408,6 +1472,14 @@ async def process_video(
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     raw_subs = await loop.run_in_executor(None, transcribe, video, script_text)
+
+                    # 인식에서 빠진 클립(짧은 엔지컷 등)은 그 구간만 다시 인식해 보완
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': '자막 없는 클립 보완 인식 중...'})}\n\n"
+                    raw_subs, n_filled = await loop.run_in_executor(
+                        None, fill_missing_clips, video, raw_subs, keep_ranges)
+                if n_filled:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'빠진 클립 {n_filled}개 추가 인식 완료'})}\n\n"
+
                 if script_text:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 {len(script_text)}자 수신 → 문맥 대조 교정 중...'})}\n\n"
                 else:
@@ -1419,6 +1491,12 @@ async def process_video(
                     n_fixed = _stats.get("corrected", 0)
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 참고 철자 교정 {n_fixed}개 적용'})}\n\n"
                 subtitle_count = len(sub_chunks)
+
+                # 자막이 붙은 클립 수 (빠진 클립이 있는지 눈으로 확인용)
+                with_sub = sum(1 for _k, _e, ts, te in keep_ranges
+                               if any(ts <= c["start_us"] < te for c in sub_chunks))
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 적용 클립: {with_sub}/{len(keep_ranges)}개'})}\n\n"
+
                 srt_content = make_srt(sub_chunks)
                 srt_path = OUTPUT_DIR / f"{video.stem}.srt"
                 srt_path.write_text(srt_content, encoding="utf-8")
