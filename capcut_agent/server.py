@@ -38,6 +38,38 @@ _asr_lock = asyncio.Lock()
 # Whisper 모델 lazy init
 _whisper_model = None
 
+
+def ensure_faster_whisper() -> tuple[bool, str]:
+    """
+    자막(음성인식) 패키지가 없으면 지금 실행 중인 파이썬에 자동 설치한다.
+    포터블 runtime에서도 같은 python.exe에 설치되므로 별도 bat 없이 동작.
+    반환: (사용 가능 여부, 안내 메시지)
+    """
+    import importlib
+    try:
+        importlib.import_module("faster_whisper")
+        return True, "자막 기능 준비됨"
+    except ImportError:
+        pass
+
+    cmd = [sys.executable, "-m", "pip", "install", "--no-warn-script-location", "faster-whisper"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, f"설치 실행 실패: {e}"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return False, " / ".join(tail[-3:]) if tail else "pip 설치 실패"
+
+    importlib.invalidate_caches()
+    try:
+        importlib.import_module("faster_whisper")
+        return True, "자막 기능 설치 완료"
+    except ImportError as e:
+        return False, f"설치 후에도 불러오지 못함: {e}"
+
+
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
@@ -1358,8 +1390,21 @@ async def process_video(
             # 자막 인식
             raw_subs = None
             subtitle_count = 0
-            if use_subtitle:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': 'Whisper 자막 인식 중... (GPU large-v3)'})}\n\n"
+            want_sub = use_subtitle   # 클로저 안에서 끄기 위해 지역 변수로 복사
+            if want_sub:
+                # 자막 패키지가 없으면 자동 설치 (포터블 runtime 포함)
+                loop = asyncio.get_event_loop()
+                yield f"data: {json.dumps({'step': 'asr', 'msg': '자막 기능 확인 중... (없으면 자동 설치, 수 분 소요)'})}\n\n"
+                ok, msg = await loop.run_in_executor(None, ensure_faster_whisper)
+                if not ok:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'⚠ 자막 기능을 준비하지 못했습니다: {msg}'})}\n\n"
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': '⚠ 자막 없이 컷편집만 진행합니다. (인터넷 연결 확인 후 다시 시도하세요)'})}\n\n"
+                    want_sub = False
+                else:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
+
+            if want_sub:
+                yield f"data: {json.dumps({'step': 'asr', 'msg': 'Whisper 자막 인식 중... (첫 실행 시 모델 다운로드 ~3GB, 시간이 걸립니다)'})}\n\n"
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     raw_subs = await loop.run_in_executor(None, transcribe, video, script_text)

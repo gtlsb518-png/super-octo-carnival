@@ -332,7 +332,7 @@
         <input type="checkbox" id="use-subtitle" style="width:16px; height:16px; accent-color:var(--accent);" />
         <span style="font-size:12px;">Whisper 자동 자막 생성 (한국어)</span>
       </label>
-      <span style="font-size:11px; color:var(--muted);">GPU large-v3 · 처음 실행 시 모델 다운로드 (~3GB)</span>
+      <span style="font-size:11px; color:var(--muted);">GPU large-v3 · 처음 켜면 자동 설치 + 모델 다운로드 (~3GB, 시간 걸림)</span>
     </div>
     <div class="setting-item" style="margin-top:14px; max-width:320px;">
       <label>
@@ -456,7 +456,8 @@
     <p style="color:var(--muted); font-size:11px; line-height:1.7;">
       · 처음 한 번은 Python·ffmpeg를 자동으로 내려받습니다 (인터넷 필요, 관리자 권한 불필요).<br>
       · 아무것도 미리 깔 필요 없이 이 폴더의 <code style="color:var(--accent);">runtime\</code> 안에만 설치됩니다.<br>
-      · 자막(음성인식)까지 쓰려면 <strong style="color:var(--accent);">자막기능_추가설치.bat</strong> 을 한 번 실행하세요 (용량 큼).
+      · 자막 기능은 <strong style="color:var(--text);">처음 켤 때 자동으로 설치</strong>됩니다 (용량이 커서 몇 분 걸림).<br>
+      &nbsp;&nbsp;미리 받아두려면 <strong style="color:var(--accent);">자막기능_추가설치.bat</strong> 을 실행해도 됩니다.
     </p>
   </div>
 
