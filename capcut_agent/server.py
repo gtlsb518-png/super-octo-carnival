@@ -373,6 +373,23 @@ def sanitize_word(word: str) -> str:
     return word.strip()
 
 
+# 마침표 제거용: 숫자와 숫자 사이(소수점 3.7%)가 아닌 점만 지운다
+_PERIOD_RE = re.compile(r"(?<!\d)\.|\.(?!\d)")
+
+
+def strip_periods(text: str) -> str:
+    """
+    자막에서 마침표를 없앤다 (draft 자막·SRT 공통).
+    - 3.7% 같은 소수점은 그대로 둔다
+    - 말소리 없는 클립 표시("...")는 유지
+    - 물음표·느낌표·쉼표는 건드리지 않는다
+    """
+    if text == NO_SPEECH_PLACEHOLDER:
+        return text
+    out = _PERIOD_RE.sub("", text)
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
 def build_word_stream(segments: list[dict]) -> list[dict]:
     """
     Whisper 세그먼트 → 단어 스트림 [{"time": 발화_중간(초), "start": 발화_시작(초), "word": str}, ...].
@@ -560,7 +577,7 @@ def subtitle_chunks_for_timeline(segments: list[dict],
 
         for gi, g in enumerate(groups):
             s, e = bounds[gi], bounds[gi + 1]
-            text = " ".join(w["word"] for w in g)
+            text = strip_periods(" ".join(w["word"] for w in g)) or NO_SPEECH_PLACEHOLDER
             if e - s < MIN_DUR_US:
                 # 자리가 부족하면 직전 자막에 합쳐 단어 유실 방지
                 if out and out[-1]["start_us"] >= clip_start:
