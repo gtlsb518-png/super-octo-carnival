@@ -180,6 +180,62 @@ def compute_keep_ranges(silences: list[dict], total_duration: float) -> list[tup
 
 NO_SPEECH_PLACEHOLDER = "..."   # 말소리가 없는 클립에도 자막 클립은 만든다
 
+# Whisper가 잡음·숨소리 구간에 넣는 효과음 태그: [grunting] (laughs) 등
+_BRACKET_TAG_RE = re.compile(r"[\[\(\<\{][^\]\)\>\}]*[\]\)\>\}]")
+
+# 괄호가 벗겨진 채 남는 효과음 단어들 (grunting젠스랑 처럼 한글에 붙기도 함)
+_SOUND_TAG_WORDS = {
+    "grunting", "grunts", "grunt", "groaning", "groans", "sighs", "sighing", "sigh",
+    "laughs", "laughing", "laughter", "chuckles", "coughing", "coughs", "cough",
+    "music", "applause", "clapping", "breathing", "inhales", "exhales", "breath",
+    "silence", "inaudible", "noise", "static", "beep", "beeping", "whispering",
+    "gasps", "mumbling", "humming", "footsteps", "typing", "clicking", "singing",
+    "speaking", "foreign", "blank", "blankaudio", "subtitles", "sniffs", "clears",
+}
+
+# 소문자 영어라도 실제로 쓰이는 표기는 남긴다
+_LATIN_KEEP = {
+    "etf", "ai", "it", "tv", "pc", "cpu", "gpu", "ceo", "gdp", "hbm", "ssd", "ram",
+    "gs", "sk", "lg", "kb", "us", "usa", "ok", "no", "yes", "on", "off", "up",
+    "iphone", "youtube", "google", "apple", "tesla", "nvidia", "chatgpt", "openai",
+}
+
+
+def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> str:
+    """
+    Whisper 환각/효과음 태그를 걸러낸다. 한국어 영상이라는 전제.
+    - [grunting], (laughs) 같은 괄호 태그는 통째로 제거
+    - 괄호가 없어도 알려진 효과음 단어는 제거 (한글에 붙은 경우 그 부분만)
+    - 대본에 없는 '소문자 영어 단어'(disadvant 등 환각)는 제거
+      단, ETF·GS 같은 대문자 약어와 자주 쓰는 표기는 유지
+    """
+    text = _BRACKET_TAG_RE.sub(" ", text)
+    out = []
+    for tok in text.split():
+        norm = _norm_token(tok)
+        if not norm:
+            continue
+        has_hangul = bool(re.search(r"[가-힣]", norm))
+
+        if has_hangul:
+            # "grunting젠스랑" → 앞에 붙은 효과음 영어만 떼어낸다
+            m = re.match(r"^([A-Za-z]{3,})(.+)$", tok)
+            if m and m.group(1).lower() in _SOUND_TAG_WORDS:
+                tok = m.group(2)
+            out.append(tok)
+            continue
+
+        low = norm.lower()
+        if low in _SOUND_TAG_WORDS:
+            continue
+        # 소문자 영어 단어인데 대본에도 없으면 환각으로 보고 제거
+        if (tok.isalpha() and tok == tok.lower() and len(low) >= 4
+                and low not in _LATIN_KEEP
+                and not (script_tokens and low in script_tokens)):
+            continue
+        out.append(tok)
+    return " ".join(out).strip()
+
 
 def transcribe_clip(video_path: Path, start: float, end: float,
                     initial_prompt: str = "") -> str:
@@ -234,10 +290,14 @@ def transcribe_all_clips(video_path: Path,
     """
     segs = []
     total = len(keep_ranges)
+    script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
+    script_tokens.discard("")
     for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
         text = ""
         if ke - ks >= 0.15:
             text = transcribe_clip(video_path, ks, ke, script_text)
+            # 효과음 태그·영어 환각 제거 → 이모지/특수문자 제거
+            text = clean_recognized_text(text, script_tokens)
             text = " ".join(w for w in (sanitize_word(t) for t in text.split()) if w).strip()
         segs.append({"start": ks, "end": ke,
                      "text": text or NO_SPEECH_PLACEHOLDER, "words": []})
