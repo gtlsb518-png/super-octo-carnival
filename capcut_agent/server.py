@@ -201,39 +201,41 @@ _LATIN_KEEP = {
 }
 
 
+def _clean_latin_run(seg: str, script_tokens: set[str]) -> str:
+    """
+    영문 알파벳 한 덩어리(seg)가 '진짜'인지 판단해서, 진짜면 그대로 남기고
+    환각이면 지운다(빈 문자열). 화이트리스트 방식이라 disadvant, enthus,
+    owad, wszyst, Vanc, ambiguity처럼 예측 못 할 환각 단어도 전부 걸러진다.
+    남기는 경우만 나열:
+      - 알려진 효과음/잡음 태그는 대소문자 무관하게 무조건 제거
+      - 대문자 약어(ETF, GS, AI, SK...) — 한국어 방송에서 실제로 쓰는 표기
+      - 자주 쓰는 소문자 표기(iphone, youtube 등) 목록에 있는 것
+      - 대본에 등장하는 단어 (사용자가 넣은 대본은 신뢰할 근거가 있음)
+    그 외 모든 영문(소문자/혼합대소문자 단어, disadvant·Vanc류)은 제거.
+    """
+    low = seg.lower()
+    if low in _SOUND_TAG_WORDS:
+        return ""
+    if low in _LATIN_KEEP or low in script_tokens:
+        return seg
+    if seg.isupper() and 1 <= len(seg) <= 6:
+        return seg           # ETF, GS, AI 같은 대문자 약어
+    return ""                # 나머지는 전부 환각으로 간주해 제거
+
+
 def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> str:
     """
     Whisper 환각/효과음 태그를 걸러낸다. 한국어 영상이라는 전제.
     - [grunting], (laughs) 같은 괄호 태그는 통째로 제거
-    - 괄호가 없어도 알려진 효과음 단어는 제거 (한글에 붙은 경우 그 부분만)
-    - 대본에 없는 '소문자 영어 단어'(disadvant 등 환각)는 제거
-      단, ETF·GS 같은 대문자 약어와 자주 쓰는 표기는 유지
+    - 나머지 텍스트 안의 영문 알파벳 덩어리는 전부 _clean_latin_run으로 검사
+      → 한글에 그대로 들러붙은 경우("disadvant짠", "wszyst그럼")도
+        영문 부분만 정확히 떼어내고 한글은 보존한다
+    - 영문이 지워지고 남는 게 문장부호뿐인 조각은 통째로 버린다
     """
+    script_tokens = script_tokens or set()
     text = _BRACKET_TAG_RE.sub(" ", text)
-    out = []
-    for tok in text.split():
-        norm = _norm_token(tok)
-        if not norm:
-            continue
-        has_hangul = bool(re.search(r"[가-힣]", norm))
-
-        if has_hangul:
-            # "grunting젠스랑" → 앞에 붙은 효과음 영어만 떼어낸다
-            m = re.match(r"^([A-Za-z]{3,})(.+)$", tok)
-            if m and m.group(1).lower() in _SOUND_TAG_WORDS:
-                tok = m.group(2)
-            out.append(tok)
-            continue
-
-        low = norm.lower()
-        if low in _SOUND_TAG_WORDS:
-            continue
-        # 소문자 영어 단어인데 대본에도 없으면 환각으로 보고 제거
-        if (tok.isalpha() and tok == tok.lower() and len(low) >= 4
-                and low not in _LATIN_KEEP
-                and not (script_tokens and low in script_tokens)):
-            continue
-        out.append(tok)
+    text = re.sub(r"[A-Za-z]+", lambda m: _clean_latin_run(m.group(0), script_tokens), text)
+    out = [tok for tok in text.split() if re.search(r"[가-힣0-9A-Za-z]", tok)]
     return " ".join(out).strip()
 
 
