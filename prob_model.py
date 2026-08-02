@@ -22,9 +22,13 @@
    같은 데이터로 만들고 평가하면 무조건 좋아 보인다.
 
 실행:
-    python prob_model.py                      # 기본(BTCUSDT, 5분봉, 365일)
-    python prob_model.py --symbol ETHUSDT --days 720 --interval 15m
-    python prob_model.py --tp 1.0 --sl 1.5 --max-hold 48
+    python prob_model.py --multi-tf                 # 15m/1h/4h/1d 비교 (권장)
+    python prob_model.py --multi-tf --synthetic     # 버그 검사 (우위 0이어야 정상)
+    python prob_model.py --sweep                    # TP/SL 조합 비교
+    python prob_model.py --interval 1h --days 1500  # 단일 시간봉 상세 분석
+
+--multi-tf 는 각 시간봉의 ATR에 맞춰 TP/SL을 자동 산출한다.
+고정 %를 쓰면 시간봉마다 도달 난이도가 완전히 달라져 비교가 성립하지 않는다.
 """
 
 import os
@@ -46,6 +50,16 @@ INTERVAL_MS = {
     '4h': 14_400_000, '1d': 86_400_000,
 }
 
+# 시간봉별 기본 조회 기간 — 긴 봉일수록 표본을 모으려면 더 긴 기간이 필요하다
+TF_DEFAULT_DAYS = {
+    '15m': 900,    # ≈ 86,000봉
+    '1h': 1500,    # ≈ 36,000봉
+    '4h': 2200,    # ≈ 13,000봉
+    '1d': 3000,    # ≈  3,000봉  ← 통계적으로 빠듯함
+}
+
+DEFAULT_TIMEFRAMES = ['15m', '1h', '4h', '1d']
+
 
 # ==================== 데이터 ====================
 def load_csv(path, log=print):
@@ -65,7 +79,7 @@ def load_csv(path, log=print):
     return df
 
 
-def synthetic_klines(n=60000, interval='5m', vol_pct=0.12, seed=42, drift=0.0, log=print):
+def synthetic_klines(n=60000, interval='5m', vol_pct=None, seed=42, drift=0.0, log=print):
     """합성 랜덤워크 — 도구 자체 검증용.
 
     가격에 예측 가능한 구조가 전혀 없으므로, 올바른 분석기라면
@@ -75,12 +89,21 @@ def synthetic_klines(n=60000, interval='5m', vol_pct=0.12, seed=42, drift=0.0, l
     rng = np.random.default_rng(seed)
     step = INTERVAL_MS.get(interval, 300_000) // 1000
 
+    # 변동성은 시간의 제곱근에 비례 — 5분봉 0.12% 기준으로 환산
+    if vol_pct is None:
+        vol_pct = 0.12 * np.sqrt(INTERVAL_MS.get(interval, 300_000) / 300_000)
+
     # 변동성 군집(GARCH 유사) — 실제 시장의 유일하게 예측 가능한 성질
+    # ω를 목표 변동성에 맞춰 잡아야 무조건부 변동성이 vol_pct로 수렴한다
+    alpha, beta = 0.08, 0.90
+    target_var = (vol_pct / 100) ** 2
+    omega = target_var * (1 - alpha - beta)
+
     sigma = np.zeros(n)
     sigma[0] = vol_pct / 100
     for i in range(1, n):
-        sigma[i] = np.sqrt(0.00000002 + 0.08 * (sigma[i-1] * rng.normal())**2
-                           + 0.90 * sigma[i-1]**2)
+        sigma[i] = np.sqrt(omega + alpha * (sigma[i-1] * rng.normal())**2
+                           + beta * sigma[i-1]**2)
 
     ret = rng.normal(drift / 100, 1.0, n) * sigma
     close = 50000 * np.exp(np.cumsum(ret))
@@ -381,6 +404,19 @@ def calibration_table(prob, outcome, n_bins=10):
     return t
 
 
+def top_pct_masks(prob, levels):
+    """예측 확률 상위 q%를 고르는 마스크들.
+
+    고정 임계값(0.6 등)을 쓰면 확률 분포가 그보다 낮은 설정에서
+    표본이 0이 되어 비교가 불가능해진다. 분위수 기준이면 항상 동작한다.
+    """
+    out = []
+    for q in levels:
+        thr = float(np.quantile(prob, 1 - q / 100))
+        out.append((q, thr, prob >= thr))
+    return out
+
+
 def kelly_fraction(p, tp, sl):
     """켈리 비율. b = 이길 때 배당 / 질 때 손실."""
     b = tp / sl
@@ -496,26 +532,24 @@ def report(prob, actual, gross, known, cfg, log=print):
     log("\n" + "=" * 66)
     log("📊 확률 기준 매매 시뮬레이션 (실현손익 기반)")
     log("=" * 66)
-    log(f"  {'진입기준':>10} | {'매매수':>8} | {'승률':>7} | {'매매당손익':>10} | "
-        f"{'누적':>10} | {'1/4켈리':>8}")
+    log(f"  {'진입범위':>10} | {'확률≥':>7} | {'매매수':>8} | {'승률':>7} | "
+        f"{'매매당손익':>10} | {'1/4켈리':>8}")
     log("  " + "-" * 66)
 
     rows = []
-    for thr in cfg['thresholds']:
-        m = prob >= thr
+    for q, thr, m in top_pct_masks(prob, cfg['top_pct']):
         if m.sum() == 0:
-            log(f"  {thr*100:>9.1f}% | {'0':>8} | {'-':>7} | {'-':>10} | {'-':>10} | {'-':>8}")
             continue
         wr = float(actual[m].mean())
         avg = float(net[m].mean())
         kf = kelly_fraction(wr, tp, sl) * 0.25
-        rows.append((thr, int(m.sum()), wr, avg))
-        log(f"  {thr*100:>9.1f}% | {m.sum():>8,} | {wr*100:>6.2f}% | "
-            f"{avg:>+9.4f}% | {net[m].sum():>+9.1f}% | {kf*100:>7.1f}%")
+        rows.append((q, int(m.sum()), wr, avg))
+        log(f"  {'상위 '+str(q)+'%':>10} | {thr*100:>6.1f}% | {m.sum():>8,} | "
+            f"{wr*100:>6.2f}% | {avg:>+9.4f}% | {kf*100:>7.1f}%")
 
     log("  " + "-" * 66)
-    log(f"  {'필터없음':>9} | {len(net):>8,} | {actual_base*100:>6.2f}% | "
-        f"{base_pnl:>+9.4f}% | {net.sum():>+9.1f}% | {'-':>8}")
+    log(f"  {'필터없음':>10} | {'-':>7} | {len(net):>8,} | {actual_base*100:>6.2f}% | "
+        f"{base_pnl:>+9.4f}% | {'-':>8}")
 
     known_rate = float(known.mean()) * 100
     log(f"\n  ℹ️ 검증 표본 중 학습구간에 충분한 사례가 있던 비율: {known_rate:.1f}%")
@@ -527,12 +561,12 @@ def report(prob, actual, gross, known, cfg, log=print):
 
     # 필터가 '필터 없음'보다 유의미하게 나은가 (표본오차 감안)
     best = None
-    for thr, cnt, wr, avg in rows:
+    for q, cnt, wr, avg in rows:
         if cnt < 200:
             continue
         se = float(net.std()) / np.sqrt(cnt)      # 표준오차
         if avg > 0 and avg > base_pnl + 2 * se:   # 2σ 초과여야 인정
-            best = (thr, cnt, wr, avg, se)
+            best = (q, cnt, wr, avg, se)
             break
 
     if skill <= 0:
@@ -542,13 +576,199 @@ def report(prob, actual, gross, known, cfg, log=print):
         log("  ⚠️ 정보는 있으나 수수료를 넘는 우위는 확인되지 않았습니다.")
         log("     → 수수료를 낮추거나(메이커 주문), TP를 키워 수수료 비중을 줄이세요.")
     else:
-        thr, cnt, wr, avg, se = best
-        log(f"  ✅ 진입기준 {thr*100:.0f}% 이상: 매매당 {avg:+.4f}% ({cnt:,}건, 승률 {wr*100:.2f}%)")
+        q, cnt, wr, avg, se = best
+        log(f"  ✅ 확률 상위 {q}%만 진입: 매매당 {avg:+.4f}% ({cnt:,}건, 승률 {wr*100:.2f}%)")
         log(f"     필터없음({base_pnl:+.4f}%) 대비 {avg-base_pnl:+.4f}%p, 표준오차 {se:.4f}%")
         log("     ⚠️ 이것만으로 실매매하지 마세요. 반드시 확인할 것:")
         log("        1) 다른 심볼에서도 재현되는가")
         log("        2) 다른 기간에서도 재현되는가")
         log("        3) --synthetic 에서는 우위가 0으로 나오는가 (버그 검사)")
+
+
+# ==================== 시간봉 비교 ====================
+def adapt_state(n_samples, cfg):
+    """표본 수에 맞춰 상태 해상도를 낮춘다.
+
+    상태 수 = (구간수)^(축 개수). 표본이 적은데 축을 많이 쓰면
+    상태당 사례가 몇 건도 안 남아 확률표가 노이즈가 된다.
+    긴 시간봉일수록 표본이 급감하므로 자동으로 줄여야 한다.
+    """
+    cols, bins = cfg['state_cols'], cfg['n_bins']
+    if n_samples < 5_000:
+        return [c for c in ['ut', 'ema_up', 'adx'] if c in cols] or cols[:2], 2
+    if n_samples < 20_000:
+        return cols[:3], 2
+    if n_samples < 50_000:
+        return cols[:4], bins
+    return cols, bins
+
+
+def analyze_one(df, base_cfg, args, interval, log=print):
+    """한 시간봉에 대해 전체 파이프라인을 돌리고 지표를 dict로 반환."""
+    cfg = dict(base_cfg)
+    atr_med = float((atr_rma(df, 14) / df['close'] * 100).median())
+
+    # TP/SL을 그 시간봉의 변동성에 맞춰 산출 (고정 %는 시간봉마다 난이도가 달라짐)
+    if args.auto_tpsl:
+        tp = max(args.atr_tp * atr_med, args.fee * 20)
+        sl = args.atr_sl * atr_med
+    else:
+        tp, sl = args.tp, args.sl
+    cfg['tp'], cfg['sl'] = tp, sl
+
+    res = {'interval': interval, 'bars': len(df), 'atr': atr_med,
+           'tp': tp, 'sl': sl, 'fee_share': args.fee / tp * 100,
+           'n': 0, 'base_ev': np.nan, 'skill': np.nan,
+           'best_thr': None, 'best_ev': np.nan, 'se': np.nan,
+           'coverage': np.nan, 'note': '', 'state': '-'}
+
+    outcome, held, gross = triple_barrier(df, tp, sl, args.max_hold, args.side)
+    valid = np.isfinite(gross)
+    if valid.sum() < 500:
+        res['note'] = '표본부족'
+        return res
+
+    labels = np.zeros(len(gross), dtype=int)
+    labels[valid] = (gross[valid] - args.fee > 0).astype(int)
+
+    # 표본 수에 맞춰 상태 해상도 자동 조정
+    cfg['state_cols'], cfg['n_bins'] = adapt_state(int(valid.sum()), cfg)
+    res['state'] = f"{len(cfg['state_cols'])}축×{cfg['n_bins']}"
+
+    feat = build_features(df, cfg)
+    out = walk_forward(feat, labels, valid, cfg, log=lambda *_: None)
+    if out is None:
+        res['note'] = '검증불가'
+        return res
+
+    prob, actual, te_idx, known = out
+    net = gross[te_idx] - args.fee
+
+    res['n'] = len(net)
+    res['base_ev'] = float(net.mean())
+    res['coverage'] = float(known.mean()) * 100
+    res['hold'] = float(held[held > 0].mean())
+
+    base_rate = float(actual.mean())
+    bs_m = brier_score(prob, actual)
+    bs_b = brier_score(np.full_like(prob, base_rate), actual)
+    res['skill'] = (1 - bs_m / bs_b) * 100 if bs_b > 0 else 0.0
+
+    # 필터를 걸었을 때 필터 없음보다 통계적으로 유의하게 나은가
+    sd = float(net.std())
+    for q, thr, m in top_pct_masks(prob, cfg['top_pct']):
+        if m.sum() < 200:
+            continue
+        avg = float(net[m].mean())
+        se = sd / np.sqrt(int(m.sum()))
+        if np.isnan(res['best_ev']) or avg > res['best_ev']:
+            res['best_ev'], res['best_thr'], res['se'] = avg, q, se
+
+    return res
+
+
+def multi_tf(args, cfg, log=print):
+    """15m / 1h / 4h / 1d 를 같은 기준으로 비교한다."""
+    tfs = [t.strip() for t in args.timeframes.split(',') if t.strip()]
+
+    log("\n" + "=" * 78)
+    log("📊 시간봉 비교")
+    log("=" * 78)
+    if args.auto_tpsl:
+        log(f"  TP = {args.atr_tp}×ATR (최소 수수료×20) / SL = {args.atr_sl}×ATR")
+        log("  → 시간봉마다 변동성이 다르므로 고정 %가 아닌 ATR 배수로 맞춘다")
+    else:
+        log(f"  TP = {args.tp}% / SL = {args.sl}% (고정)")
+    log(f"  수수료 {args.fee}% | 최대보유 {args.max_hold}봉 | "
+        f"{'롱' if args.side == 1 else '숏'}")
+
+    results = []
+    for tf in tfs:
+        days = TF_DEFAULT_DAYS.get(tf, args.days)
+        log(f"\n  ── {tf} (최근 {days}일) ──")
+        try:
+            if args.synthetic:
+                n = min(80000, int(days * 86400 * 1000 / INTERVAL_MS.get(tf, 300000)))
+                df = synthetic_klines(n=max(n, 3000), interval=tf, log=log)
+            elif args.csv:
+                df = load_csv(args.csv, log=log)
+            else:
+                df = fetch_klines(args.symbol, days, tf, log=log)
+        except Exception as e:
+            log(f"     ❌ 데이터 실패: {e}")
+            continue
+
+        r = analyze_one(df, cfg, args, tf, log=log)
+        results.append(r)
+        if r['note']:
+            log(f"     ⚠️ {r['note']}")
+        else:
+            log(f"     표본 {r['n']:,} | ATR {r['atr']:.3f}% | "
+                f"TP {r['tp']:.2f}% / SL {r['sl']:.2f}%")
+
+    if not results:
+        log("\n  ❌ 분석할 수 있는 시간봉이 없습니다.")
+        return 1
+
+    log("\n" + "=" * 78)
+    log("📋 결과")
+    log("=" * 78)
+    log(f"  {'시간봉':>6} | {'표본':>7} | {'ATR':>6} | {'TP/SL':>12} | "
+        f"{'수수료비중':>9} | {'상태':>6} | {'커버':>5} | {'기준EV':>9} | {'skill':>7} | {'최고EV':>9}")
+    log("  " + "-" * 96)
+
+    for r in results:
+        if r['note']:
+            log(f"  {r['interval']:>6} | {r['note']:>7} | {'-':>6} | {'-':>12} | "
+                f"{'-':>9} | {'-':>6} | {'-':>5} | {'-':>9} | {'-':>7} | {'-':>9}")
+            continue
+        fs = r['fee_share']
+        fflag = '❌' if fs > 10 else ('⚠️' if fs > 5 else '✅')
+        cflag = '⚠️' if r['coverage'] < 50 else ' '
+        log(f"  {r['interval']:>6} | {r['n']:>7,} | {r['atr']:>5.2f}% | "
+            f"{r['tp']:>5.2f}/{r['sl']:>5.2f}% | {fflag}{fs:>7.1f}% | "
+            f"{r['state']:>6} | {cflag}{r['coverage']:>3.0f}% | "
+            f"{r['base_ev']:>+8.4f}% | {r['skill']:>+6.2f}% | {r['best_ev']:>+8.4f}%")
+
+    log("\n  📖 열 설명")
+    log("     · 기준EV  = 필터 없이 전부 진입했을 때 매매당 손익")
+    log(f"     · skill   = 확률모델의 정보량. 0 이하면 예측력 없음")
+    log("     · 최고EV  = 확률 필터를 걸었을 때 최선의 매매당 손익")
+    log("     · 상태   = 확률표 해상도 (축 개수 × 구간 수). 표본에 맞춰 자동 조정됨")
+    log("     · 커버   = 검증표본 중 학습구간에 사례가 충분했던 비율 (낮으면 신뢰도↓)")
+    log(f"     · 우위가 0이면 기준EV는 {-args.fee:+.3f}%(= -수수료) 근처가 나온다")
+
+    log("\n" + "=" * 78)
+    log("📌 시간봉별 판정")
+    log("=" * 78)
+    for r in results:
+        if r['note']:
+            log(f"  {r['interval']:>4}: ❌ {r['note']}")
+            continue
+        tag = f"  {r['interval']:>4}:"
+        if r['coverage'] < 50:
+            log(f"{tag} ⚠️ 표본 커버리지 {r['coverage']:.0f}% — 상태를 너무 잘게 쪼갬. "
+                f"--state 를 줄이세요")
+        elif r['skill'] <= 0:
+            log(f"{tag} ❌ 예측력 없음 (skill {r['skill']:+.2f}%)")
+        elif np.isnan(r['best_ev']) or r['best_ev'] <= 0:
+            log(f"{tag} ⚠️ 정보는 있으나 수수료를 못 넘음 "
+                f"(최고 EV {r['best_ev']:+.4f}%)")
+        elif r['best_ev'] > r['base_ev'] + 2 * r['se']:
+            log(f"{tag} ✅ 확률 상위 {r['best_thr']}%에서 "
+                f"매매당 {r['best_ev']:+.4f}% (2σ 초과, 표준오차 {r['se']:.4f}%)")
+        else:
+            log(f"{tag} ⚠️ EV는 양수지만 표본오차 범위 안 "
+                f"({r['best_ev']:+.4f}% ± {2*r['se']:.4f}%) — 우연일 수 있음")
+
+    small = [r for r in results if not r['note'] and r['n'] < 3000]
+    if small:
+        log(f"\n  ⚠️ 표본 3,000건 미만: {', '.join(r['interval'] for r in small)}")
+        log("     긴 시간봉은 표본이 급격히 줄어 통계적 신뢰도가 떨어집니다.")
+        log("     일봉은 수년치를 모아도 수천 건이라, 우연한 우위가 나오기 쉽습니다.")
+
+    log("")
+    return 0
 
 
 # ==================== TP/SL 스윕 ====================
@@ -627,6 +847,16 @@ def main():
                     help='합성 랜덤워크로 자체 검증 (승률≈기준선, skill≈0 이어야 정상)')
     ap.add_argument('--sweep', action='store_true',
                     help='TP/SL 조합을 훑어 수수료 대비 효율 비교')
+    ap.add_argument('--multi-tf', action='store_true',
+                    help='여러 시간봉을 같은 기준으로 비교')
+    ap.add_argument('--timeframes', default=','.join(DEFAULT_TIMEFRAMES),
+                    help='비교할 시간봉 (기본: 15m,1h,4h,1d)')
+    ap.add_argument('--auto-tpsl', action='store_true', default=True,
+                    help='TP/SL을 그 시간봉의 ATR 배수로 자동 산출 (기본 켜짐)')
+    ap.add_argument('--fixed-tpsl', dest='auto_tpsl', action='store_false',
+                    help='--tp/--sl 값을 그대로 사용')
+    ap.add_argument('--atr-tp', type=float, default=3.0, help='TP = 이 값 × ATR')
+    ap.add_argument('--atr-sl', type=float, default=1.5, help='SL = 이 값 × ATR')
     args = ap.parse_args()
 
     cfg = {
@@ -642,12 +872,17 @@ def main():
         'calib_bins': 10,
         'state_cols': [c.strip() for c in args.state.split(',') if c.strip()],
         'tp': args.tp, 'sl': args.sl, 'fee': args.fee,
-        'thresholds': [0.55, 0.60, 0.62, 0.64, 0.66, 0.70],
+        'top_pct': [50, 30, 20, 10, 5],   # 예측 확률 상위 q%만 진입
     }
 
     print("=" * 62)
     print("  확률(%) 기반 매매 분석기")
     print("=" * 62)
+
+    if args.multi_tf:
+        print(f"  심볼 {args.symbol} | 상태 구성: {', '.join(cfg['state_cols'])}")
+        return multi_tf(args, cfg)
+
     print(f"  심볼 {args.symbol} | {args.interval} | 최근 {args.days}일 | "
           f"{'롱' if args.side == 1 else '숏'}")
     print(f"  익절 +{args.tp}% / 손절 -{args.sl}% / 수수료 {args.fee}% / "
