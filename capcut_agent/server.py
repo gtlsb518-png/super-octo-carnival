@@ -239,40 +239,52 @@ def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> s
     return " ".join(out).strip()
 
 
-def transcribe_clip(video_path: Path, start: float, end: float,
-                    initial_prompt: str = "") -> str:
-    """영상의 [start, end] 구간만 잘라내 단독 인식한다."""
+def transcribe_clip_words(video_path: Path, start: float, end: float,
+                          initial_prompt: str = "") -> list[dict]:
+    """
+    영상의 [start, end] 구간만 잘라내 단독 인식하고, 원본 영상 기준
+    '절대 시각'을 가진 단어 목록을 반환한다.
+    ★ 드리프트 방지 핵심: 클립을 통째로 텍스트만 뽑던 이전 방식은 클립
+    구간 전체에 단어를 균등하게 흩뿌려서, 클립 안에서 말이 한쪽으로
+    쏠려 있으면(엔지컷의 머뭇거림·헛기침 등) 자막이 실제 발화 위치와
+    어긋났다. word_timestamps로 Whisper가 계산한 실제 단어별 시각을
+    그대로 써서 이 문제를 없앤다.
+    반환: [{"start": 원본초, "end": 원본초, "word": str}, ...]
+    """
     import tempfile
     model = get_whisper_model()
     tmp = Path(tempfile.gettempdir()) / f"_capcut_clip_{uuid.uuid4().hex}.wav"
+    offset = max(start - 0.05, 0)  # ffmpeg로 잘라낸 구간의 시작 = 원본 영상에서의 오프셋
     try:
         cmd = ["ffmpeg", "-y", "-v", "error",
-               "-ss", f"{max(start - 0.05, 0):.3f}", "-to", f"{end + 0.05:.3f}",
+               "-ss", f"{offset:.3f}", "-to", f"{end + 0.05:.3f}",
                "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(tmp)]
         subprocess.run(cmd, capture_output=True)
         if not tmp.exists() or tmp.stat().st_size < 1500:
-            return ""
+            return []
         kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
         segs, _ = model.transcribe(
             str(tmp), language="ko", beam_size=1,
             vad_filter=False,                  # 이미 잘라낸 구간이라 VAD 불필요
             condition_on_previous_text=False,
             no_repeat_ngram_size=3,
+            word_timestamps=True,              # 단어별 실제 발화 시각 확보 (드리프트 방지)
             **kwargs,
         )
-        parts = []
+        words = []
         for s in segs:
             # 짧은/잡음 구간에서 흔한 환각 문구를 거른다
             if getattr(s, "no_speech_prob", 0.0) > 0.8:
                 continue
             if getattr(s, "avg_logprob", 0.0) < -1.5:
                 continue
-            t = s.text.strip()
-            if t:
-                parts.append(t)
-        return " ".join(parts).strip()
+            for w in (s.words or []):
+                wt = (w.word or "").strip()
+                if wt:
+                    words.append({"start": offset + w.start, "end": offset + w.end, "word": wt})
+        return words
     except Exception:
-        return ""
+        return []
     finally:
         try:
             tmp.unlink()
@@ -289,20 +301,33 @@ def transcribe_all_clips(video_path: Path,
     전체 인식은 짧은 엔지컷을 통째로 놓치기 때문에, 클립마다 따로 물어봐서
     '모든 클립이 빠짐없이' 자기 자막을 갖도록 보장한다. 느리지만 확실하다.
     인식이 안 되는 클립도 자막 클립 자체는 만든다(내용은 "...").
+    각 단어는 클립 안에서의 실제 발화 시각을 그대로 갖고 있어 자막이
+    영상과 밀리지 않는다.
     """
     segs = []
     total = len(keep_ranges)
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
     for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
-        text = ""
+        words = []
         if ke - ks >= 0.15:
-            text = transcribe_clip(video_path, ks, ke, script_text)
-            # 효과음 태그·영어 환각 제거 → 이모지/특수문자 제거
-            text = clean_recognized_text(text, script_tokens)
-            text = " ".join(w for w in (sanitize_word(t) for t in text.split()) if w).strip()
-        segs.append({"start": ks, "end": ke,
-                     "text": text or NO_SPEECH_PLACEHOLDER, "words": []})
+            raw_words = transcribe_clip_words(video_path, ks, ke, script_text)
+            for w in raw_words:
+                # 효과음 태그·영어 환각·이모지/특수문자 제거 (단어 단위로 적용)
+                cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
+                if not cleaned:
+                    continue
+                for piece in cleaned.split():   # 정제 후 한 단어가 여러 조각이 될 수도 있음
+                    words.append({
+                        "start": min(max(w["start"], ks), ke),
+                        "end": min(max(w["end"], ks), ke),
+                        "word": piece,
+                    })
+        if words:
+            text = " ".join(w["word"] for w in words)
+        else:
+            text = NO_SPEECH_PLACEHOLDER
+        segs.append({"start": ks, "end": ke, "text": text, "words": words})
         if progress is not None:
             progress["done"] = i + 1
             progress["total"] = total
