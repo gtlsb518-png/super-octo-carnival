@@ -35,9 +35,47 @@ import os
 import sys
 import time
 import argparse
+import subprocess
+
+# ==================== 라이브러리 자동 설치 ====================
+def _ensure(packages):
+    """없는 라이브러리를 자동 설치한다 (9_main.py와 같은 방식)."""
+    missing = []
+    for mod, pkg in packages.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if not missing:
+        return
+    print(f"📦 라이브러리 설치 중: {', '.join(missing)}")
+    for pkg in missing:
+        try:
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"   ✅ {pkg}")
+        except Exception as e:
+            print(f"   ❌ {pkg} 설치 실패: {e}")
+            print(f"   수동 설치: pip install {' '.join(missing)}")
+            input("\n엔터를 누르면 종료합니다...")
+            sys.exit(1)
+    print()
+
+
+_ensure({'numpy': 'numpy', 'pandas': 'pandas', 'requests': 'requests'})
 
 import numpy as np
 import pandas as pd
+
+
+def _pause_exit(code=0):
+    """더블클릭 실행 시 창이 바로 닫히지 않도록 대기."""
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            input("\n엔터를 누르면 종료합니다...")
+    except Exception:
+        pass
+    sys.exit(code)
 
 BINANCE_HOSTS = [
     'https://fapi.binance.com/fapi/v1/klines',   # USDT-M 선물
@@ -169,7 +207,14 @@ def fetch_klines(symbol, days, interval='5m', log=print):
             log(f"  ⚠️ {host.split('/')[2]} 실패: {e}")
 
     if not rows:
-        raise RuntimeError(f"{symbol} 데이터를 받지 못했습니다: {last_err}")
+        raise RuntimeError(
+            f"{symbol} 데이터를 받지 못했습니다.\n"
+            f"    원인: {last_err}\n"
+            f"    확인할 것:\n"
+            f"      1) 인터넷 연결 / 방화벽 / VPN\n"
+            f"      2) 심볼 이름이 맞는지 (예: BTCUSDT, ETHUSDT — 'BTC'만 쓰면 실패)\n"
+            f"      3) 바이낸스 접속이 막힌 환경이면 --csv 로 로컬 파일 사용\n"
+            f"      4) 도구 동작만 확인하려면 --synthetic")
 
     df = pd.DataFrame(rows, columns=[
         'ts', 'open', 'high', 'low', 'close', 'volume',
@@ -761,6 +806,15 @@ def multi_tf(args, cfg, log=print):
             log(f"{tag} ⚠️ EV는 양수지만 표본오차 범위 안 "
                 f"({r['best_ev']:+.4f}% ± {2*r['se']:.4f}%) — 우연일 수 있음")
 
+    # 결과 저장
+    try:
+        out_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(out_dir, f'prob_result_{args.symbol}.csv')
+        pd.DataFrame(results).to_csv(path, index=False, encoding='utf-8-sig')
+        log(f"\n  💾 결과 저장: {path}")
+    except Exception as e:
+        log(f"\n  ⚠️ 결과 저장 실패: {e}")
+
     small = [r for r in results if not r['note'] and r['n'] < 3000]
     if small:
         log(f"\n  ⚠️ 표본 3,000건 미만: {', '.join(r['interval'] for r in small)}")
@@ -859,6 +913,13 @@ def main():
     ap.add_argument('--atr-sl', type=float, default=1.5, help='SL = 이 값 × ATR')
     args = ap.parse_args()
 
+    # 인자 없이 그냥 실행(더블클릭)하면 시간봉 비교 백테스트를 돌린다
+    if len(sys.argv) == 1:
+        args.multi_tf = True
+        print("  ℹ️ 인자가 없어 기본 백테스트를 실행합니다 "
+              "(BTCUSDT, 15m/1h/4h/1d 비교)")
+        print("     다른 옵션은 --help 로 확인하세요.\n")
+
     cfg = {
         'ut_sens': 1.0, 'ut_atr': 10,
         'ema_fast': 34, 'ema_slow': 55,
@@ -938,11 +999,22 @@ def main():
 
 if __name__ == '__main__':
     try:
-        sys.exit(main())
+        _pause_exit(main())
     except KeyboardInterrupt:
         print("\n중단됨.")
+        _pause_exit(1)
+    except RuntimeError as e:
+        # 데이터 실패 등 예상 가능한 오류 — 안내만 보여준다
+        print("\n" + "=" * 62)
+        print("❌ 실행할 수 없습니다")
+        print("=" * 62)
+        print(f"\n{e}\n")
+        _pause_exit(1)
     except Exception as e:
+        print("\n" + "=" * 62)
+        print("❌ 예상치 못한 오류입니다 (아래 내용을 캡처해 문의하세요)")
+        print("=" * 62)
+        print(f"\n{e}\n")
         import traceback
         traceback.print_exc()
-        print(f"\n요약: {e}")
-        sys.exit(1)
+        _pause_exit(1)
