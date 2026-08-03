@@ -146,22 +146,33 @@ def get_video_duration(video_path: Path) -> float:
     return float(json.loads(r.stdout)["format"]["duration"])
 
 
-def compute_keep_ranges(silences: list[dict], total_duration: float) -> list[tuple[float, float, int, int]]:
+def compute_keep_ranges(silences: list[dict], total_duration: float,
+                        head_trim: float = 0.0, tail_trim: float = 0.0,
+                        min_clip_sec: float = 0.0) -> list[tuple[float, float, int, int]]:
     """
     무음을 제외하고 남기는(keep) 구간 목록.
     반환: [(원본_start_sec, 원본_end_sec, 타임라인_start_us, 타임라인_end_us), ...]
     영상 세그먼트와 자막(draft 텍스트/SRT)이 모두 이 함수를 공유하므로
     타이밍이 마이크로초 단위로 완전히 일치한다.
+
+    head_trim / tail_trim: 클립 앞뒤를 이만큼(초) 더 깎는다 (손편집처럼 타이트하게).
+    min_clip_sec:          이보다 짧아진 클립은 통째로 버린다 (0이면 끄기).
     """
     ranges: list[tuple[float, float, int, int]] = []
     tl_us = 0
+    floor_sec = max(min_clip_sec, 0.1)   # 0.1초 미만 클립은 어차피 못 쓴다
 
     def add(ks: float, ke: float):
         nonlocal tl_us
+        # 앞뒤 여유 깎기 (너무 깎여서 클립이 사라지면 깎지 않는다)
+        if head_trim > 0 or tail_trim > 0:
+            nks, nke = ks + head_trim, ke - tail_trim
+            if nke - nks >= floor_sec:
+                ks, ke = nks, nke
         src_start = sec_to_us(snap_to_frame(ks))
         src_end   = sec_to_us(snap_to_frame(ke))
         dur = src_end - src_start
-        if dur < 100_000:  # 0.1초 미만 클립은 버림
+        if dur < sec_to_us(floor_sec):
             return
         ranges.append((ks, ke, tl_us, tl_us + dur))
         tl_us += dur
@@ -1411,6 +1422,9 @@ def build_draft(
     stroke_size: float = 0.15,
     stroke_alpha: float = 0.6,
     unify_place: bool = True,
+    head_trim: float = 0.0,
+    tail_trim: float = 0.0,
+    min_clip_sec: float = 0.0,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -1443,7 +1457,8 @@ def build_draft(
     ts          = now_us()
 
     # ── keep 구간 (자막 리매핑과 동일한 함수 공유 → 타이밍 완전 일치) ──
-    keep_ranges = compute_keep_ranges(silences, total_duration_sec)
+    keep_ranges = compute_keep_ranges(silences, total_duration_sec,
+                                      head_trim, tail_trim, min_clip_sec)
 
     # ── 비디오 세그먼트 ──────────────────────────────────
     segments = []
@@ -1896,7 +1911,10 @@ async def process_video(
     request: Request,
     video_path: str,
     noise_db: float = -40.0,
-    min_silence: float = 0.5,
+    min_silence: float = 0.3,
+    head_trim: float = 0.0,      # 클립 앞을 더 깎는 양 (ms)
+    tail_trim: float = 0.0,      # 클립 뒤를 더 깎는 양 (ms)
+    min_clip: float = 0.0,       # 이보다 짧은 클립은 버림 (초, 0이면 끄기)
     use_subtitle: bool = False,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
@@ -1944,7 +1962,16 @@ async def process_video(
             silences = detect_silence(video, noise_db, min_silence, total_duration=duration)
             yield f"data: {json.dumps({'step': 'silence_done', 'msg': f'무음 구간 {len(silences)}개 발견', 'silences': silences})}\n\n"
 
-            keep_ranges = compute_keep_ranges(silences, duration)
+            keep_ranges = compute_keep_ranges(silences, duration,
+                                              head_trim / 1000.0, tail_trim / 1000.0, min_clip)
+            tight = []
+            if head_trim or tail_trim:
+                tight.append(f"앞 {head_trim:.0f}ms / 뒤 {tail_trim:.0f}ms 추가 컷")
+            if min_clip:
+                tight.append(f"{min_clip}초 미만 클립 제외")
+            if tight:
+                yield f"data: {json.dumps({'step': 'silence', 'msg': '타이트 컷: ' + ', '.join(tight)})}\n\n"
+            yield f"data: {json.dumps({'step': 'silence', 'msg': f'컷 클립 {len(keep_ranges)}개'})}\n\n"
 
             # 자막 인식
             raw_subs = None
@@ -2031,7 +2058,8 @@ async def process_video(
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
                                     max_sub_chars, script_text, valid_appends, image_dur,
                                     title_text, date_text, effect_dur, bg_files,
-                                    True, stroke_size, 0.6, bool(unify_place))
+                                    True, stroke_size, 0.6, bool(unify_place),
+                                    head_trim / 1000.0, tail_trim / 1000.0, min_clip)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 
