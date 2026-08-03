@@ -148,7 +148,8 @@ def get_video_duration(video_path: Path) -> float:
 
 def compute_keep_ranges(silences: list[dict], total_duration: float,
                         head_trim: float = 0.0, tail_trim: float = 0.0,
-                        min_clip_sec: float = 0.0) -> list[tuple[float, float, int, int]]:
+                        min_clip_sec: float = 0.0,
+                        drop_clips: set[int] | None = None) -> list[tuple[float, float, int, int]]:
     """
     무음을 제외하고 남기는(keep) 구간 목록.
     반환: [(원본_start_sec, 원본_end_sec, 타임라인_start_us, 타임라인_end_us), ...]
@@ -157,13 +158,14 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
 
     head_trim / tail_trim: 클립 앞뒤를 이만큼(초) 더 깎는다 (손편집처럼 타이트하게).
     min_clip_sec:          이보다 짧아진 클립은 통째로 버린다 (0이면 끄기).
+    drop_clips:            빼버릴 클립 번호 (같은 말 반복 엔지컷 삭제용).
+                           번호는 '빼기 전' 목록 기준이고, 빼고 나면 타임라인은
+                           빈틈 없이 다시 이어붙인다.
     """
-    ranges: list[tuple[float, float, int, int]] = []
-    tl_us = 0
+    picked: list[tuple[float, float, int]] = []   # (원본 start, 원본 end, 길이 us)
     floor_sec = max(min_clip_sec, 0.1)   # 0.1초 미만 클립은 어차피 못 쓴다
 
     def add(ks: float, ke: float):
-        nonlocal tl_us
         # 앞뒤 여유 깎기 (너무 깎여서 클립이 사라지면 깎지 않는다)
         if head_trim > 0 or tail_trim > 0:
             nks, nke = ks + head_trim, ke - tail_trim
@@ -174,8 +176,7 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
         dur = src_end - src_start
         if dur < sec_to_us(floor_sec):
             return
-        ranges.append((ks, ke, tl_us, tl_us + dur))
-        tl_us += dur
+        picked.append((ks, ke, dur))
 
     cursor = 0.0
     for sil in sorted(silences, key=lambda x: x["start"]):
@@ -185,7 +186,80 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
         cursor = max(cursor, e)
     if cursor < total_duration:
         add(cursor, total_duration)
+
+    drop = drop_clips or set()
+    ranges: list[tuple[float, float, int, int]] = []
+    tl_us = 0
+    for i, (ks, ke, dur) in enumerate(picked):
+        if i in drop:
+            continue
+        ranges.append((ks, ke, tl_us, tl_us + dur))
+        tl_us += dur
     return ranges
+
+
+def _same_line(a: str, b: str, sim: float = 0.9) -> bool:
+    """두 클립이 '같은 말'인지 (엔지컷 판정). 띄어쓰기·문장부호는 무시."""
+    a = re.sub(r"[^0-9A-Za-z가-힣]", "", a)
+    b = re.sub(r"[^0-9A-Za-z가-힣]", "", b)
+    if len(a) < 2 or len(b) < 2:
+        return False
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    # "삼성이" → "삼성이 주가 하락의 원인은" 처럼 하다 만 테이크
+    if long.startswith(short):
+        return True
+    import difflib
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    if ratio >= sim:
+        return True
+    # 앞부분이 길게 같고 끝만 조금 다르면 같은 말로 본다
+    #   "금리 인하가 시장에" / "금리 인하가 시장엔"  → 같은 말 (인식 차이)
+    #   "첫 번째 이유는"    / "두 번째 이유는"      → 다른 말 (앞이 다름)
+    pre = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        pre += 1
+    return pre >= len(short) * 0.6 and ratio >= 0.8
+
+
+def find_repeat_ng_clips(keep_ranges: list[tuple[float, float, int, int]],
+                         clip_texts: list[str],
+                         short_sec: float = 1.5) -> list[int]:
+    """
+    같은 말을 연달아 여러 번 찍은 구간(엔지컷)에서 '짧은' 테이크를 골라낸다.
+
+    규칙 (사용자 지정):
+      - 같은 말이 2개 이상 연달아 나오고 그 클립이 짧으면 → 지운다
+      - 같은 말이라도 클립이 길면 → 그냥 둔다 (고를 수 있게)
+      - 한 묶음이 전부 짧으면 마지막 하나는 남긴다 (내용이 통째로 사라지지 않게)
+    반환: 지울 클립 번호 목록
+    """
+    if not clip_texts or len(clip_texts) != len(keep_ranges):
+        return []
+    short_us = sec_to_us(short_sec)
+    drop: list[int] = []
+    i = 0
+    n = len(clip_texts)
+    while i < n:
+        # 같은 말이 이어지는 묶음 찾기 (묶음 안에서 가장 긴 문장과 비교)
+        group = [i]
+        rep = clip_texts[i]
+        j = i + 1
+        while j < n and _same_line(rep, clip_texts[j]):
+            group.append(j)
+            if len(clip_texts[j]) > len(rep):
+                rep = clip_texts[j]
+            j += 1
+        if len(group) >= 2:
+            shorts = [k for k in group if (keep_ranges[k][3] - keep_ranges[k][2]) < short_us]
+            if len(shorts) == len(group):
+                shorts = shorts[:-1]      # 전부 짧으면 마지막 테이크는 남긴다
+            drop.extend(shorts)
+        i = j
+    return drop
 
 
 # ══════════════════════════════════════════════════════════
@@ -1425,6 +1499,7 @@ def build_draft(
     head_trim: float = 0.0,
     tail_trim: float = 0.0,
     min_clip_sec: float = 0.0,
+    drop_clips: set[int] | None = None,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -1458,7 +1533,7 @@ def build_draft(
 
     # ── keep 구간 (자막 리매핑과 동일한 함수 공유 → 타이밍 완전 일치) ──
     keep_ranges = compute_keep_ranges(silences, total_duration_sec,
-                                      head_trim, tail_trim, min_clip_sec)
+                                      head_trim, tail_trim, min_clip_sec, drop_clips)
 
     # ── 비디오 세그먼트 ──────────────────────────────────
     segments = []
@@ -1915,6 +1990,7 @@ async def process_video(
     head_trim: float = 0.0,      # 클립 앞을 더 깎는 양 (ms)
     tail_trim: float = 0.0,      # 클립 뒤를 더 깎는 양 (ms)
     min_clip: float = 0.0,       # 이보다 짧은 클립은 버림 (초, 0이면 끄기)
+    ng_short: float = 0.0,       # 같은 말 반복 중 이보다 짧은 테이크 삭제 (초, 0이면 끄기)
     use_subtitle: bool = False,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
@@ -1976,7 +2052,10 @@ async def process_video(
             # 자막 인식
             raw_subs = None
             subtitle_count = 0
+            drop_set: set[int] = set()   # 삭제한 반복 엔지컷 번호
             want_sub = use_subtitle   # 클로저 안에서 끄기 위해 지역 변수로 복사
+            if ng_short > 0 and not want_sub:
+                yield f"data: {json.dumps({'step': 'silence', 'msg': '⚠ 반복 엔지컷 삭제는 자막(음성인식)이 켜져 있어야 합니다. 이번엔 건너뜁니다.'})}\n\n"
             if want_sub:
                 # 자막 패키지가 없으면 자동 설치 (포터블 runtime 포함)
                 loop = asyncio.get_event_loop()
@@ -2006,6 +2085,26 @@ async def process_video(
                             yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
                     raw_subs = await task
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립별 인식 완료 ({len(raw_subs)}개)'})}\n\n"
+
+                # ── 같은 말 반복(엔지컷) 중 짧은 테이크 삭제 ──
+                if ng_short > 0:
+                    texts = [s["text"] for s in raw_subs]
+                    dropped = find_repeat_ng_clips(keep_ranges, texts, ng_short)
+                    if dropped:
+                        for k in dropped[:12]:
+                            d_sec = (keep_ranges[k][3] - keep_ranges[k][2]) / 1e6
+                            line = f'  - 삭제 {k + 1}번 클립 ({d_sec:.2f}초) “{texts[k][:20]}”'
+                            yield f"data: {json.dumps({'step': 'asr', 'msg': line})}\n\n"
+                        if len(dropped) > 12:
+                            yield f"data: {json.dumps({'step': 'asr', 'msg': f'  ... 외 {len(dropped) - 12}개'})}\n\n"
+                        drop_set = set(dropped)
+                        raw_subs = [s for i, s in enumerate(raw_subs) if i not in drop_set]  # 지운 클립 말은 옆 클립으로 새지 않게
+                        keep_ranges = compute_keep_ranges(
+                            silences, duration, head_trim / 1000.0, tail_trim / 1000.0,
+                            min_clip, drop_set)
+                        yield f"data: {json.dumps({'step': 'asr', 'msg': f'반복 엔지컷 {len(dropped)}개 삭제 → 클립 {len(keep_ranges)}개'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'step': 'asr', 'msg': '반복 엔지컷: 삭제할 짧은 중복 없음'})}\n\n"
 
                 if script_text:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 {len(script_text)}자 수신 → 문맥 대조 교정 중...'})}\n\n"
@@ -2059,7 +2158,7 @@ async def process_video(
                                     max_sub_chars, script_text, valid_appends, image_dur,
                                     title_text, date_text, effect_dur, bg_files,
                                     True, stroke_size, 0.6, bool(unify_place),
-                                    head_trim / 1000.0, tail_trim / 1000.0, min_clip)
+                                    head_trim / 1000.0, tail_trim / 1000.0, min_clip, drop_set)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 

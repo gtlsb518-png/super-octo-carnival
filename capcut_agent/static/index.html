@@ -339,6 +339,23 @@
         </div>
       </div>
     </div>
+
+    <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px;">
+        <input type="checkbox" id="ng-on" style="accent-color:var(--accent);" />
+        <span>🔁 같은 말 반복(엔지컷) 정리 — 짧은 테이크만 삭제</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; font-size:12px; margin-top:8px; padding-left:22px;">
+        <input type="number" id="ng-short" value="1.5" step="0.1" min="0.3" max="5"
+               style="width:64px; background:#000; border:1px solid var(--border); border-radius:4px;
+                      color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" />
+        <span style="color:var(--dim);">초 미만이면 삭제 / 이보다 길면 그대로 둠</span>
+      </label>
+      <div style="font-size:11px; color:var(--dim); margin-top:8px; line-height:1.6; padding-left:22px;">
+        같은 말이 연달아 2번 이상 나올 때만 동작합니다. 긴 테이크는 여러 개라도
+        전부 남겨서 직접 고르실 수 있게 합니다. (자막 켜야 동작 — 말 내용으로 판단)
+      </div>
+    </div>
   </div>
 
   <!-- 화면 비율 -->
@@ -640,8 +657,12 @@
     const minClip  = (tightOn && document.getElementById('drop-short').checked)
                      ? document.getElementById('min-clip').value : 0;
 
+    // 같은 말 반복(엔지컷) 정리
+    const ngShort = document.getElementById('ng-on').checked
+                    ? document.getElementById('ng-short').value : 0;
+
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}`);
+    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}&ng_short=${ngShort}`);
 
     xhr.setRequestHeader('Content-Type', 'application/json');
 
