@@ -106,6 +106,12 @@ FPS = 30.0
 # 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
 MAX_SUBTITLE_CHARS = 10
 
+# 자막 표시 타이밍 (완성본 자막 분석값에 맞춤)
+SUB_TAIL_PAD_US = 120_000    # 말이 끝난 뒤 자막을 조금 더 남겨두는 여유
+SUB_BRIDGE_US   = 400_000    # 이보다 짧은 쉼이면 다음 자막까지 이어붙임(끊김 방지)
+SUB_MAX_DUR_US  = 2_000_000  # 자막 하나가 화면에 떠 있는 최대 시간
+SUB_PAUSE_BREAK_US = 350_000  # 말 사이가 이만큼 벌어지면 자막을 끊는다
+
 def snap_to_frame(sec: float) -> float:
     """초 단위 시간을 가장 가까운 프레임 경계로 스냅 (30fps 기준)"""
     frame = round(sec * FPS)
@@ -556,15 +562,16 @@ def _ends_clause(word: str) -> bool:
 
 
 def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
-                       gap_break_us: int = 700_000) -> list[list[dict]]:
+                       gap_break_us: int = SUB_PAUSE_BREAK_US) -> list[list[dict]]:
     """
     연속된 단어열을 한국어 자막 조각으로 분할.
     - 단어(어절) 경계에서만 끊음 → 한국어 어미로 자연스럽게 끝남
+    - ★ 문장이 끝나면(. ? ! , 등) 길이와 상관없이 바로 끊는다.
+      완성본 자막처럼 '웬열?!' / '솔직히 기분 좋지?' 로 문장이 딱딱 떨어지게 하기 위함.
+      (예전에는 길이가 찰 때까지 다음 문장 단어를 붙여서 문장이 섞였다)
     - 조각 길이 목표 max_chars, 최대 max_chars+tolerance
-    - 구두점(쉼표/마침표 등)으로 끝나면 조금 이르게 끊어 구절 유지
     - 단어 사이 시간 간격이 gap_break_us 이상이면(말 사이 쉼) 무조건 끊음
-      → 시간상 멀리 떨어진 단어가 한 자막에 뭉치지 않음
-    - 너무 짧은 꼬리 조각은 직전 조각에 합침
+    - 너무 짧은 꼬리 조각은 직전 조각에 합침 (문장부호로 끝난 경우는 유지)
     """
     hard = max_chars + tolerance
     groups: list[list[dict]] = []
@@ -584,12 +591,12 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
         else:
             cur.append(wd)
             cl += add
-        last = cur[-1]["word"]
-        if cl >= hard or cl >= max_chars or (_ends_clause(last) and cl >= max_chars - tolerance):
+        # 문장이 끝났으면 길이와 무관하게 끊는다 (문장 섞임 방지)
+        if _ends_clause(cur[-1]["word"]) or cl >= max_chars:
             groups.append(cur)
             cur, cl = [], 0
     if cur:
-        if groups and cl <= tolerance + 2:
+        if groups and cl <= tolerance + 2 and not _ends_clause(groups[-1][-1]["word"]):
             prev = groups[-1]
             plen = sum(len(x["word"]) for x in prev) + len(prev) - 1
             # 시간 간격이 크지 않을 때만 꼬리 합침
@@ -624,6 +631,7 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
     MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
+    # 완성본 자막 기준: 조각 길이 평균 0.93초 / 최대 1.53초, 조각 사이 간격 ~0.03초
 
     stream = build_word_stream(segments)
     mapped = map_words_to_timeline(stream, keep_ranges)
@@ -655,25 +663,37 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         if not groups:
             continue
 
-        # 조각 경계: 첫 조각은 클립 시작, 마지막 조각은 클립 끝까지 채운다
-        bounds = [clip_start]
-        for g in groups[1:]:
-            b = min(max(g[0]["tl_start"], bounds[-1] + MIN_DUR_US), clip_end)
-            bounds.append(b)
-        bounds.append(clip_end)
-
+        # ── 조각별 표시 구간 ──────────────────────────────
+        # 완성본(브루) 스타일: 자막은 말하는 동안만 짧게 떠 있고 바로 다음으로 넘어간다.
+        # 말이 이어지면 다음 조각까지 이어붙여 끊김을 없애고,
+        # 말이 멈추면 거기서 자막도 끝낸다 (클립 끝까지 억지로 늘리지 않음).
+        clip_out = []
         for gi, g in enumerate(groups):
-            s, e = bounds[gi], bounds[gi + 1]
+            s = g[0]["tl_start"]
+            if clip_out:                       # 직전 자막과 겹치지 않게
+                s = max(s, clip_out[-1]["end_us"])
+            elif gi == 0:
+                s = clip_start                 # 클립 첫 자막은 클립 시작에 맞춤
+
+            natural_end = g[-1]["tl_end"] + SUB_TAIL_PAD_US
+            if gi + 1 < len(groups):
+                nxt = groups[gi + 1][0]["tl_start"]
+                # 다음 말까지 금방 이어지면 붙이고, 쉼이 길면 여기서 끊는다
+                e = nxt if nxt - natural_end <= SUB_BRIDGE_US else natural_end
+            else:
+                # 클립 마지막 자막: 다음 클립 첫마디까지 금방 이어지면 클립 끝까지
+                e = clip_end if clip_end - natural_end <= SUB_BRIDGE_US else natural_end
+
+            e = min(max(e, s + MIN_DUR_US), clip_end)      # 클립 밖으로 못 나감
+            e = min(e, s + SUB_MAX_DUR_US)                 # 너무 오래 떠 있지 않게
             text = strip_periods(" ".join(w["word"] for w in g)) or NO_SPEECH_PLACEHOLDER
             if e - s < MIN_DUR_US:
                 # 자리가 부족하면 직전 자막에 합쳐 단어 유실 방지
-                if out and out[-1]["start_us"] >= clip_start:
-                    out[-1]["text"] += " " + text
-                    continue
-                e = min(s + MIN_DUR_US, clip_end)
-                if e <= s:
-                    continue
-            out.append({"start_us": s, "end_us": e, "text": text})
+                if clip_out:
+                    clip_out[-1]["text"] += " " + text
+                continue
+            clip_out.append({"start_us": s, "end_us": e, "text": text})
+        out.extend(clip_out)
 
     if stats is not None:
         stats["corrected"] = total_fixed
