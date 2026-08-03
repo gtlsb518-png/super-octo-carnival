@@ -8,3 +8,9 @@ bot_stats.json
 bot_running.json
 trade_history.xlsx
 trade_backup_*.csv
+
+# CapCut Agent 실행 산출물 (draft/업로드/자동 설치된 런타임)
+capcut_agent/outputs/
+capcut_agent/uploads/
+capcut_agent/runtime/
+capcut_agent/error_log.txt
