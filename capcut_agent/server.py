@@ -859,6 +859,168 @@ CANVAS_PRESETS = {
     "16:9":  {"width": 1920, "height": 1080, "subtitle_y": -0.6907},  # 가로
 }
 
+# ══════════════════════════════════════════════════════════
+# 템플릿(0731 프로젝트)에서 추출한 상단 제목 / 하단 날짜 스타일
+# ══════════════════════════════════════════════════════════
+
+TEMPLATE_FONT_PATH = "C:/Users/Lusey/AppData/Local/Microsoft/Windows/Fonts/GmarketSansTTFBold.ttf"
+
+# 제목: 상단, 1줄 빨강 + 나머지 흰색, 그림자 있음
+TITLE_STYLE = {
+    "font_size": 15.0, "size": 15, "y": 0.614609283208847, "scale": 1.023456061119955,
+    "line_spacing": 0.12, "check_flag": 39, "render_index": 14001, "track_render_index": 7,
+}
+# 날짜: 하단, 노란색 + 검정 외곽선
+DATE_STYLE = {
+    "font_size": 15.0, "size": 15, "y": -0.7106237025002258, "scale": 0.829706636769777,
+    "line_spacing": 0.02, "check_flag": 15, "render_index": 14000, "track_render_index": 6,
+    "color": [0.941176474094391, 1, 0], "hex": "#f0ff00", "stroke_width": 0.0599999986588955,
+}
+
+TITLE_RED = [1, 0, 0]
+TITLE_WHITE = [1, 1, 1]
+
+# 템플릿에서 실제로 사용된 등장 애니메이션 (랜덤 효과용)
+TEMPLATE_IN_ANIMATIONS = [
+    {"name": "패들링",     "resource_id": "7227021042017899010"},
+    {"name": "X 진동",     "resource_id": "7223670693685105154"},
+    {"name": "우주 왜곡",   "resource_id": "7301248488333906433"},
+    {"name": "번개 워프",   "resource_id": "7545333478791925045"},
+    {"name": "충돌",       "resource_id": "7216282356447973890"},
+    {"name": "스워시",     "resource_id": "7274915008939561473"},
+    {"name": "락 3",       "resource_id": "6781683302672634382"},
+    {"name": "앰버 커런트", "resource_id": "7646378118994758920"},
+    {"name": "펄스 줌",     "resource_id": "7530463994486820097"},
+    {"name": "글리치 이동", "resource_id": "7598505558747958545"},
+    {"name": "왜곡 임팩트", "resource_id": "7620480539803274504"},
+    {"name": "퀀텀 셰이크", "resource_id": "7626732691261607189"},
+    {"name": "TV 빔",      "resource_id": "7507263146558590269"},
+    {"name": "블랙홀",     "resource_id": "7294461978301436418"},
+]
+
+
+def _split_title_lines(title_text: str) -> list[str]:
+    """제목을 최대 3줄로 정리 (줄바꿈이 없으면 길이에 맞춰 자동 분할)."""
+    lines = [ln.strip() for ln in title_text.replace("\r", "").split("\n") if ln.strip()]
+    if len(lines) > 1:
+        return lines[:3]
+    words = title_text.split()
+    if len(words) <= 1:
+        return [title_text.strip()]
+    n = min(3, max(2, math.ceil(len("".join(words)) / 10)))
+    per = math.ceil(len(words) / n)
+    return [" ".join(words[i:i + per]) for i in range(0, len(words), per)][:3]
+
+
+def _make_title_material(mat_id: str, title_text: str) -> dict:
+    """
+    상단 제목 텍스트 (템플릿 스타일 그대로).
+    첫 줄은 빨강, 나머지 줄은 흰색.
+    """
+    lines = _split_title_lines(title_text)
+    full = "\n".join(lines)
+
+    shadow = [{
+        "thickness_projection_angle": -45, "thickness_projection_enable": False,
+        "diffuse": 0.04281949996948242, "alpha": 0.899999976158142,
+        "distance": 4.999999523162842,
+        "content": {"render_type": "solid", "solid": {"color": [0, 0, 0]}},
+        "angle": -45, "thickness_projection_distance": 0,
+    }]
+
+    styles, pos = [], 0
+    for i, ln in enumerate(lines):
+        end = pos + len(ln) + (1 if i < len(lines) - 1 else 0)   # 개행 포함
+        styles.append({
+            "fill": {"content": {"render_type": "solid",
+                                 "solid": {"color": TITLE_RED if i == 0 else TITLE_WHITE}}},
+            "font": {"path": TEMPLATE_FONT_PATH, "id": ""},
+            "size": TITLE_STYLE["size"], "shadows": shadow, "bold": True,
+            "useLetterColor": True, "range": [pos, end],
+        })
+        pos = end
+
+    content = {"styles": styles, "text": full}
+    mat = _make_text_material(mat_id, full)
+    mat.update({
+        "content": json.dumps(content, ensure_ascii=False),
+        "font_size": TITLE_STYLE["font_size"], "text_size": 30,
+        "text_color": "#ffffff",
+        "border_color": "#000000", "border_width": 0.08, "border_alpha": 1.0,
+        "background_color": "#000000", "background_alpha": 1.0, "background_style": 0,
+        "background_round_radius": 0.0, "background_height": 0.14, "background_width": 0.14,
+        "line_spacing": TITLE_STYLE["line_spacing"], "alignment": 1, "line_max_width": 0.82,
+        "font_path": TEMPLATE_FONT_PATH, "font_name": "", "font_title": "none",
+        "has_shadow": True, "shadow_color": "#000000",
+        "shadow_alpha": 0.8999999761581421, "shadow_angle": -45.0,
+        "shadow_distance": 5.0, "shadow_smoothing": 0.7707509994506836,
+        "check_flag": TITLE_STYLE["check_flag"], "add_type": 0,
+    })
+    return mat
+
+
+def _make_date_material(mat_id: str, date_text: str) -> dict:
+    """하단 날짜 텍스트 (노란색 + 검정 외곽선, 템플릿 스타일 그대로)."""
+    content = {
+        "styles": [{
+            "fill": {"content": {"render_type": "solid", "solid": {"color": DATE_STYLE["color"]}}},
+            "font": {"path": TEMPLATE_FONT_PATH, "id": ""},
+            "strokes": [{"content": {"render_type": "solid", "solid": {"color": [0, 0, 0]}},
+                         "width": DATE_STYLE["stroke_width"], "mode": 0}],
+            "size": DATE_STYLE["size"], "useLetterColor": True,
+            "range": [0, len(date_text)],
+        }],
+        "text": date_text,
+    }
+    mat = _make_text_material(mat_id, date_text)
+    mat.update({
+        "content": json.dumps(content, ensure_ascii=False),
+        "font_size": DATE_STYLE["font_size"], "text_size": 30,
+        "text_color": DATE_STYLE["hex"],
+        "border_color": "#000000", "border_width": 0.08, "border_alpha": 1.0,
+        "background_color": "#000000", "background_alpha": 1.0, "background_style": 0,
+        "background_round_radius": 0.0, "background_height": 0.14, "background_width": 0.14,
+        "line_spacing": DATE_STYLE["line_spacing"], "alignment": 1, "line_max_width": 0.82,
+        "font_path": TEMPLATE_FONT_PATH, "font_name": "", "font_title": "none",
+        "has_shadow": False,
+        "check_flag": DATE_STYLE["check_flag"], "add_type": 0,
+    })
+    return mat
+
+
+def _make_overlay_text_segment(seg_id: str, mat_id: str, start_us: int, end_us: int,
+                               style: dict, anim_ref_id: str) -> dict:
+    """제목/날짜용 텍스트 세그먼트 (템플릿의 위치·크기·렌더순서 그대로)."""
+    seg = _make_text_segment(seg_id, mat_id, start_us, end_us,
+                             transform_y=style["y"], render_index=style["render_index"])
+    seg["clip"]["scale"] = {"x": style["scale"], "y": style["scale"]}
+    seg["uniform_scale"] = {"on": True, "value": 1.0}
+    seg["track_render_index"] = style["track_render_index"]
+    seg["extra_material_refs"] = [anim_ref_id]
+    return seg
+
+
+def _make_sticker_animation(anim_id: str) -> dict:
+    """제목/날짜 텍스트가 참조하는 빈 애니메이션 재료 (템플릿과 동일 구조)."""
+    return {"id": anim_id, "type": "sticker_animation", "animations": [],
+            "multi_language_current": "none"}
+
+
+def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -> dict:
+    """영상/이미지 클립에 넣을 등장 애니메이션 재료."""
+    return {
+        "id": anim_id, "type": "sticker_animation", "multi_language_current": "none",
+        "animations": [{
+            "id": effect["resource_id"], "name": effect["name"],
+            "type": "in", "category_id": "in", "category_name": "인",
+            "resource_id": effect["resource_id"], "path": "",
+            "start": 0, "duration": duration_us,
+            "anim_adjust_params": None, "platform": "all",
+            "panel": "video", "material_type": "video",
+        }],
+    }
+
+
 # 이미지로 취급할 확장자 (나머지는 영상으로 간주)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".tif", ".tiff"}
 IMAGE_SOURCE_DUR_US = 10_800_000_000   # 이미지 material의 소스 길이 (3시간, CapCut 관례)
@@ -1082,6 +1244,10 @@ def build_draft(
     script_text: str = "",
     append_files: list[Path] | None = None,
     image_dur_sec: float = DEFAULT_IMAGE_DUR_SEC,
+    title_text: str = "",
+    date_text: str = "",
+    effect_interval_sec: float = 0.0,
+    image_remove_bg: bool = False,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -1091,6 +1257,10 @@ def build_draft(
     script_text:   대본. 있으면 정답 텍스트로 정렬해 오탈자 교정 + 반복 제거
     append_files:  컷편집 영상 뒤에 순서대로 이어붙일 영상/이미지 파일들 (통합 모드)
     image_dur_sec: 이어붙일 이미지 1장의 노출 시간(초)
+    title_text:    상단 제목 (첫 줄 빨강 + 나머지 흰색, 템플릿 스타일)
+    date_text:     하단 날짜 (노란색, 보통 오늘 날짜 MM-DD)
+    effect_interval_sec: 0보다 크면 이 간격마다 클립에 랜덤 등장 효과 부여
+    image_remove_bg: 이어붙이는 이미지에 배경제거 플래그 적용
     """
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
     src_width, src_height = get_video_resolution(video_path)
@@ -1168,12 +1338,40 @@ def build_draft(
             seg_dur = src_dur_us
         if seg_dur < 100_000:
             continue
-        extra_materials.append(_media_material_dict(mat_id, f, w, h, src_dur_us, is_img))
+        mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
+        if is_img and image_remove_bg:
+            # 캡컷 배경제거 플래그 (마스크 캐시는 캡컷이 열 때 생성)
+            mat["matting"]["flag"] = 1
+            mat["matting"]["custom_matting_id"] = str(uuid.uuid4()).upper()
+        extra_materials.append(mat)
         segments.append(_media_segment_dict(
             str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img))
         timeline_cursor_us += seg_dur
 
     final_duration = timeline_cursor_us
+
+    # ── 랜덤 등장 효과 ───────────────────────────────────
+    # effect_interval_sec 간격마다, 그 시점을 지나는 클립에 효과를 하나씩 부여
+    anim_materials = []
+    if effect_interval_sec > 0 and segments:
+        import random
+        rnd = random.Random(draft_name)          # 같은 영상은 항상 같은 결과
+        step_us = sec_to_us(effect_interval_sec)
+        next_mark, last_pick = 0, None
+        for seg in segments:
+            s = seg["target_timerange"]["start"]
+            e = s + seg["target_timerange"]["duration"]
+            if e <= next_mark:
+                continue
+            choices = [x for x in TEMPLATE_IN_ANIMATIONS if x["name"] != last_pick]
+            eff = rnd.choice(choices or TEMPLATE_IN_ANIMATIONS)
+            last_pick = eff["name"]
+            anim_id = str(uuid.uuid4()).upper()
+            dur = min(500_000, seg["target_timerange"]["duration"])
+            anim_materials.append(_make_in_animation(anim_id, eff, dur))
+            seg.setdefault("extra_material_refs", []).append(anim_id)
+            while next_mark <= s:
+                next_mark += step_us
 
     # ── 자막 텍스트 트랙 ─────────────────────────────────
     # 단어별 발화 시각 기준으로 각 영상 클립에 자막을 배분 →
@@ -1193,6 +1391,25 @@ def build_draft(
                 render_index=15000 + idx,
             ))
 
+    # ── 상단 제목 / 하단 날짜 (템플릿 스타일, 영상 전체 길이) ──
+    overlay_tracks = []
+    for txt, style, make_mat in (
+        (date_text.strip(),  DATE_STYLE,  _make_date_material),
+        (title_text.strip(), TITLE_STYLE, _make_title_material),
+    ):
+        if not txt or final_duration <= 0:
+            continue
+        mat_id = str(uuid.uuid4()).upper()
+        anim_id = str(uuid.uuid4()).upper()
+        text_materials.append(make_mat(mat_id, txt))
+        anim_materials.append(_make_sticker_animation(anim_id))
+        overlay_tracks.append({
+            "attribute": 0, "flag": 0, "id": str(uuid.uuid4()).upper(),
+            "is_default_name": True, "name": "", "type": "text",
+            "segments": [_make_overlay_text_segment(
+                str(uuid.uuid4()).upper(), mat_id, 0, final_duration, style, anim_id)],
+        })
+
     # ── tracks 구성 ──────────────────────────────────────
     tracks = [
         {"attribute": 0, "flag": 0, "id": track_id,
@@ -1203,6 +1420,7 @@ def build_draft(
             "attribute": 0, "flag": 0, "id": str(uuid.uuid4()).upper(),
             "is_default_name": True, "name": "", "segments": text_segments, "type": "text"
         })
+    tracks.extend(overlay_tracks)
 
     # ── platform ─────────────────────────────────────────
     platform = {
@@ -1282,7 +1500,7 @@ def build_draft(
             "tail_leaders": [], "audios": [], "images": [],
             "effects": [], "stickers": [], "canvases": [], "transitions": [],
             "audio_effects": [], "audio_fades": [], "beats": [],
-            "material_animations": [], "placeholders": [], "placeholder_infos": [],
+            "material_animations": anim_materials, "placeholders": [], "placeholder_infos": [],
             "speeds": [], "common_mask": [], "chromas": [], "text_templates": [],
             "realtime_denoises": [], "audio_pannings": [], "audio_pitch_shifts": [],
             "video_trackings": [], "hsl": [], "drafts": [], "color_curves": [],
@@ -1503,6 +1721,10 @@ async def process_video(
     script_text = ""
     append_files: list[Path] = []
     image_dur = DEFAULT_IMAGE_DUR_SEC
+    title_text = ""
+    date_text = ""
+    effect_interval = 0.0
+    image_remove_bg = False
     try:
         raw = await request.body()
         if raw:
@@ -1510,6 +1732,10 @@ async def process_video(
             script_text = (body.get("script") or "").strip()
             append_files = [Path(p) for p in (body.get("append_files") or []) if p]
             image_dur = float(body.get("image_dur") or DEFAULT_IMAGE_DUR_SEC)
+            title_text = (body.get("title") or "").strip()
+            date_text = (body.get("date") or "").strip()
+            effect_interval = float(body.get("effect_interval") or 0)
+            image_remove_bg = bool(body.get("image_remove_bg"))
     except Exception:
         script_text = ""
 
@@ -1595,10 +1821,23 @@ async def process_video(
                 yield f"data: {json.dumps({'step': 'draft', 'msg': f'뒤에 이어붙일 파일 {len(ordered)}개 (다운로드 순): {names}'})}\n\n"
                 valid_appends = ordered
 
+            extras = []
+            if title_text:
+                extras.append("제목")
+            if date_text:
+                extras.append(f"날짜({date_text})")
+            if effect_interval > 0:
+                extras.append(f"랜덤효과 {effect_interval}초")
+            if image_remove_bg:
+                extras.append("이미지 배경제거")
+            if extras:
+                yield f"data: {json.dumps({'step': 'draft', 'msg': '적용: ' + ', '.join(extras)})}\n\n"
+
             yield f"data: {json.dumps({'step': 'draft', 'msg': f'CapCut draft 생성 중... ({ratio})'})}\n\n"
             name = video.stem
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
-                                    max_sub_chars, script_text, valid_appends, image_dur)
+                                    max_sub_chars, script_text, valid_appends, image_dur,
+                                    title_text, date_text, effect_interval, image_remove_bg)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 

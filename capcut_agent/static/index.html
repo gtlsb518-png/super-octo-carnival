@@ -370,6 +370,10 @@
                  color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초</label>
     </div>
     <div id="append-list" style="margin-top:10px; font-size:11px; color:var(--muted); max-height:140px; overflow-y:auto;"></div>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer; font-size:12px;">
+      <input type="checkbox" id="image-remove-bg" style="width:15px; height:15px; accent-color:var(--accent);" />
+      <span>이미지 배경 자동 제거</span>
+    </label>
     <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
       <button class="btn btn-ghost" onclick="buildSequenceOnly()">🎬 선택 파일로만 새 프로젝트</button>
       <span style="font-size:11px; color:var(--muted);">다운로드(저장) 시간 순으로 자동 정렬됩니다</span>
@@ -378,6 +382,47 @@
       💡 위에서 <strong style="color:var(--text);">▶ draft 생성</strong>을 누르면 컷편집 영상 <strong style="color:var(--text);">뒤에 이어붙습니다</strong>(통합).
       선택한 파일들만으로 만들려면 <strong style="color:var(--text);">🎬 선택 파일로만 새 프로젝트</strong>를 누르세요(별도).
     </p>
+  </div>
+
+  <!-- 제목 / 날짜 / 랜덤 효과 -->
+  <div class="card">
+    <div class="card-title">제목 · 날짜 · 효과</div>
+
+    <label style="display:block; margin-bottom:8px; font-size:12px; color:var(--muted);">
+      상단 제목 — 첫 줄은 <strong style="color:#ff4444;">빨강</strong>, 나머지 줄은 <strong style="color:#fff;">흰색</strong> (최대 3줄)
+    </label>
+    <textarea id="title-text" rows="3"
+      placeholder="삼전 89조 역대급&#10;컨콜이 알려준&#10;직격 수혜주?"
+      style="width:100%; background:#000; border:1px solid var(--border); border-radius:var(--radius);
+             color:var(--text); font-family:var(--mono); font-size:12px; padding:10px 14px;
+             outline:none; resize:vertical;"></textarea>
+
+    <div style="display:flex; gap:20px; align-items:center; margin-top:14px; flex-wrap:wrap;">
+      <label style="font-size:12px; color:var(--muted);">
+        하단 날짜 (노란색)
+        <input type="text" id="date-text"
+          style="width:90px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
+                 color:#f0ff00; font-family:var(--mono); font-size:12px; padding:5px 8px; outline:none; margin-left:6px;" />
+      </label>
+      <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px;">
+        <input type="checkbox" id="date-today" checked style="width:15px; height:15px; accent-color:var(--accent);"
+               onchange="syncToday()" />
+        <span>항상 오늘 날짜</span>
+      </label>
+    </div>
+
+    <div style="display:flex; gap:20px; align-items:center; margin-top:14px; flex-wrap:wrap;">
+      <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px;">
+        <input type="checkbox" id="use-effects" style="width:15px; height:15px; accent-color:var(--accent);" />
+        <span>랜덤 효과 넣기</span>
+      </label>
+      <label style="font-size:12px; color:var(--muted);">
+        간격
+        <input type="number" id="effect-interval" value="5" min="1" max="60" step="1"
+          style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
+                 color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초마다</label>
+      <span style="font-size:11px; color:var(--muted);">패들링 · X 진동 · 번개 워프 등에서 무작위</span>
+    </div>
   </div>
 
   <div style="display:flex; gap:12px; align-items:center;">
@@ -568,7 +613,17 @@
     xhr.timeout = 0;
     const script = document.getElementById('script-text').value.trim();
     const imageDur = parseFloat(document.getElementById('image-dur').value) || 3;
-    xhr.send(JSON.stringify({ script, append_files: appendFiles, image_dur: imageDur }));
+    if (document.getElementById('date-today').checked) syncToday();
+    const title = document.getElementById('title-text').value.trim();
+    const dateTxt = document.getElementById('date-text').value.trim();
+    const effOn = document.getElementById('use-effects').checked;
+    const effInterval = effOn ? (parseFloat(document.getElementById('effect-interval').value) || 5) : 0;
+    const removeBg = document.getElementById('image-remove-bg').checked;
+
+    xhr.send(JSON.stringify({
+      script, append_files: appendFiles, image_dur: imageDur,
+      title, date: dateTxt, effect_interval: effInterval, image_remove_bg: removeBg
+    }));
     log(`처리 시작: ${videoPath}` + (script ? ` (대본 ${script.length}자 참고)` : '')
         + (appendFiles.length ? ` (+뒤에 파일 ${appendFiles.length}개 이어붙이기)` : ''), 'info');
   }
@@ -634,6 +689,25 @@
       }
     } catch(e) {
       log('복사 오류: ' + e.message, 'err');
+    }
+  }
+
+  // ── 날짜 (오늘 날짜 MM-DD) ────────────────────────────────
+  function todayMMDD() {
+    const d = new Date();
+    return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function syncToday() {
+    const box = document.getElementById('date-today');
+    const fld = document.getElementById('date-text');
+    if (box.checked) {
+      fld.value = todayMMDD();
+      fld.readOnly = true;
+      fld.style.opacity = 0.75;
+    } else {
+      fld.readOnly = false;
+      fld.style.opacity = 1;
     }
   }
 
@@ -717,6 +791,7 @@
     });
   }
 
+  syncToday();
   log('CapCut Agent 준비 완료', 'ok');
   log('영상 파일 경로를 입력하거나 드래그하세요', 'info');
 </script>
