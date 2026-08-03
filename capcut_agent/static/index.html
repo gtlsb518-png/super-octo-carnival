@@ -422,13 +422,13 @@
     <div style="display:flex; gap:20px; align-items:center; margin-top:14px; flex-wrap:wrap;">
       <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px;">
         <input type="checkbox" id="use-effects" style="width:15px; height:15px; accent-color:var(--accent);" />
-        <span>랜덤 효과 넣기 (추가 파일만)</span>
+        <span>모든 자료화면에 랜덤 효과 (추가 파일 전부)</span>
       </label>
       <label style="font-size:12px; color:var(--muted);">
-        간격
-        <input type="number" id="effect-interval" value="5" min="1" max="60" step="1"
+        효과 길이
+        <input type="number" id="effect-dur" value="0.5" min="0.1" max="3" step="0.1"
           style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
-                 color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초마다</label>
+                 color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초</label>
       <span style="font-size:11px; color:var(--muted);">FF 안 · 스워시 · 패들링 · 충돌 · X 진동 · 펄스 줌 · 퀀텀 셰이크 · 락 3</span>
     </div>
   </div>
@@ -625,13 +625,13 @@
     const title = document.getElementById('title-text').value.trim();
     const dateTxt = document.getElementById('date-text').value.trim();
     const effOn = document.getElementById('use-effects').checked;
-    const effInterval = effOn ? (parseFloat(document.getElementById('effect-interval').value) || 5) : 0;
+    const effDur = effOn ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0;
     const strokeSize = (parseFloat(document.getElementById('stroke-size').value) || 0) / 100;
     const unifyPlace = document.getElementById('unify-place').checked;
 
     xhr.send(JSON.stringify({
       script, append_files: appendFiles, image_dur: imageDur,
-      title, date: dateTxt, effect_interval: effInterval,
+      title, date: dateTxt, effect_dur: effDur,
       bg_files: [...bgFiles], stroke_size: strokeSize, unify_place: unifyPlace
     }));
     log(`처리 시작: ${videoPath}` + (script ? ` (대본 ${script.length}자 참고)` : '')

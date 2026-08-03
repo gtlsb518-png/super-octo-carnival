@@ -1308,7 +1308,7 @@ def build_draft(
     image_dur_sec: float = DEFAULT_IMAGE_DUR_SEC,
     title_text: str = "",
     date_text: str = "",
-    effect_interval_sec: float = 0.0,
+    effect_dur_sec: float = 0.0,
     bg_files: set[str] | None = None,
     bg_stroke: bool = True,
     stroke_size: float = 0.15,
@@ -1325,7 +1325,7 @@ def build_draft(
     image_dur_sec: 이어붙일 이미지 1장의 노출 시간(초)
     title_text:    상단 제목 (첫 줄 빨강 + 나머지 흰색, 템플릿 스타일)
     date_text:     하단 날짜 (노란색, 보통 오늘 날짜 MM-DD)
-    effect_interval_sec: 0보다 크면 이 간격마다 자료화면에 랜덤 등장 효과 부여
+    effect_dur_sec: 0보다 크면 모든 자료화면에 랜덤 등장 효과를 이 길이(초)로 부여
                    (메인 컷편집 영상에는 적용하지 않음)
     bg_files:      배경제거를 적용할 파일 경로 집합 (선택한 것만)
     bg_stroke:     배경제거 후 흰색 발광 획 적용 여부
@@ -1431,28 +1431,22 @@ def build_draft(
     final_duration = timeline_cursor_us
 
     # ── 랜덤 등장 효과 ───────────────────────────────────
-    # 메인(컷편집) 영상에는 넣지 않고, 뒤에 추가한 자료화면에만 적용
+    # 메인(컷편집) 영상에는 넣지 않고, 뒤에 추가한 자료화면(영상·이미지)에만 적용.
+    # 자료화면 하나하나에 전부 효과를 넣되, 서로 다른 효과가 나오도록 무작위로 고른다.
     anim_materials = []
-    if effect_interval_sec > 0 and appended_segments:
+    if effect_dur_sec > 0 and appended_segments:
         import random
         rnd = random.Random(draft_name)          # 같은 영상은 항상 같은 결과
-        step_us = sec_to_us(effect_interval_sec)
-        next_mark = appended_segments[0]["target_timerange"]["start"]
+        eff_us = sec_to_us(effect_dur_sec)
         last_pick = None
         for seg in appended_segments:
-            s = seg["target_timerange"]["start"]
-            e = s + seg["target_timerange"]["duration"]
-            if e <= next_mark:
-                continue
             choices = [x for x in TEMPLATE_IN_ANIMATIONS if x["name"] != last_pick]
             eff = rnd.choice(choices or TEMPLATE_IN_ANIMATIONS)
             last_pick = eff["name"]
             anim_id = str(uuid.uuid4()).upper()
-            dur = min(500_000, seg["target_timerange"]["duration"])
+            dur = min(eff_us, seg["target_timerange"]["duration"])
             anim_materials.append(_make_in_animation(anim_id, eff, dur))
             seg.setdefault("extra_material_refs", []).append(anim_id)
-            while next_mark <= s:
-                next_mark += step_us
 
     # ── 자막 텍스트 트랙 ─────────────────────────────────
     # 단어별 발화 시각 기준으로 각 영상 클립에 자막을 배분 →
@@ -1817,7 +1811,7 @@ async def process_video(
     image_dur = DEFAULT_IMAGE_DUR_SEC
     title_text = ""
     date_text = ""
-    effect_interval = 0.0
+    effect_dur = 0.0
     bg_files: set[str] = set()
     stroke_size = 0.15
     unify_place = True
@@ -1830,7 +1824,7 @@ async def process_video(
             image_dur = float(body.get("image_dur") or DEFAULT_IMAGE_DUR_SEC)
             title_text = (body.get("title") or "").strip()
             date_text = (body.get("date") or "").strip()
-            effect_interval = float(body.get("effect_interval") or 0)
+            effect_dur = float(body.get("effect_dur") or 0)
             bg_files = {str(Path(p)) for p in (body.get("bg_files") or []) if p}
             stroke_size = float(body.get("stroke_size") or 0.15)
             unify_place = body.get("unify_place", True)
@@ -1924,8 +1918,8 @@ async def process_video(
                 extras.append("제목")
             if date_text:
                 extras.append(f"날짜({date_text})")
-            if effect_interval > 0:
-                extras.append(f"자료화면 랜덤효과 {effect_interval}초")
+            if effect_dur > 0:
+                extras.append(f"자료화면 전체 랜덤효과 {effect_dur}초")
             if bg_files:
                 extras.append(f"배경제거 {len(bg_files)}개 파일")
             if unify_place:
@@ -1937,7 +1931,7 @@ async def process_video(
             name = video.stem
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
                                     max_sub_chars, script_text, valid_appends, image_dur,
-                                    title_text, date_text, effect_interval, bg_files,
+                                    title_text, date_text, effect_dur, bg_files,
                                     True, stroke_size, 0.6, bool(unify_place))
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
