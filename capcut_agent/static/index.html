@@ -370,10 +370,20 @@
                  color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초</label>
     </div>
     <div id="append-list" style="margin-top:10px; font-size:11px; color:var(--muted); max-height:140px; overflow-y:auto;"></div>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer; font-size:12px;">
-      <input type="checkbox" id="image-remove-bg" style="width:15px; height:15px; accent-color:var(--accent);" />
-      <span>이미지 배경 자동 제거</span>
-    </label>
+    <div style="margin-top:10px; display:flex; gap:20px; align-items:center; flex-wrap:wrap;">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px;">
+        <input type="checkbox" id="image-remove-bg" style="width:15px; height:15px; accent-color:var(--accent);" />
+        <span>배경 자동 제거 + 흰색 발광 획</span>
+      </label>
+      <label style="font-size:12px; color:var(--muted);">획 크기
+        <input type="number" id="stroke-size" value="15" min="0" max="100" step="1"
+          style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
+                 color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /></label>
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px;">
+        <input type="checkbox" id="unify-place" checked style="width:15px; height:15px; accent-color:var(--accent);" />
+        <span>크기·위치 통일</span>
+      </label>
+    </div>
     <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
       <button class="btn btn-ghost" onclick="buildSequenceOnly()">🎬 선택 파일로만 새 프로젝트</button>
       <span style="font-size:11px; color:var(--muted);">다운로드(저장) 시간 순으로 자동 정렬됩니다</span>
@@ -619,10 +629,13 @@
     const effOn = document.getElementById('use-effects').checked;
     const effInterval = effOn ? (parseFloat(document.getElementById('effect-interval').value) || 5) : 0;
     const removeBg = document.getElementById('image-remove-bg').checked;
+    const strokeSize = (parseFloat(document.getElementById('stroke-size').value) || 0) / 100;
+    const unifyPlace = document.getElementById('unify-place').checked;
 
     xhr.send(JSON.stringify({
       script, append_files: appendFiles, image_dur: imageDur,
-      title, date: dateTxt, effect_interval: effInterval, image_remove_bg: removeBg
+      title, date: dateTxt, effect_interval: effInterval, image_remove_bg: removeBg,
+      stroke_size: strokeSize, unify_place: unifyPlace
     }));
     log(`처리 시작: ${videoPath}` + (script ? ` (대본 ${script.length}자 참고)` : '')
         + (appendFiles.length ? ` (+뒤에 파일 ${appendFiles.length}개 이어붙이기)` : ''), 'info');
@@ -766,7 +779,12 @@
     try {
       const res = await fetch('/api/build-sequence', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ files: appendFiles, ratio, image_dur: imageDur, name })
+        body: JSON.stringify({
+          files: appendFiles, ratio, image_dur: imageDur, name,
+          image_remove_bg: document.getElementById('image-remove-bg').checked,
+          stroke_size: (parseFloat(document.getElementById('stroke-size').value) || 0) / 100,
+          unify_place: document.getElementById('unify-place').checked
+        })
       });
       const data = await res.json();
       if (data.success) {

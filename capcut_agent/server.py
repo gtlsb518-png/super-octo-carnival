@@ -1021,6 +1021,51 @@ def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -
     }
 
 
+# ── 템플릿 사진 배치 중간값 (자료화면 크기·위치 통일용) ──
+MEDIA_PLACE = {"scale": 0.790416, "x": 0.0, "y": -0.446945}
+
+# 배경제거 후 적용하는 '발광' 흰색 획 (템플릿에서 추출)
+MATTING_STROKE_RESOURCE_ID = "7172498336719573505"
+MATTING_STROKE_PATH = ("C:/Users/Lusey/AppData/Local/CapCut/User Data/Cache/effect/"
+                       "7172498336719573505/84834161574d7f941e9120f2d8e78006")
+
+
+def _make_matting(remove_bg: bool, stroke: bool, stroke_size: float = 0.15,
+                  stroke_alpha: float = 0.6) -> dict:
+    """
+    배경제거(matting) 설정.
+    flag: 0=없음, 1=배경제거만, 3=배경제거+획(발광)
+    획은 배경이 제거돼야 테두리가 보이므로 remove_bg가 켜져야 의미가 있다.
+    """
+    mt = {
+        "flag": 0, "path": "", "interactiveTime": [],
+        "has_use_quick_brush": False, "strokes": [], "has_use_quick_eraser": False,
+        "expansion": 0, "feather": 0, "reverse": False,
+        "custom_matting_id": "", "enable_matting_stroke": False,
+        "is_clould": False, "mask_video_path": "", "cloud_product_fps": 0.0,
+    }
+    if not remove_bg:
+        return mt
+    mt["flag"] = 3 if stroke else 1
+    mt["custom_matting_id"] = str(uuid.uuid4()).upper()
+    if stroke:
+        mt["enable_matting_stroke"] = True
+        mt["strokes"] = [{
+            "resource_id": MATTING_STROKE_RESOURCE_ID,
+            "third_resource_id": MATTING_STROKE_RESOURCE_ID,
+            "source_platform": 1, "resource_name": "발광",
+            "path": MATTING_STROKE_PATH,
+            "color": [1.0, 1.0, 1.0, 1.0],          # 흰색
+            "adjust_params": [
+                {"name": "effects_adjust_size", "value": stroke_size,
+                 "default_value": 0.3011000156402588},
+                {"name": "effects_adjust_alpha", "value": stroke_alpha,
+                 "default_value": 0.6},
+            ],
+        }]
+    return mt
+
+
 # 이미지로 취급할 확장자 (나머지는 영상으로 간주)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".tif", ".tiff"}
 IMAGE_SOURCE_DUR_US = 10_800_000_000   # 이미지 material의 소스 길이 (3시간, CapCut 관례)
@@ -1074,21 +1119,25 @@ def _media_material_dict(material_id: str, path: Path, width: int, height: int,
 
 
 def _media_segment_dict(seg_id: str, material_id: str, src_start_us: int, dur_us: int,
-                        tl_start_us: int, is_image: bool) -> dict:
-    """메인 트랙 영상/이미지 세그먼트 dict."""
+                        tl_start_us: int, is_image: bool,
+                        place: dict | None = None) -> dict:
+    """메인 트랙 영상/이미지 세그먼트 dict. place가 있으면 크기·위치를 통일한다."""
+    sc = place["scale"] if place else 1.0
+    px = place["x"] if place else 0.0
+    py = place["y"] if place else 0.0
     return {
         "id": seg_id, "material_id": material_id,
         "source_timerange": {"start": src_start_us, "duration": dur_us},
         "target_timerange": {"start": tl_start_us, "duration": dur_us},
         "clip": {"alpha": 1.0, "flip": {"horizontal": False, "vertical": False},
-                 "rotation": 0.0, "scale": {"x": 1.0, "y": 1.0}, "transform": {"x": 0.0, "y": 0.0}},
+                 "rotation": 0.0, "scale": {"x": sc, "y": sc}, "transform": {"x": px, "y": py}},
         "cartoon": False, "enable_adjust": True, "enable_color_correct_adjust": False,
         "enable_color_curves": True, "enable_lut": True, "enable_smart_color_adjust": False,
         "extra_material_refs": [], "is_placeholder": False, "is_tone_modify": False,
         "last_nonzero_volume": 1.0, "render_index": 0, "reverse": False, "speed": 1.0,
         "template_id": "", "template_scene": "default", "track_attribute": 0, "track_render_index": 0,
         "type": "photo" if is_image else "video",
-        "uniform_scale": {"on": True, "value": 1.0}, "visible": True,
+        "uniform_scale": {"on": True, "value": sc}, "visible": True,
         "volume": 0.0 if is_image else 1.0, "hdr_settings": None,
         "intensifies_audio": False, "loop": False,
     }
@@ -1248,6 +1297,11 @@ def build_draft(
     date_text: str = "",
     effect_interval_sec: float = 0.0,
     image_remove_bg: bool = False,
+    bg_stroke: bool = True,
+    stroke_size: float = 0.15,
+    stroke_alpha: float = 0.6,
+    unify_place: bool = True,
+    remove_bg_videos: bool = True,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -1260,7 +1314,11 @@ def build_draft(
     title_text:    상단 제목 (첫 줄 빨강 + 나머지 흰색, 템플릿 스타일)
     date_text:     하단 날짜 (노란색, 보통 오늘 날짜 MM-DD)
     effect_interval_sec: 0보다 크면 이 간격마다 클립에 랜덤 등장 효과 부여
-    image_remove_bg: 이어붙이는 이미지에 배경제거 플래그 적용
+    image_remove_bg: 자료화면에 배경제거 적용 (제거 후 발광 흰색 획)
+    remove_bg_videos: 배경제거를 영상 파일에도 적용할지 (기본 True)
+    bg_stroke:     배경제거 후 흰색 발광 획 적용 여부
+    stroke_size:   획 굵기 (0~1)
+    unify_place:   이어붙이는 자료화면의 크기·위치를 템플릿 중간값으로 통일
     """
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
     src_width, src_height = get_video_resolution(video_path)
@@ -1339,13 +1397,14 @@ def build_draft(
         if seg_dur < 100_000:
             continue
         mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
-        if is_img and image_remove_bg:
-            # 캡컷 배경제거 플래그 (마스크 캐시는 캡컷이 열 때 생성)
-            mat["matting"]["flag"] = 1
-            mat["matting"]["custom_matting_id"] = str(uuid.uuid4()).upper()
+        remove_bg = image_remove_bg and (is_img or remove_bg_videos)
+        if remove_bg:
+            # 배경제거 먼저 → 그래야 발광 획(흰색)이 테두리로 보인다
+            mat["matting"] = _make_matting(True, bg_stroke, stroke_size, stroke_alpha)
         extra_materials.append(mat)
         segments.append(_media_segment_dict(
-            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img))
+            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img,
+            place=MEDIA_PLACE if unify_place else None))
         timeline_cursor_us += seg_dur
 
     final_duration = timeline_cursor_us
@@ -1646,6 +1705,9 @@ def build_sequence_draft(
     draft_name: str = "CapCut_Sequence",
     ratio: str = "9:16",
     image_dur_sec: float = DEFAULT_IMAGE_DUR_SEC,
+    remove_bg: bool = False,
+    stroke_size: float = 0.15,
+    unify_place: bool = True,
 ) -> tuple[Path, list[str]]:
     """
     선택한 영상/이미지 파일들을 다운로드(저장) 시간 순으로 메인 트랙에 이어붙인 draft 생성.
@@ -1679,8 +1741,13 @@ def build_sequence_draft(
         if seg_dur < 100_000:
             continue
         mat_id = str(uuid.uuid4()).upper()
-        videos_materials.append(_media_material_dict(mat_id, f, w, h, src_dur_us, is_img))
-        segments.append(_media_segment_dict(str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img))
+        mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
+        if remove_bg:
+            mat["matting"] = _make_matting(True, True, stroke_size, 0.6)
+        videos_materials.append(mat)
+        segments.append(_media_segment_dict(
+            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img,
+            place=MEDIA_PLACE if unify_place else None))
         cursor += seg_dur
         placed.append(f.name)
 
@@ -1725,6 +1792,8 @@ async def process_video(
     date_text = ""
     effect_interval = 0.0
     image_remove_bg = False
+    stroke_size = 0.15
+    unify_place = True
     try:
         raw = await request.body()
         if raw:
@@ -1736,6 +1805,8 @@ async def process_video(
             date_text = (body.get("date") or "").strip()
             effect_interval = float(body.get("effect_interval") or 0)
             image_remove_bg = bool(body.get("image_remove_bg"))
+            stroke_size = float(body.get("stroke_size") or 0.15)
+            unify_place = body.get("unify_place", True)
     except Exception:
         script_text = ""
 
@@ -1829,7 +1900,9 @@ async def process_video(
             if effect_interval > 0:
                 extras.append(f"랜덤효과 {effect_interval}초")
             if image_remove_bg:
-                extras.append("이미지 배경제거")
+                extras.append("배경제거+흰색 발광 획")
+            if unify_place:
+                extras.append("자료화면 크기·위치 통일")
             if extras:
                 yield f"data: {json.dumps({'step': 'draft', 'msg': '적용: ' + ', '.join(extras)})}\n\n"
 
@@ -1837,7 +1910,8 @@ async def process_video(
             name = video.stem
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
                                     max_sub_chars, script_text, valid_appends, image_dur,
-                                    title_text, date_text, effect_interval, image_remove_bg)
+                                    title_text, date_text, effect_interval, image_remove_bg,
+                                    True, stroke_size, 0.6, bool(unify_place), True)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 
@@ -1912,7 +1986,11 @@ async def build_sequence(request: Request):
     if not files:
         raise HTTPException(400, "선택된 파일이 없습니다.")
     try:
-        draft_dir, placed = build_sequence_draft(files, OUTPUT_DIR, name, ratio, image_dur)
+        draft_dir, placed = build_sequence_draft(
+            files, OUTPUT_DIR, name, ratio, image_dur,
+            bool(body.get("image_remove_bg")),
+            float(body.get("stroke_size") or 0.15),
+            bool(body.get("unify_place", True)))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse({"success": True, "draft_dir": str(draft_dir),
