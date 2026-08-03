@@ -716,19 +716,22 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         per_clip.setdefault(w["clip"], []).append(w)
 
     out = []
-    for ci in sorted(per_clip):
-        words = per_clip[ci]
-        _ks, _ke, clip_start, clip_end = keep_ranges[ci]
+    # ★ 영상 클립 전체를 순회한다 (말이 인식된 클립만이 아니라)
+    #   → 클립 하나도 빠짐없이 자막이 붙고, 자막 길이 합 = 영상 클립 길이가 된다.
+    for ci, (_ks, _ke, clip_start, clip_end) in enumerate(keep_ranges):
+        words = per_clip.get(ci, [])
 
         # 대본 참고 교정: 이 클립이 대본의 어느 부분인지 찾아 문맥에 맞춰 철자만 교정
-        if script_norm:
+        if script_norm and words:
             words, near, fixed = align_clip_to_script(words, script_words, script_norm, near)
             total_fixed += fixed
-            if not words:
-                continue
 
-        groups = chunk_words_korean(words, max_chars)
+        groups = chunk_words_korean(words, max_chars) if words else []
         if not groups:
+            # 말이 없거나 전부 걸러진 클립도 자막 클립은 만든다 (클립 길이 그대로)
+            if clip_end > clip_start:
+                out.append({"start_us": clip_start, "end_us": clip_end,
+                            "text": NO_SPEECH_PLACEHOLDER})
             continue
 
         # ── 조각별 표시 구간 ──────────────────────────────
@@ -741,22 +744,45 @@ def subtitle_chunks_for_timeline(segments: list[dict],
             bounds.append(b)
         bounds.append(clip_end)
 
+        clip_out: list[dict] = []
         for gi, g in enumerate(groups):
             s, e = bounds[gi], bounds[gi + 1]
             text = strip_periods(" ".join(w["word"] for w in g)) or NO_SPEECH_PLACEHOLDER
-            if e - s < MIN_DUR_US:
-                # 자리가 부족하면 직전 자막에 합쳐 단어 유실 방지
-                if out and out[-1]["start_us"] >= clip_start:
-                    out[-1]["text"] += " " + text
-                    continue
-                e = min(s + MIN_DUR_US, clip_end)
-                if e <= s:
-                    continue
-            out.append({"start_us": s, "end_us": e, "text": text})
+            if e - s < MIN_DUR_US and clip_out:
+                # 자리가 부족하면 직전 자막에 합치고, 그 자리까지 직전 자막이 이어받는다
+                clip_out[-1]["text"] += " " + text
+                clip_out[-1]["end_us"] = e
+                continue
+            clip_out.append({"start_us": s, "end_us": e, "text": text})
+
+        # ── 클립 경계 강제 정합 ────────────────────────────
+        # 이 클립의 자막들은 반드시 clip_start ~ clip_end 를 빈틈없이 채운다.
+        # (= 영상 클립 길이와 그 위 자막 클립들의 길이가 정확히 일치)
+        clip_out[0]["start_us"] = clip_start
+        for a, b in zip(clip_out, clip_out[1:]):
+            a["end_us"] = b["start_us"]
+        clip_out[-1]["end_us"] = clip_end
+        out.extend(clip_out)
 
     if stats is not None:
         stats["corrected"] = total_fixed
     return out
+
+
+def subtitle_coverage_report(chunks: list[dict],
+                             keep_ranges: list[tuple[float, float, int, int]]) -> tuple[int, int]:
+    """
+    영상 클립 하나하나에 대해 '그 위 자막들의 길이 합 == 영상 클립 길이' 인지 확인.
+    반환: (길이가 정확히 일치하는 클립 수, 전체 클립 수)
+    """
+    ok = 0
+    for _ks, _ke, ts, te in keep_ranges:
+        covered = sum(min(c["end_us"], te) - max(c["start_us"], ts)
+                      for c in chunks
+                      if c["start_us"] < te and c["end_us"] > ts)
+        if covered == te - ts:
+            ok += 1
+    return ok, len(keep_ranges)
 
 def _make_text_material(text_id: str, text: str, task_id: str = "") -> dict:
     """자막 텍스트 material (CapCut 8.7.0 호환)"""
@@ -1966,10 +1992,12 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 참고 철자 교정 {n_fixed}개 적용'})}\n\n"
                 subtitle_count = len(sub_chunks)
 
-                # 자막이 붙은 클립 수 (빠진 클립이 있는지 눈으로 확인용)
+                # 자막이 붙은 클립 수 + 영상 클립 길이와 자막 길이가 일치하는지 확인
                 with_sub = sum(1 for _k, _e, ts, te in keep_ranges
                                if any(ts <= c["start_us"] < te for c in sub_chunks))
+                fit, n_clips = subtitle_coverage_report(sub_chunks, keep_ranges)
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 적용 클립: {with_sub}/{len(keep_ranges)}개'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'영상 클립 = 자막 길이 일치: {fit}/{n_clips}개'})}\n\n"
 
                 srt_content = make_srt(sub_chunks)
                 srt_path = OUTPUT_DIR / f"{video.stem}.srt"
