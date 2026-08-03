@@ -558,47 +558,118 @@ def _ends_clause(word: str) -> bool:
     return word[-1:] in ",.?!…\"”)"
 
 
+# 끊기 좋은 자리를 판단하는 한국어 어미·조사 목록.
+# 완성본 자막이 실제로 끊은 지점('불장인데', '대응법까지', '알려줄테니까',
+# '찐반등인지', '열리기', '우리가', '반등에' 등)을 분석해 정리했다.
+_CONNECTIVE_ENDINGS = (          # 연결어미 — 절이 끝나는 자리라 끊기 가장 좋다
+    "는데", "ㄴ데", "은데", "인데", "면서", "으면", "라면", "다면", "면",
+    "아서", "어서", "여서", "지만", "으니까", "니까", "니깐",
+    "까지", "부터", "는지", "은지", "인지", "이라", "아니라",
+    "도록", "다가", "거나", "든지", "때문에", "덕분에", "위해", "통해",
+    "대로", "만큼", "처럼", "같이", "보다", "라서", "느라", "려고", "면은",
+)
+_FINAL_ENDINGS = (               # 종결어미 — 문장이 끝나는 자리
+    "습니다", "ㅂ니다", "세요", "예요", "이에요", "거든", "잖아", "거야",
+    "구나", "네요", "군요", "죠", "요", "다", "야", "해", "지",
+)
+_PARTICLES = (                   # 조사 — 명사 뒤라 끊어도 무난
+    "에서", "에게", "한테", "으로", "마다", "조차", "밖에", "이랑",
+    "은", "는", "이", "가", "을", "를", "에", "도", "만", "의", "와", "과", "로",
+)
+
+
+def _break_score(word: str) -> int:
+    """이 어절 뒤에서 끊었을 때 얼마나 자연스러운지 (높을수록 좋은 자리)."""
+    w = word.strip()
+    if not w:
+        return 0
+    if w[-1] in ".?!…":
+        return 100                       # 문장 끝
+    if w[-1] in ",;":
+        return 80                        # 쉼표
+    core = w.rstrip("\"'”’)]}")
+    if not core:
+        return 10
+    if core.endswith(_CONNECTIVE_ENDINGS):
+        return 60                        # 연결어미
+    if core.endswith(_FINAL_ENDINGS):
+        return 50                        # 종결어미
+    if core.endswith(_PARTICLES):
+        return 30                        # 조사
+    return 10                            # 그 밖 (관형형 등 — 끊으면 어색)
+
+
+def _group_len(ws: list[dict]) -> int:
+    """어절 묶음을 이어붙였을 때의 글자 수 (공백 포함)."""
+    return sum(len(x["word"]) for x in ws) + max(0, len(ws) - 1)
+
+
+def _best_break_index(cur: list[dict], soft_min: int) -> int:
+    """cur 안에서 가장 자연스럽게 끊을 수 있는 위치 (동점이면 뒤쪽 우선)."""
+    best_i, best_sc, acc = len(cur) - 1, -1, 0
+    for i, x in enumerate(cur):
+        acc += len(x["word"]) + (1 if i else 0)
+        if acc < soft_min and i < len(cur) - 1:
+            continue                     # 너무 짧게 잘리지 않도록
+        sc = _break_score(x["word"])
+        if sc >= best_sc:
+            best_sc, best_i = sc, i
+    return best_i
+
+
 def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
                        gap_break_us: int = SUB_PAUSE_BREAK_US) -> list[list[dict]]:
     """
     연속된 단어열을 한국어 자막 조각으로 분할.
-    - 단어(어절) 경계에서만 끊음 → 한국어 어미로 자연스럽게 끝남
-    - ★ 문장이 끝나면(. ? ! , 등) 길이와 상관없이 바로 끊는다.
-      완성본 자막처럼 '웬열?!' / '솔직히 기분 좋지?' 로 문장이 딱딱 떨어지게 하기 위함.
-      (예전에는 길이가 찰 때까지 다음 문장 단어를 붙여서 문장이 섞였다)
-    - 조각 길이 목표 max_chars, 최대 max_chars+tolerance
+    - ★ 글자 수만 보고 자르지 않고, 한국어 연결어미·종결어미·조사를 찾아
+      '의미 덩어리가 안 깨지는 자리'에서 끊는다.
+      예) '확대하면 신나는 불장인데' 를 한 조각으로 유지하고
+          '불장인데 축소하면' 처럼 두 절이 섞이지 않게 한다.
+    - 문장부호(. ? !)가 나오면 길이와 무관하게 즉시 끊는다.
+    - 목표 길이 max_chars 근처에서 어미가 나오면 거기서 끊고,
+      최대 max_chars+5자(완성본 최대 14자 수준)를 넘으면 그 안에서
+      가장 점수 높은 자리를 찾아 끊는다.
     - 단어 사이 시간 간격이 gap_break_us 이상이면(말 사이 쉼) 무조건 끊음
     - 너무 짧은 꼬리 조각은 직전 조각에 합침 (문장부호로 끝난 경우는 유지)
     """
-    hard = max_chars + tolerance
+    hard = max_chars + tolerance         # 기본 상한
+    soft_min = max(4, max_chars - 2)     # 이 길이부터 어미에서 끊을 수 있음
     groups: list[list[dict]] = []
     cur: list[dict] = []
-    cl = 0
+
     for wd in words:
-        # 직전 단어와 시간 간격이 크면 먼저 끊기
+        # 말 사이 쉼이 길면 먼저 끊기
         if cur and "tl_start" in wd and "tl_end" in cur[-1]:
             if wd["tl_start"] - cur[-1]["tl_end"] >= gap_break_us:
                 groups.append(cur)
-                cur, cl = [], 0
-        wl = len(wd["word"])
-        add = wl + (1 if cur else 0)
-        if cur and cl + add > hard:
-            groups.append(cur)
-            cur, cl = [wd], wl
-        else:
-            cur.append(wd)
-            cl += add
-        # 문장이 끝났으면 길이와 무관하게 끊는다 (문장 섞임 방지)
-        if _ends_clause(cur[-1]["word"]) or cl >= max_chars:
-            groups.append(cur)
-            cur, cl = [], 0
+                cur = []
+
+        sc = _break_score(wd["word"])
+        # 어미로 끝나는 어절이면 상한을 조금 넘겨도 붙인다
+        # ('확대하면 신나는 / 불장인데' 로 절이 잘리는 것을 막기 위함)
+        allow = hard + 2 if sc >= 50 else hard
+        if cur and _group_len(cur + [wd]) > allow:
+            i = _best_break_index(cur, soft_min)
+            groups.append(cur[:i + 1])
+            cur = cur[i + 1:]
+
+        cur.append(wd)
+        cl = _group_len(cur)
+
+        if sc >= 100:                                   # 문장 끝 → 무조건
+            groups.append(cur); cur = []
+        elif cl >= soft_min and sc >= 50:               # 어미 → 목표 길이 근처에서
+            groups.append(cur); cur = []
+        elif cl >= max_chars:                           # 목표 길이를 넘으면
+            groups.append(cur); cur = []
+
     if cur:
+        cl = _group_len(cur)
         if groups and cl <= tolerance + 2 and not _ends_clause(groups[-1][-1]["word"]):
             prev = groups[-1]
-            plen = sum(len(x["word"]) for x in prev) + len(prev) - 1
             # 시간 간격이 크지 않을 때만 꼬리 합침
             close = "tl_start" not in cur[0] or (cur[0]["tl_start"] - prev[-1].get("tl_end", cur[0]["tl_start"]) < gap_break_us)
-            if plen + 1 + cl <= hard and close:
+            if _group_len(prev) + 1 + cl <= hard and close:
                 groups[-1] = prev + cur
                 cur = []
         if cur:
