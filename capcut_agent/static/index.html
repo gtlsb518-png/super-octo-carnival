@@ -371,10 +371,8 @@
     </div>
     <div id="append-list" style="margin-top:10px; font-size:11px; color:var(--muted); max-height:140px; overflow-y:auto;"></div>
     <div style="margin-top:10px; display:flex; gap:20px; align-items:center; flex-wrap:wrap;">
-      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px;">
-        <input type="checkbox" id="image-remove-bg" style="width:15px; height:15px; accent-color:var(--accent);" />
-        <span>배경 자동 제거 + 흰색 발광 획</span>
-      </label>
+      <button class="btn btn-ghost" style="padding:5px 12px; font-size:11px;" onclick="toggleAllBg(true)">배경제거 전체 선택</button>
+      <button class="btn btn-ghost" style="padding:5px 12px; font-size:11px;" onclick="toggleAllBg(false)">전체 해제</button>
       <label style="font-size:12px; color:var(--muted);">획 크기
         <input type="number" id="stroke-size" value="15" min="0" max="100" step="1"
           style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
@@ -424,14 +422,14 @@
     <div style="display:flex; gap:20px; align-items:center; margin-top:14px; flex-wrap:wrap;">
       <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px;">
         <input type="checkbox" id="use-effects" style="width:15px; height:15px; accent-color:var(--accent);" />
-        <span>랜덤 효과 넣기</span>
+        <span>랜덤 효과 넣기 (추가 파일만)</span>
       </label>
       <label style="font-size:12px; color:var(--muted);">
         간격
         <input type="number" id="effect-interval" value="5" min="1" max="60" step="1"
           style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
                  color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초마다</label>
-      <span style="font-size:11px; color:var(--muted);">패들링 · X 진동 · 번개 워프 등에서 무작위</span>
+      <span style="font-size:11px; color:var(--muted);">FF 안 · 스워시 · 패들링 · 충돌 · X 진동 · 펄스 줌 · 퀀텀 셰이크 · 락 3</span>
     </div>
   </div>
 
@@ -628,14 +626,13 @@
     const dateTxt = document.getElementById('date-text').value.trim();
     const effOn = document.getElementById('use-effects').checked;
     const effInterval = effOn ? (parseFloat(document.getElementById('effect-interval').value) || 5) : 0;
-    const removeBg = document.getElementById('image-remove-bg').checked;
     const strokeSize = (parseFloat(document.getElementById('stroke-size').value) || 0) / 100;
     const unifyPlace = document.getElementById('unify-place').checked;
 
     xhr.send(JSON.stringify({
       script, append_files: appendFiles, image_dur: imageDur,
-      title, date: dateTxt, effect_interval: effInterval, image_remove_bg: removeBg,
-      stroke_size: strokeSize, unify_place: unifyPlace
+      title, date: dateTxt, effect_interval: effInterval,
+      bg_files: [...bgFiles], stroke_size: strokeSize, unify_place: unifyPlace
     }));
     log(`처리 시작: ${videoPath}` + (script ? ` (대본 ${script.length}자 참고)` : '')
         + (appendFiles.length ? ` (+뒤에 파일 ${appendFiles.length}개 이어붙이기)` : ''), 'info');
@@ -738,6 +735,7 @@
 
   // ── 추가 파일 (영상·이미지 순서대로 삽입) ─────────────────
   let appendFiles = [];
+  let bgFiles = new Set();   // 배경제거를 적용할 파일 경로
 
   async function pickAppendFiles() {
     try {
@@ -745,6 +743,7 @@
       const data = await res.json();
       if (data.files && data.files.length) {
         appendFiles = data.files;   // 서버가 이미 다운로드 시간순 정렬
+        bgFiles = new Set();        // 새로 고르면 배경제거 선택 초기화
         renderAppendList();
         log(`추가 파일 ${appendFiles.length}개 선택 (다운로드 순 정렬)`, 'ok');
       } else if (data.error) {
@@ -763,11 +762,58 @@
       list.innerHTML = '';
       return;
     }
-    info.textContent = `${appendFiles.length}개 선택됨`;
+    const nBg = appendFiles.filter(f => bgFiles.has(f)).length;
+    info.textContent = `${appendFiles.length}개 선택됨` + (nBg ? ` · 배경제거 ${nBg}개` : '');
     list.innerHTML = appendFiles.map((p, i) => {
       const name = p.split(/[\\/]/).pop();
-      return `<div style="padding:2px 0;">${i+1}. ${name}</div>`;
+      const checked = bgFiles.has(p) ? 'checked' : '';
+      return `<div style="display:flex; align-items:center; gap:8px; padding:3px 0;"
+                   onmouseenter="showThumb(event, ${i})" onmouseleave="hideThumb()">
+        <input type="checkbox" ${checked} onchange="toggleBg(${i}, this.checked)"
+               title="이 파일 배경제거"
+               style="width:14px; height:14px; accent-color:var(--accent); cursor:pointer;" />
+        <span style="color:var(--text); cursor:default;">${i+1}. ${name}</span>
+      </div>`;
     }).join('');
+  }
+
+  // ── 배경제거 파일별 선택 ──────────────────────────────────
+  function toggleBg(idx, on) {
+    const p = appendFiles[idx];
+    if (on) bgFiles.add(p); else bgFiles.delete(p);
+    renderAppendList();
+  }
+
+  function toggleAllBg(on) {
+    if (!appendFiles.length) { log('먼저 파일을 선택하세요', 'warn'); return; }
+    if (on) appendFiles.forEach(p => bgFiles.add(p));
+    else bgFiles.clear();
+    renderAppendList();
+  }
+
+  // ── 마우스 올리면 미리보기 ────────────────────────────────
+  function showThumb(ev, idx) {
+    const p = appendFiles[idx];
+    let box = document.getElementById('thumb-pop');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'thumb-pop';
+      box.style.cssText = `position:fixed; z-index:9999; pointer-events:none;
+        background:#000; border:1px solid var(--accent); border-radius:6px; padding:4px;
+        box-shadow:0 6px 24px rgba(0,0,0,0.6);`;
+      box.innerHTML = '<img style="display:block; max-width:260px; max-height:260px; border-radius:3px;" />';
+      document.body.appendChild(box);
+    }
+    box.querySelector('img').src = '/api/thumb?path=' + encodeURIComponent(p);
+    box.style.display = 'block';
+    const r = ev.currentTarget.getBoundingClientRect();
+    box.style.left = Math.min(r.right + 12, window.innerWidth - 290) + 'px';
+    box.style.top = Math.min(r.top, window.innerHeight - 290) + 'px';
+  }
+
+  function hideThumb() {
+    const box = document.getElementById('thumb-pop');
+    if (box) box.style.display = 'none';
   }
 
   async function buildSequenceOnly() {
@@ -781,7 +827,7 @@
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({
           files: appendFiles, ratio, image_dur: imageDur, name,
-          image_remove_bg: document.getElementById('image-remove-bg').checked,
+          bg_files: [...bgFiles],
           stroke_size: (parseFloat(document.getElementById('stroke-size').value) || 0) / 100,
           unify_place: document.getElementById('unify-place').checked
         })

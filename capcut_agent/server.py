@@ -880,22 +880,18 @@ DATE_STYLE = {
 TITLE_RED = [1, 0, 0]
 TITLE_WHITE = [1, 1, 1]
 
-# 템플릿에서 실제로 사용된 등장 애니메이션 (랜덤 효과용)
+# 랜덤 효과로 사용할 등장 애니메이션 (사용자 즐겨찾기 목록)
+# ※ '스크롤', '겹', '흔들림 플래시', '락 세로'는 템플릿에 사용 이력이 없어
+#    resource_id를 알 수 없다. 해당 효과를 쓴 프로젝트를 주면 여기에 추가 가능.
 TEMPLATE_IN_ANIMATIONS = [
-    {"name": "패들링",     "resource_id": "7227021042017899010"},
-    {"name": "X 진동",     "resource_id": "7223670693685105154"},
-    {"name": "우주 왜곡",   "resource_id": "7301248488333906433"},
-    {"name": "번개 워프",   "resource_id": "7545333478791925045"},
-    {"name": "충돌",       "resource_id": "7216282356447973890"},
+    {"name": "FF 안",      "resource_id": "7211044701367964162"},
     {"name": "스워시",     "resource_id": "7274915008939561473"},
-    {"name": "락 3",       "resource_id": "6781683302672634382"},
-    {"name": "앰버 커런트", "resource_id": "7646378118994758920"},
+    {"name": "패들링",     "resource_id": "7227021042017899010"},
+    {"name": "충돌",       "resource_id": "7216282356447973890"},
+    {"name": "X 진동",     "resource_id": "7223670693685105154"},
     {"name": "펄스 줌",     "resource_id": "7530463994486820097"},
-    {"name": "글리치 이동", "resource_id": "7598505558747958545"},
-    {"name": "왜곡 임팩트", "resource_id": "7620480539803274504"},
     {"name": "퀀텀 셰이크", "resource_id": "7626732691261607189"},
-    {"name": "TV 빔",      "resource_id": "7507263146558590269"},
-    {"name": "블랙홀",     "resource_id": "7294461978301436418"},
+    {"name": "락 3",       "resource_id": "6781683302672634382"},
 ]
 
 
@@ -1021,8 +1017,17 @@ def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -
     }
 
 
-# ── 템플릿 사진 배치 중간값 (자료화면 크기·위치 통일용) ──
-MEDIA_PLACE = {"scale": 0.790416, "x": 0.0, "y": -0.446945}
+# ── 자료화면 배치 기본값 ──
+# scale은 템플릿 사진 29개의 중간값. 위치는 캡컷 화면에 표시되는 픽셀값으로 지정하며
+# JSON에는 정규화 좌표로 변환해 넣는다 (정규화 = 픽셀 / (캔버스높이/2), 위쪽이 +).
+MEDIA_PLACE = {"scale": 0.790416, "x_px": 0.0, "y_px": -994.0}
+
+
+def _px_to_norm(x_px: float, y_px: float, canvas: dict) -> tuple[float, float]:
+    """캡컷 위치(픽셀) → draft JSON 정규화 좌표."""
+    half_w = max(canvas.get("width", 1080) / 2, 1)
+    half_h = max(canvas.get("height", 1920) / 2, 1)
+    return x_px / half_w, y_px / half_h
 
 # 배경제거 후 적용하는 '발광' 흰색 획 (템플릿에서 추출)
 MATTING_STROKE_RESOURCE_ID = "7172498336719573505"
@@ -1296,12 +1301,11 @@ def build_draft(
     title_text: str = "",
     date_text: str = "",
     effect_interval_sec: float = 0.0,
-    image_remove_bg: bool = False,
+    bg_files: set[str] | None = None,
     bg_stroke: bool = True,
     stroke_size: float = 0.15,
     stroke_alpha: float = 0.6,
     unify_place: bool = True,
-    remove_bg_videos: bool = True,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -1313,13 +1317,14 @@ def build_draft(
     image_dur_sec: 이어붙일 이미지 1장의 노출 시간(초)
     title_text:    상단 제목 (첫 줄 빨강 + 나머지 흰색, 템플릿 스타일)
     date_text:     하단 날짜 (노란색, 보통 오늘 날짜 MM-DD)
-    effect_interval_sec: 0보다 크면 이 간격마다 클립에 랜덤 등장 효과 부여
-    image_remove_bg: 자료화면에 배경제거 적용 (제거 후 발광 흰색 획)
-    remove_bg_videos: 배경제거를 영상 파일에도 적용할지 (기본 True)
+    effect_interval_sec: 0보다 크면 이 간격마다 자료화면에 랜덤 등장 효과 부여
+                   (메인 컷편집 영상에는 적용하지 않음)
+    bg_files:      배경제거를 적용할 파일 경로 집합 (선택한 것만)
     bg_stroke:     배경제거 후 흰색 발광 획 적용 여부
     stroke_size:   획 굵기 (0~1)
-    unify_place:   이어붙이는 자료화면의 크기·위치를 템플릿 중간값으로 통일
+    unify_place:   이어붙이는 자료화면의 크기·위치를 MEDIA_PLACE로 통일
     """
+    bg_files = bg_files or set()
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
     src_width, src_height = get_video_resolution(video_path)
 
@@ -1382,7 +1387,13 @@ def build_draft(
         timeline_cursor_us += dur
 
     # ── 이어붙일 파일들(통합 모드): 컷편집 영상 뒤에 순서대로 배치 ──
+    place = None
+    if unify_place:
+        nx, ny = _px_to_norm(MEDIA_PLACE["x_px"], MEDIA_PLACE["y_px"], canvas)
+        place = {"scale": MEDIA_PLACE["scale"], "x": nx, "y": ny}
+
     extra_materials = []
+    appended_segments = []          # 효과는 이 클립들에만 적용
     for f in (append_files or []):
         mat_id = str(uuid.uuid4()).upper()
         w, h, dsec, is_img = get_media_info(f)
@@ -1397,27 +1408,30 @@ def build_draft(
         if seg_dur < 100_000:
             continue
         mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
-        remove_bg = image_remove_bg and (is_img or remove_bg_videos)
-        if remove_bg:
+        # 파일별로 배경제거 여부를 개별 지정 (bg_files에 있는 파일만)
+        if str(f) in bg_files:
             # 배경제거 먼저 → 그래야 발광 획(흰색)이 테두리로 보인다
             mat["matting"] = _make_matting(True, bg_stroke, stroke_size, stroke_alpha)
         extra_materials.append(mat)
-        segments.append(_media_segment_dict(
+        seg = _media_segment_dict(
             str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img,
-            place=MEDIA_PLACE if unify_place else None))
+            place=place)
+        segments.append(seg)
+        appended_segments.append(seg)
         timeline_cursor_us += seg_dur
 
     final_duration = timeline_cursor_us
 
     # ── 랜덤 등장 효과 ───────────────────────────────────
-    # effect_interval_sec 간격마다, 그 시점을 지나는 클립에 효과를 하나씩 부여
+    # 메인(컷편집) 영상에는 넣지 않고, 뒤에 추가한 자료화면에만 적용
     anim_materials = []
-    if effect_interval_sec > 0 and segments:
+    if effect_interval_sec > 0 and appended_segments:
         import random
         rnd = random.Random(draft_name)          # 같은 영상은 항상 같은 결과
         step_us = sec_to_us(effect_interval_sec)
-        next_mark, last_pick = 0, None
-        for seg in segments:
+        next_mark = appended_segments[0]["target_timerange"]["start"]
+        last_pick = None
+        for seg in appended_segments:
             s = seg["target_timerange"]["start"]
             e = s + seg["target_timerange"]["duration"]
             if e <= next_mark:
@@ -1705,15 +1719,21 @@ def build_sequence_draft(
     draft_name: str = "CapCut_Sequence",
     ratio: str = "9:16",
     image_dur_sec: float = DEFAULT_IMAGE_DUR_SEC,
-    remove_bg: bool = False,
+    bg_files: set[str] | None = None,
     stroke_size: float = 0.15,
     unify_place: bool = True,
 ) -> tuple[Path, list[str]]:
     """
     선택한 영상/이미지 파일들을 다운로드(저장) 시간 순으로 메인 트랙에 이어붙인 draft 생성.
+    bg_files에 들어있는 파일만 배경제거 + 흰색 발광 획을 적용한다.
     반환: (draft 폴더, 배치된 파일명 순서 목록)
     """
+    bg_files = bg_files or set()
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
+    place = None
+    if unify_place:
+        nx, ny = _px_to_norm(MEDIA_PLACE["x_px"], MEDIA_PLACE["y_px"], canvas)
+        place = {"scale": MEDIA_PLACE["scale"], "x": nx, "y": ny}
     ordered = sort_files_by_download_time(list(files))
 
     timeline_id = str(uuid.uuid4()).upper()
@@ -1742,12 +1762,11 @@ def build_sequence_draft(
             continue
         mat_id = str(uuid.uuid4()).upper()
         mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
-        if remove_bg:
+        if str(f) in bg_files:
             mat["matting"] = _make_matting(True, True, stroke_size, 0.6)
         videos_materials.append(mat)
         segments.append(_media_segment_dict(
-            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img,
-            place=MEDIA_PLACE if unify_place else None))
+            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img, place=place))
         cursor += seg_dur
         placed.append(f.name)
 
@@ -1791,7 +1810,7 @@ async def process_video(
     title_text = ""
     date_text = ""
     effect_interval = 0.0
-    image_remove_bg = False
+    bg_files: set[str] = set()
     stroke_size = 0.15
     unify_place = True
     try:
@@ -1804,7 +1823,7 @@ async def process_video(
             title_text = (body.get("title") or "").strip()
             date_text = (body.get("date") or "").strip()
             effect_interval = float(body.get("effect_interval") or 0)
-            image_remove_bg = bool(body.get("image_remove_bg"))
+            bg_files = {str(Path(p)) for p in (body.get("bg_files") or []) if p}
             stroke_size = float(body.get("stroke_size") or 0.15)
             unify_place = body.get("unify_place", True)
     except Exception:
@@ -1898,9 +1917,9 @@ async def process_video(
             if date_text:
                 extras.append(f"날짜({date_text})")
             if effect_interval > 0:
-                extras.append(f"랜덤효과 {effect_interval}초")
-            if image_remove_bg:
-                extras.append("배경제거+흰색 발광 획")
+                extras.append(f"자료화면 랜덤효과 {effect_interval}초")
+            if bg_files:
+                extras.append(f"배경제거 {len(bg_files)}개 파일")
             if unify_place:
                 extras.append("자료화면 크기·위치 통일")
             if extras:
@@ -1910,8 +1929,8 @@ async def process_video(
             name = video.stem
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
                                     max_sub_chars, script_text, valid_appends, image_dur,
-                                    title_text, date_text, effect_interval, image_remove_bg,
-                                    True, stroke_size, 0.6, bool(unify_place), True)
+                                    title_text, date_text, effect_interval, bg_files,
+                                    True, stroke_size, 0.6, bool(unify_place))
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 
@@ -1963,6 +1982,31 @@ async def browse_file():
         return JSONResponse({"path": "", "error": str(e)})
 
 
+@app.get("/api/thumb")
+async def get_thumb(path: str):
+    """
+    선택한 파일의 미리보기 이미지 (목록에서 마우스 올렸을 때 사용).
+    이미지는 원본을 그대로, 영상은 첫 프레임을 ffmpeg으로 뽑아 반환한다.
+    """
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, "파일을 찾을 수 없습니다.")
+
+    if p.suffix.lower() in IMAGE_EXTS:
+        return FileResponse(p)
+
+    import tempfile
+    out = Path(tempfile.gettempdir()) / f"_capcut_thumb_{abs(hash(str(p)))}.jpg"
+    if not out.exists():
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", "0.5", "-i", str(p),
+             "-frames:v", "1", "-vf", "scale=320:-1", str(out)],
+            capture_output=True)
+    if not out.exists():
+        raise HTTPException(404, "미리보기를 만들 수 없습니다.")
+    return FileResponse(out, media_type="image/jpeg")
+
+
 @app.get("/api/browse-multi")
 async def browse_files():
     """파일 여러 개 선택 (영상+이미지). 다운로드(저장) 시간 순으로 정렬해서 반환."""
@@ -1988,7 +2032,7 @@ async def build_sequence(request: Request):
     try:
         draft_dir, placed = build_sequence_draft(
             files, OUTPUT_DIR, name, ratio, image_dur,
-            bool(body.get("image_remove_bg")),
+            {str(Path(p)) for p in (body.get("bg_files") or []) if p},
             float(body.get("stroke_size") or 0.15),
             bool(body.get("unify_place", True)))
     except ValueError as e:
