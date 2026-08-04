@@ -28,9 +28,10 @@ BASE_DIR   = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
+CUTOUT_DIR = BASE_DIR / "outputs" / "cutouts"   # 배경 지운 투명 PNG 보관
 
-for d in [UPLOAD_DIR, OUTPUT_DIR]:
-    d.mkdir(exist_ok=True)
+for d in [UPLOAD_DIR, OUTPUT_DIR, CUTOUT_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
 _draft_cache: dict[str, Path] = {}
 _asr_lock = asyncio.Lock()
@@ -68,6 +69,112 @@ def ensure_faster_whisper() -> tuple[bool, str]:
         return True, "자막 기능 설치 완료"
     except ImportError as e:
         return False, f"설치 후에도 불러오지 못함: {e}"
+
+
+def ensure_rembg() -> tuple[bool, str]:
+    """
+    배경제거(이미지 누끼) 패키지가 없으면 자동 설치한다.
+    캡컷의 '배경제거'는 캡컷이 직접 계산한 마스크 파일이 있어야 화면이 나오는데,
+    프로그램이 만든 draft에는 그 파일이 없어서 켜두면 검은 화면이 된다.
+    그래서 배경제거는 우리가 직접 해서 투명 PNG로 만들어 넣는다.
+    반환: (사용 가능 여부, 안내 메시지)
+    """
+    import importlib
+    try:
+        importlib.import_module("rembg")
+        importlib.import_module("PIL")
+        return True, "배경제거 기능 준비됨"
+    except ImportError:
+        pass
+
+    cmd = [sys.executable, "-m", "pip", "install", "--no-warn-script-location",
+           "pillow", "onnxruntime", "rembg"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, f"설치 실행 실패: {e}"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return False, " / ".join(tail[-3:]) if tail else "pip 설치 실패"
+
+    importlib.invalidate_caches()
+    try:
+        importlib.import_module("rembg")
+        importlib.import_module("PIL")
+        return True, "배경제거 기능 설치 완료"
+    except ImportError as e:
+        return False, f"설치 후에도 불러오지 못함: {e}"
+
+
+_rembg_session = None
+
+
+def get_rembg_session():
+    global _rembg_session
+    if _rembg_session is None:
+        from rembg import new_session
+        _rembg_session = new_session("u2net")   # 첫 실행 때 모델 176MB 내려받음
+    return _rembg_session
+
+
+def make_cutout_png(src: Path, out_dir: Path, stroke: bool = True,
+                    stroke_frac: float = 0.15) -> Path | None:
+    """
+    이미지 배경을 지워 투명 PNG로 저장한다. stroke가 켜져 있으면 흰색 발광 테두리도
+    직접 그려 넣는다. 캡컷에서 따로 버튼을 누르지 않아도 바로 보이게 하기 위함.
+    같은 설정으로 이미 만든 파일이 있으면 그대로 재사용한다.
+    반환: 만들어진 PNG 경로 (실패 시 None)
+    """
+    from PIL import Image, ImageFilter
+    from rembg import remove
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        st = src.stat()
+        key = f"{src}|{st.st_mtime_ns}|{st.st_size}|{int(stroke)}|{stroke_frac:.3f}"
+    except OSError:
+        return None
+    out = out_dir / f"{src.stem}_cut_{hashlib.md5(key.encode()).hexdigest()[:10]}.png"
+    if out.exists():
+        return out
+
+    try:
+        img = Image.open(src).convert("RGBA")
+        cut = remove(img, session=get_rembg_session())
+        if cut.mode != "RGBA":
+            cut = cut.convert("RGBA")
+
+        if stroke and stroke_frac > 0:
+            w, h = cut.size
+            glow_px = max(2, round(stroke_frac * min(w, h) * 0.1))
+            alpha = cut.getchannel("A")
+            grown = alpha
+            for _ in range(max(1, glow_px // 2)):        # 2px씩 부풀리기
+                grown = grown.filter(ImageFilter.MaxFilter(5))
+            grown = grown.filter(ImageFilter.GaussianBlur(max(1, glow_px / 4)))
+            glow = Image.new("RGBA", cut.size, (255, 255, 255, 255))
+            glow.putalpha(grown)
+            cut = Image.alpha_composite(glow, cut)
+
+        cut.save(out, "PNG")
+        return out
+    except Exception:
+        return None
+
+
+def build_cutouts(files: list[Path], out_dir: Path, stroke: bool, stroke_frac: float,
+                  progress: dict | None = None) -> dict[str, str]:
+    """배경제거 대상 이미지들을 투명 PNG로 미리 만들어 {원본경로: PNG경로} 로 돌려준다."""
+    made: dict[str, str] = {}
+    for i, f in enumerate(files):
+        png = make_cutout_png(f, out_dir, stroke, stroke_frac)
+        if png:
+            made[str(f)] = str(png)
+        if progress is not None:
+            progress["done"] = i + 1
+            progress["total"] = len(files)
+    return made
 
 
 def get_whisper_model():
@@ -157,35 +264,44 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
     타이밍이 마이크로초 단위로 완전히 일치한다.
 
     head_trim / tail_trim: 클립 앞뒤를 이만큼(초) 더 깎는다 (손편집처럼 타이트하게).
+                           음수면 반대로 그만큼 더 남긴다 (말이 씹히지 않게 여유).
+                           더 남길 때는 잘라낸 무음 안에서만 늘리고, 옆 클립은 침범하지 않는다.
     min_clip_sec:          이보다 짧아진 클립은 통째로 버린다 (0이면 끄기).
     drop_clips:            빼버릴 클립 번호 (같은 말 반복 엔지컷 삭제용).
                            번호는 '빼기 전' 목록 기준이고, 빼고 나면 타임라인은
                            빈틈 없이 다시 이어붙인다.
     """
-    picked: list[tuple[float, float, int]] = []   # (원본 start, 원본 end, 길이 us)
     floor_sec = max(min_clip_sec, 0.1)   # 0.1초 미만 클립은 어차피 못 쓴다
 
-    def add(ks: float, ke: float):
-        # 앞뒤 여유 깎기 (너무 깎여서 클립이 사라지면 깎지 않는다)
-        if head_trim > 0 or tail_trim > 0:
+    # 1) 무음을 뺀 원래 keep 구간
+    raw: list[tuple[float, float]] = []
+    cursor = 0.0
+    for sil in sorted(silences, key=lambda x: x["start"]):
+        s, e = snap_to_frame(sil["start"]), snap_to_frame(sil["end"])
+        if s > cursor:
+            raw.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < total_duration:
+        raw.append((cursor, total_duration))
+
+    # 2) 앞뒤 여유 조정 (+면 더 깎기, -면 더 남기기)
+    picked: list[tuple[float, float, int]] = []   # (원본 start, 원본 end, 길이 us)
+    for i, (ks, ke) in enumerate(raw):
+        if head_trim or tail_trim:
             nks, nke = ks + head_trim, ke - tail_trim
-            if nke - nks >= floor_sec:
+            # 더 남길 때: 영상 밖 / 옆 클립 침범 금지
+            lo = raw[i - 1][1] if i > 0 else 0.0
+            hi = raw[i + 1][0] if i + 1 < len(raw) else total_duration
+            nks = max(nks, lo)
+            nke = min(nke, hi)
+            if nke - nks >= floor_sec:      # 너무 깎여 사라지면 원래대로
                 ks, ke = nks, nke
         src_start = sec_to_us(snap_to_frame(ks))
         src_end   = sec_to_us(snap_to_frame(ke))
         dur = src_end - src_start
         if dur < sec_to_us(floor_sec):
-            return
+            continue
         picked.append((ks, ke, dur))
-
-    cursor = 0.0
-    for sil in sorted(silences, key=lambda x: x["start"]):
-        s, e = snap_to_frame(sil["start"]), snap_to_frame(sil["end"])
-        if s > cursor:
-            add(cursor, s)
-        cursor = max(cursor, e)
-    if cursor < total_duration:
-        add(cursor, total_duration)
 
     drop = drop_clips or set()
     ranges: list[tuple[float, float, int, int]] = []
@@ -1210,7 +1326,7 @@ def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -
 # ── 자료화면 배치 기본값 ──
 # scale은 템플릿 사진 29개의 중간값. 위치는 캡컷 화면에 표시되는 픽셀값으로 지정하며
 # JSON에는 정규화 좌표로 변환해 넣는다 (정규화 = 픽셀 / (캔버스높이/2), 위쪽이 +).
-MEDIA_PLACE = {"scale": 0.790416, "x_px": 0.0, "y_px": -994.0}
+MEDIA_PLACE = {"scale": 0.790416, "x_px": 0.0, "y_px": -892.0}
 
 
 def _px_to_norm(x_px: float, y_px: float, canvas: dict) -> tuple[float, float]:
@@ -1228,9 +1344,15 @@ MATTING_STROKE_PATH = ("C:/Users/Lusey/AppData/Local/CapCut/User Data/Cache/effe
 def _make_matting(remove_bg: bool, stroke: bool, stroke_size: float = 0.15,
                   stroke_alpha: float = 0.6) -> dict:
     """
-    배경제거(matting) 설정.
+    캡컷 자체 배경제거(matting) 설정.
+
+    ※ 지금은 쓰지 않는다. 캡컷의 배경제거는 캡컷이 직접 계산해 저장한 마스크 파일
+      (matting/<해시>)이 있어야 화면이 나오는데, 프로그램이 만든 draft에는 그 파일이
+      없어서 켜두면 검은 화면이 된다(캡컷에서 껐다 켜야 다시 계산됨).
+      그래서 이미지는 make_cutout_png()로 우리가 직접 배경을 지워 넣는다.
+      구조 참고용으로만 남겨둔다.
+
     flag: 0=없음, 1=배경제거만, 3=배경제거+획(발광)
-    획은 배경이 제거돼야 테두리가 보이므로 remove_bg가 켜져야 의미가 있다.
     """
     mt = {
         "flag": 0, "path": "", "interactiveTime": [],
@@ -1500,6 +1622,7 @@ def build_draft(
     tail_trim: float = 0.0,
     min_clip_sec: float = 0.0,
     drop_clips: set[int] | None = None,
+    cutouts: dict[str, str] | None = None,
 ) -> Path:
     """
     subtitles:     Whisper 원본 인식 결과 (원본 영상 타임스탬프 + 단어별 시각 기준).
@@ -1589,9 +1712,13 @@ def build_draft(
 
     extra_materials = []
     appended_segments = []          # 효과는 이 클립들에만 적용
+    cutouts = cutouts or {}
     for f in (append_files or []):
         mat_id = str(uuid.uuid4()).upper()
-        w, h, dsec, is_img = get_media_info(f)
+        # 배경제거를 고른 이미지는 미리 만들어 둔 투명 PNG로 바꿔 넣는다
+        # (캡컷 배경제거 버튼을 안 눌러도 처음부터 제대로 보이게)
+        src_file = Path(cutouts[str(f)]) if str(f) in cutouts else f
+        w, h, dsec, is_img = get_media_info(src_file)
         if is_img:
             src_dur_us = IMAGE_SOURCE_DUR_US
             seg_dur = sec_to_us(image_dur_sec)
@@ -1602,11 +1729,7 @@ def build_draft(
             seg_dur = src_dur_us
         if seg_dur < 100_000:
             continue
-        mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
-        # 파일별로 배경제거 여부를 개별 지정 (bg_files에 있는 파일만)
-        if str(f) in bg_files:
-            # 배경제거 먼저 → 그래야 발광 획(흰색)이 테두리로 보인다
-            mat["matting"] = _make_matting(True, bg_stroke, stroke_size, stroke_alpha)
+        mat = _media_material_dict(mat_id, src_file, w, h, src_dur_us, is_img)
         extra_materials.append(mat)
         seg = _media_segment_dict(
             str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img,
@@ -1911,10 +2034,11 @@ def build_sequence_draft(
     bg_files: set[str] | None = None,
     stroke_size: float = 0.15,
     unify_place: bool = True,
+    cutouts: dict[str, str] | None = None,
 ) -> tuple[Path, list[str]]:
     """
     선택한 영상/이미지 파일들을 다운로드(저장) 시간 순으로 메인 트랙에 이어붙인 draft 생성.
-    bg_files에 들어있는 파일만 배경제거 + 흰색 발광 획을 적용한다.
+    배경제거를 고른 이미지는 미리 만들어 둔 투명 PNG(cutouts)로 바꿔 넣는다.
     반환: (draft 폴더, 배치된 파일명 순서 목록)
     """
     bg_files = bg_files or set()
@@ -1935,10 +2059,12 @@ def build_sequence_draft(
     videos_materials = []
     placed = []
     cursor = 0
+    cutouts = cutouts or {}
     for f in ordered:
         if not f.exists():
             continue
-        w, h, dsec, is_img = get_media_info(f)
+        src_file = Path(cutouts[str(f)]) if str(f) in cutouts else f
+        w, h, dsec, is_img = get_media_info(src_file)
         if is_img:
             src_dur_us = IMAGE_SOURCE_DUR_US
             seg_dur = sec_to_us(image_dur_sec)
@@ -1950,9 +2076,7 @@ def build_sequence_draft(
         if seg_dur < 100_000:
             continue
         mat_id = str(uuid.uuid4()).upper()
-        mat = _media_material_dict(mat_id, f, w, h, src_dur_us, is_img)
-        if str(f) in bg_files:
-            mat["matting"] = _make_matting(True, True, stroke_size, 0.6)
+        mat = _media_material_dict(mat_id, src_file, w, h, src_dur_us, is_img)
         videos_materials.append(mat)
         segments.append(_media_segment_dict(
             str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img, place=place))
@@ -2042,11 +2166,11 @@ async def process_video(
                                               head_trim / 1000.0, tail_trim / 1000.0, min_clip)
             tight = []
             if head_trim or tail_trim:
-                tight.append(f"앞 {head_trim:.0f}ms / 뒤 {tail_trim:.0f}ms 추가 컷")
+                tight.append(f"앞 여유 {-head_trim:+.0f}ms / 뒤 여유 {-tail_trim:+.0f}ms")
             if min_clip:
                 tight.append(f"{min_clip}초 미만 클립 제외")
             if tight:
-                yield f"data: {json.dumps({'step': 'silence', 'msg': '타이트 컷: ' + ', '.join(tight)})}\n\n"
+                yield f"data: {json.dumps({'step': 'silence', 'msg': '컷 조정: ' + ', '.join(tight)})}\n\n"
             yield f"data: {json.dumps({'step': 'silence', 'msg': f'컷 클립 {len(keep_ranges)}개'})}\n\n"
 
             # 자막 인식
@@ -2152,13 +2276,48 @@ async def process_video(
             if extras:
                 yield f"data: {json.dumps({'step': 'draft', 'msg': '적용: ' + ', '.join(extras)})}\n\n"
 
+            # ── 배경제거: 우리가 직접 투명 PNG로 만들어 넣는다 ──
+            # 캡컷 배경제거는 캡컷이 만든 마스크 파일이 있어야 해서, draft에 켜두기만 하면
+            # 검은 화면이 된다. 그래서 이미지는 미리 배경을 지워 넣는다.
+            cutouts: dict[str, str] = {}
+            bg_imgs = [f for f in valid_appends
+                       if str(f) in bg_files and f.suffix.lower() in IMAGE_EXTS]
+            bg_vids = [f for f in valid_appends
+                       if str(f) in bg_files and f.suffix.lower() not in IMAGE_EXTS]
+            if bg_imgs:
+                yield f"data: {json.dumps({'step': 'draft', 'msg': f'배경제거 준비 중... (이미지 {len(bg_imgs)}개, 처음 한 번은 모델 176MB 다운로드)'})}\n\n"
+                loop = asyncio.get_event_loop()
+                ok, msg = await loop.run_in_executor(None, ensure_rembg)
+                if not ok:
+                    yield f"data: {json.dumps({'step': 'draft', 'msg': f'⚠ 배경제거 준비 실패: {msg} → 원본 이미지 그대로 넣습니다'})}\n\n"
+                else:
+                    cprog: dict = {"done": 0, "total": len(bg_imgs)}
+                    ctask = loop.run_in_executor(
+                        None, build_cutouts, bg_imgs, CUTOUT_DIR, True, stroke_size, cprog)
+                    last_c = -1
+                    while not ctask.done():
+                        await asyncio.sleep(1)
+                        dc = cprog.get("done", 0)
+                        if dc != last_c:
+                            last_c = dc
+                            yield f"data: {json.dumps({'step': 'draft', 'msg': f'배경제거 {dc}/{len(bg_imgs)} ...'})}\n\n"
+                    cutouts = await ctask
+                    fail = len(bg_imgs) - len(cutouts)
+                    done_msg = f'배경제거 완료 {len(cutouts)}개 (흰색 발광 테두리 포함)'
+                    if fail:
+                        done_msg += f' / 실패 {fail}개는 원본 그대로'
+                    yield f"data: {json.dumps({'step': 'draft', 'msg': done_msg})}\n\n"
+            if bg_vids:
+                yield f"data: {json.dumps({'step': 'draft', 'msg': f'⚠ 영상 {len(bg_vids)}개는 배경제거를 캡컷에서 직접 켜주세요 (영상은 미리 처리하지 않습니다)'})}\n\n"
+
             yield f"data: {json.dumps({'step': 'draft', 'msg': f'CapCut draft 생성 중... ({ratio})'})}\n\n"
             name = video.stem
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
                                     max_sub_chars, script_text, valid_appends, image_dur,
                                     title_text, date_text, effect_dur, bg_files,
                                     True, stroke_size, 0.6, bool(unify_place),
-                                    head_trim / 1000.0, tail_trim / 1000.0, min_clip, drop_set)
+                                    head_trim / 1000.0, tail_trim / 1000.0, min_clip, drop_set,
+                                    cutouts)
 
             yield f"data: {json.dumps({'step': 'done', 'msg': 'draft 생성 완료!', 'draft_dir': str(draft_dir), 'silence_count': len(silences), 'clip_count': len(keep_ranges), 'subtitle_count': subtitle_count, 'append_count': len(valid_appends)})}\n\n"
 
@@ -2257,12 +2416,19 @@ async def build_sequence(request: Request):
     files = [f for f in files if f.exists()]
     if not files:
         raise HTTPException(400, "선택된 파일이 없습니다.")
+    bg_set = {str(Path(p)) for p in (body.get("bg_files") or []) if p}
+    stroke_sz = float(body.get("stroke_size") or 0.15)
+    cutouts: dict[str, str] = {}
+    bg_imgs = [f for f in files if str(f) in bg_set and f.suffix.lower() in IMAGE_EXTS]
+    if bg_imgs:
+        ok, _msg = await asyncio.get_event_loop().run_in_executor(None, ensure_rembg)
+        if ok:
+            cutouts = await asyncio.get_event_loop().run_in_executor(
+                None, build_cutouts, bg_imgs, CUTOUT_DIR, True, stroke_sz, None)
     try:
         draft_dir, placed = build_sequence_draft(
-            files, OUTPUT_DIR, name, ratio, image_dur,
-            {str(Path(p)) for p in (body.get("bg_files") or []) if p},
-            float(body.get("stroke_size") or 0.15),
-            bool(body.get("unify_place", True)))
+            files, OUTPUT_DIR, name, ratio, image_dur, bg_set, stroke_sz,
+            bool(body.get("unify_place", True)), cutouts)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse({"success": True, "draft_dir": str(draft_dir),

@@ -309,34 +309,32 @@
     </div>
 
     <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">
-      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px;">
-        <input type="checkbox" id="tight-on" style="accent-color:var(--accent);"
-               onchange="document.getElementById('tight-box').style.display = this.checked ? 'block' : 'none';" />
-        <span>✂ 타이트 컷 (손편집처럼 클립 앞뒤를 더 깎기)</span>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+        컷 여유 &nbsp;<span style="color:var(--dim); font-size:11px;">
+        + 면 더 남기고(말 안 씹힘), − 면 더 깎습니다(타이트)</span>
+      </div>
+      <div class="settings-grid">
+        <div class="setting-item">
+          <label>클립 앞 여유 <span id="head-val">+100 ms</span></label>
+          <input type="range" id="head-pad" min="-400" max="400" value="100" step="10"
+                 oninput="document.getElementById('head-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
+        </div>
+        <div class="setting-item">
+          <label>클립 뒤 여유 <span id="tail-val">+0 ms</span></label>
+          <input type="range" id="tail-pad" min="-400" max="400" value="0" step="10"
+                 oninput="document.getElementById('tail-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
+        </div>
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; margin-top:12px;">
+        <input type="checkbox" id="drop-short" style="accent-color:var(--accent);" />
+        <span>짧은 클립 버리기</span>
+        <input type="number" id="min-clip" value="0.7" step="0.1" min="0.1" max="3"
+               style="width:60px; background:#000; border:1px solid var(--border); border-radius:4px;
+                      color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초 미만
       </label>
-      <div id="tight-box" style="display:none; margin-top:10px;">
-        <div class="settings-grid">
-          <div class="setting-item">
-            <label>클립 앞 추가 컷 <span id="head-val">80 ms</span></label>
-            <input type="range" id="head-trim" min="0" max="400" value="80" step="10"
-                   oninput="document.getElementById('head-val').textContent = this.value + ' ms'" />
-          </div>
-          <div class="setting-item">
-            <label>클립 뒤 추가 컷 <span id="tail-val">120 ms</span></label>
-            <input type="range" id="tail-trim" min="0" max="400" value="120" step="10"
-                   oninput="document.getElementById('tail-val').textContent = this.value + ' ms'" />
-          </div>
-        </div>
-        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; margin-top:10px;">
-          <input type="checkbox" id="drop-short" style="accent-color:var(--accent);" />
-          <span>짧은 클립 버리기</span>
-          <input type="number" id="min-clip" value="0.7" step="0.1" min="0.1" max="3"
-                 style="width:60px; background:#000; border:1px solid var(--border); border-radius:4px;
-                        color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초 미만
-        </label>
-        <div style="font-size:11px; color:var(--dim); margin-top:8px; line-height:1.6;">
-          ※ 엔지컷을 남겨서 직접 고르실 거면 "짧은 클립 버리기"는 꺼두세요.
-        </div>
+      <div style="font-size:11px; color:var(--dim); margin-top:8px; line-height:1.6;">
+        ※ 말이 씹히면 "앞 여유"를 +150~+200ms 로 올리세요. 더 바짝 붙이려면 −80ms 쪽으로.<br />
+        ※ 엔지컷을 남겨서 직접 고르실 거면 "짧은 클립 버리기"는 꺼두세요.
       </div>
     </div>
 
@@ -428,8 +426,14 @@
                  color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /></label>
       <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px;">
         <input type="checkbox" id="unify-place" checked style="width:15px; height:15px; accent-color:var(--accent);" />
-        <span>크기·위치 통일</span>
+        <span>크기·위치 통일 (x=0, y=-892)</span>
       </label>
+    </div>
+    <div style="margin-top:8px; font-size:11px; color:var(--dim); line-height:1.6;">
+      배경제거는 프로그램이 직접 처리해서 <strong style="color:var(--text);">투명 PNG</strong>로 넣습니다
+      (흰색 발광 테두리 포함). 캡컷에서 버튼을 따로 누르지 않아도 바로 보입니다.
+      처음 한 번은 배경제거 모델(176MB)을 내려받느라 시간이 걸립니다.
+      <br />영상 파일의 배경제거는 캡컷에서 직접 켜주세요.
     </div>
     <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
       <button class="btn btn-ghost" onclick="buildSequenceOnly()">🎬 선택 파일로만 새 프로젝트</button>
@@ -470,8 +474,8 @@
 
     <div style="display:flex; gap:20px; align-items:center; margin-top:14px; flex-wrap:wrap;">
       <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px;">
-        <input type="checkbox" id="use-effects" style="width:15px; height:15px; accent-color:var(--accent);" />
-        <span>모든 자료화면에 랜덤 효과 (추가 파일 전부)</span>
+        <input type="checkbox" id="use-effects" checked style="width:15px; height:15px; accent-color:var(--accent);" />
+        <span>모든 자료화면에 랜덤 효과 (추가 파일 전부 · 하나도 빠짐없이)</span>
       </label>
       <label style="font-size:12px; color:var(--muted);">
         효과 길이
@@ -650,11 +654,10 @@
     const maxChars = document.getElementById('max-sub-chars').value;
     const encoded = encodeURIComponent(videoPath);
 
-    // 타이트 컷 (끄면 전부 0 → 기존 동작 그대로)
-    const tightOn = document.getElementById('tight-on').checked;
-    const headTrim = tightOn ? document.getElementById('head-trim').value : 0;
-    const tailTrim = tightOn ? document.getElementById('tail-trim').value : 0;
-    const minClip  = (tightOn && document.getElementById('drop-short').checked)
+    // 컷 여유: 화면은 "여유(+ 면 더 남김)", 서버는 "깎는 양" 이라 부호를 뒤집는다
+    const headTrim = -parseFloat(document.getElementById('head-pad').value || 0);
+    const tailTrim = -parseFloat(document.getElementById('tail-pad').value || 0);
+    const minClip  = document.getElementById('drop-short').checked
                      ? document.getElementById('min-clip').value : 0;
 
     // 같은 말 반복(엔지컷) 정리
