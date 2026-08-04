@@ -893,7 +893,9 @@
           files: appendFiles, ratio, image_dur: imageDur, name,
           bg_files: [...bgFiles],
           stroke_size: (parseFloat(document.getElementById('stroke-size').value) || 0) / 100,
-          unify_place: document.getElementById('unify-place').checked
+          unify_place: document.getElementById('unify-place').checked,
+          effect_dur: document.getElementById('use-effects').checked
+                      ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0
         })
       });
       const data = await res.json();

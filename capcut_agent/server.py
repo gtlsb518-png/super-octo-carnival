@@ -1291,15 +1291,35 @@ TITLE_WHITE = [1, 1, 1]
 # 랜덤 효과로 사용할 등장 애니메이션 (사용자 즐겨찾기 목록)
 # ※ '스크롤', '겹', '흔들림 플래시', '락 세로'는 템플릿에 사용 이력이 없어
 #    resource_id를 알 수 없다. 해당 효과를 쓴 프로젝트를 주면 여기에 추가 가능.
+# 템플릿에서 통째로 뽑아온 값 (path = 캡컷이 받아둔 효과 캐시 위치).
+# path와 third_resource_id가 비어 있으면 캡컷이 효과를 못 찾아 그냥 넘어가는 경우가
+# 있어서(= 효과가 간혹 안 들어감), 템플릿에 있던 값을 그대로 넣는다.
+_EFF_CACHE = "C:/Users/Lusey/AppData/Local/CapCut/User Data/Cache/effect"
 TEMPLATE_IN_ANIMATIONS = [
-    {"name": "FF 안",      "resource_id": "7211044701367964162"},
-    {"name": "스워시",     "resource_id": "7274915008939561473"},
-    {"name": "패들링",     "resource_id": "7227021042017899010"},
-    {"name": "충돌",       "resource_id": "7216282356447973890"},
-    {"name": "X 진동",     "resource_id": "7223670693685105154"},
-    {"name": "펄스 줌",     "resource_id": "7530463994486820097"},
-    {"name": "퀀텀 셰이크", "resource_id": "7626732691261607189"},
-    {"name": "락 3",       "resource_id": "6781683302672634382"},
+    {"name": "FF 안", "resource_id": "7211044701367964162",
+     "third_resource_id": "7211044701367964162",
+     "path": f"{_EFF_CACHE}/7211044701367964162/6a680c49cd11a05f3eb0e5a3fed165f7"},
+    {"name": "스워시", "resource_id": "7274915008939561473",
+     "third_resource_id": "7274915008939561473",
+     "path": f"{_EFF_CACHE}/7274915008939561473/ecaffca7c7e1d7744fa296a29f65b366"},
+    {"name": "패들링", "resource_id": "7227021042017899010",
+     "third_resource_id": "7227021042017899010",
+     "path": f"{_EFF_CACHE}/7227021042017899010/57a259c58a4daddacc897c75ec9c10a4"},
+    {"name": "충돌", "resource_id": "7216282356447973890",
+     "third_resource_id": "7216282356447973890",
+     "path": f"{_EFF_CACHE}/7216282356447973890/8a2213baaae818dc449d13528ec9ec76"},
+    {"name": "X 진동", "resource_id": "7223670693685105154",
+     "third_resource_id": "7223670693685105154",
+     "path": f"{_EFF_CACHE}/7223670693685105154/cde910202607be12ac747e2e76316e7f"},
+    {"name": "펄스 줌", "resource_id": "7530463994486820097",
+     "third_resource_id": "0",
+     "path": f"{_EFF_CACHE}/7530463994486820097/c2223de4486ee5b2a5900d707e9a362b"},
+    {"name": "퀀텀 셰이크", "resource_id": "7626732691261607189",
+     "third_resource_id": "0",
+     "path": f"{_EFF_CACHE}/7626732691261607189/364995ccf6a19b3fafa4183ef62a130c"},
+    {"name": "락 3", "resource_id": "6781683302672634382",
+     "third_resource_id": "6781683302672634382",
+     "path": f"{_EFF_CACHE}/6781683302672634382/e2799421fc7fc57796222bd27966c812"},
 ]
 
 
@@ -1411,16 +1431,24 @@ def _make_sticker_animation(anim_id: str) -> dict:
 
 
 def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -> dict:
-    """영상/이미지 클립에 넣을 등장 애니메이션 재료."""
+    """
+    영상/이미지 클립에 넣을 등장 애니메이션 재료.
+    템플릿(손편집본)에 들어있던 항목과 필드를 똑같이 맞춘다 — path/third_resource_id/
+    source_platform/category(in_fav)가 빠지면 캡컷이 효과를 건너뛰는 경우가 있다.
+    """
     return {
         "id": anim_id, "type": "sticker_animation", "multi_language_current": "none",
         "animations": [{
             "id": effect["resource_id"], "name": effect["name"],
-            "type": "in", "category_id": "in", "category_name": "인",
-            "resource_id": effect["resource_id"], "path": "",
+            "type": "in", "category_id": "in_fav", "category_name": "in_fav",
+            "resource_id": effect["resource_id"],
+            "third_resource_id": effect.get("third_resource_id", "0"),
+            "source_platform": 1,
+            "path": effect.get("path", ""),
             "start": 0, "duration": duration_us,
             "anim_adjust_params": None, "platform": "all",
             "panel": "video", "material_type": "video",
+            "request_id": "",
         }],
     }
 
@@ -1429,6 +1457,32 @@ def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -
 # scale은 템플릿 사진 29개의 중간값. 위치는 캡컷 화면에 표시되는 픽셀값으로 지정하며
 # JSON에는 정규화 좌표로 변환해 넣는다 (정규화 = 픽셀 / (캔버스높이/2), 위쪽이 +).
 MEDIA_PLACE = {"scale": 0.790416, "x_px": 0.0, "y_px": -892.0}
+
+
+def assign_random_effects(segments: list[dict], effect_dur_sec: float,
+                          seed: str = "") -> list[dict]:
+    """
+    자료화면 클립 '전부'에 랜덤 등장 효과를 넣는다 (몇 초마다가 아니라 하나하나 전부).
+    - 바로 앞 클립과 같은 효과는 피한다
+    - 클립보다 긴 효과는 클립 길이에 맞춘다
+    - 같은 프로젝트 이름이면 항상 같은 결과 (다시 돌려도 안 바뀜)
+    반환: 만들어진 애니메이션 재료 목록 (materials.material_animations 에 넣을 것)
+    """
+    if effect_dur_sec <= 0 or not segments:
+        return []
+    import random
+    rnd = random.Random(seed)
+    eff_us = sec_to_us(effect_dur_sec)
+    out, last_pick = [], None
+    for seg in segments:
+        choices = [x for x in TEMPLATE_IN_ANIMATIONS if x["name"] != last_pick]
+        eff = rnd.choice(choices or TEMPLATE_IN_ANIMATIONS)
+        last_pick = eff["name"]
+        anim_id = str(uuid.uuid4()).upper()
+        dur = max(100_000, min(eff_us, seg["target_timerange"]["duration"]))
+        out.append(_make_in_animation(anim_id, eff, dur))
+        seg.setdefault("extra_material_refs", []).append(anim_id)
+    return out
 
 
 def _px_to_norm(x_px: float, y_px: float, canvas: dict) -> tuple[float, float]:
@@ -1572,7 +1626,8 @@ def _media_segment_dict(seg_id: str, material_id: str, src_start_us: int, dur_us
 def _finalize_draft(output_dir: Path, draft_name: str, ratio: str, canvas: dict,
                     videos_materials: list, text_materials: list, tracks: list,
                     final_duration: int, source_paths: list[Path],
-                    timeline_id: str, project_id: str, draft_id: str, ts: int) -> Path:
+                    timeline_id: str, project_id: str, draft_id: str, ts: int,
+                    anim_materials: list | None = None) -> Path:
     """draft_content/project/meta 조립 + 폴더 저장 (컷편집·시퀀스 공용)."""
     platform = {"os": "windows", "os_version": "10.0.26200", "app_id": 359289,
                 "app_version": "8.7.0", "app_source": "cc",
@@ -1601,7 +1656,8 @@ def _finalize_draft(output_dir: Path, draft_name: str, ratio: str, canvas: dict,
             "tail_leaders": [], "audios": [], "images": [],
             "effects": [], "stickers": [], "canvases": [], "transitions": [],
             "audio_effects": [], "audio_fades": [], "beats": [],
-            "material_animations": [], "placeholders": [], "placeholder_infos": [],
+            "material_animations": anim_materials or [],
+            "placeholders": [], "placeholder_infos": [],
             "speeds": [], "common_mask": [], "chromas": [], "text_templates": [],
             "realtime_denoises": [], "audio_pannings": [], "audio_pitch_shifts": [],
             "video_trackings": [], "hsl": [], "drafts": [], "color_curves": [],
@@ -1852,20 +1908,7 @@ def build_draft(
     # ── 랜덤 등장 효과 ───────────────────────────────────
     # 메인(컷편집) 영상에는 넣지 않고, 뒤에 추가한 자료화면(영상·이미지)에만 적용.
     # 자료화면 하나하나에 전부 효과를 넣되, 서로 다른 효과가 나오도록 무작위로 고른다.
-    anim_materials = []
-    if effect_dur_sec > 0 and appended_segments:
-        import random
-        rnd = random.Random(draft_name)          # 같은 영상은 항상 같은 결과
-        eff_us = sec_to_us(effect_dur_sec)
-        last_pick = None
-        for seg in appended_segments:
-            choices = [x for x in TEMPLATE_IN_ANIMATIONS if x["name"] != last_pick]
-            eff = rnd.choice(choices or TEMPLATE_IN_ANIMATIONS)
-            last_pick = eff["name"]
-            anim_id = str(uuid.uuid4()).upper()
-            dur = min(eff_us, seg["target_timerange"]["duration"])
-            anim_materials.append(_make_in_animation(anim_id, eff, dur))
-            seg.setdefault("extra_material_refs", []).append(anim_id)
+    anim_materials = assign_random_effects(appended_segments, effect_dur_sec, draft_name)
 
     # ── 자막 텍스트 트랙 ─────────────────────────────────
     # 단어별 발화 시각 기준으로 각 영상 클립에 자막을 배분 →
@@ -2144,6 +2187,7 @@ def build_sequence_draft(
     stroke_size: float = 0.15,
     unify_place: bool = True,
     cutouts: dict[str, str] | None = None,
+    effect_dur_sec: float = 0.0,
 ) -> tuple[Path, list[str]]:
     """
     선택한 영상/이미지 파일들을 다운로드(저장) 시간 순으로 메인 트랙에 이어붙인 draft 생성.
@@ -2195,13 +2239,17 @@ def build_sequence_draft(
     if not segments:
         raise ValueError("배치할 수 있는 영상/이미지 파일이 없습니다.")
 
+    # 자료화면 하나하나에 빠짐없이 랜덤 등장 효과
+    anim_materials = assign_random_effects(segments, effect_dur_sec, draft_name)
+
     final_duration = cursor
     tracks = [{"attribute": 0, "flag": 0, "id": track_id,
                "is_default_name": True, "name": "", "segments": segments, "type": "video"}]
 
     draft_dir = _finalize_draft(output_dir, draft_name, ratio, canvas,
                                 videos_materials, [], tracks, final_duration,
-                                ordered, timeline_id, project_id, draft_id, ts)
+                                ordered, timeline_id, project_id, draft_id, ts,
+                                anim_materials)
     return draft_dir, placed
 
 
@@ -2541,7 +2589,8 @@ async def build_sequence(request: Request):
     try:
         draft_dir, placed = build_sequence_draft(
             files, OUTPUT_DIR, name, ratio, image_dur, bg_set, stroke_sz,
-            bool(body.get("unify_place", True)), cutouts)
+            bool(body.get("unify_place", True)), cutouts,
+            float(body.get("effect_dur") or 0))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse({"success": True, "draft_dir": str(draft_dir),
