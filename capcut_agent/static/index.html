@@ -315,13 +315,13 @@
       </div>
       <div class="settings-grid">
         <div class="setting-item">
-          <label>클립 앞 여유 <span id="head-val">+100 ms</span></label>
-          <input type="range" id="head-pad" min="-400" max="400" value="100" step="10"
+          <label>클립 앞 여유 <span id="head-val">-80 ms</span></label>
+          <input type="range" id="head-pad" min="-400" max="400" value="-80" step="10"
                  oninput="document.getElementById('head-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
         <div class="setting-item">
-          <label>클립 뒤 여유 <span id="tail-val">+0 ms</span></label>
-          <input type="range" id="tail-pad" min="-400" max="400" value="0" step="10"
+          <label>클립 뒤 여유 <span id="tail-val">-120 ms</span></label>
+          <input type="range" id="tail-pad" min="-400" max="400" value="-120" step="10"
                  oninput="document.getElementById('tail-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
       </div>
@@ -333,7 +333,8 @@
                       color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초 미만
       </label>
       <div style="font-size:11px; color:var(--dim); margin-top:8px; line-height:1.6;">
-        ※ 말이 씹히면 "앞 여유"를 +150~+200ms 로 올리세요. 더 바짝 붙이려면 −80ms 쪽으로.<br />
+        ※ 기본값은 타이트하게 자르는 쪽(앞 -80ms / 뒤 -120ms)입니다.<br />
+        ※ 말이 씹히면 "앞 여유"를 0 → +100ms 쪽으로 올리세요.<br />
         ※ 엔지컷을 남겨서 직접 고르실 거면 "짧은 클립 버리기"는 꺼두세요.
       </div>
     </div>
