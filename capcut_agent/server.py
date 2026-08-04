@@ -496,6 +496,28 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
             pass
 
 
+MAX_CHARS_PER_SEC = 14.0    # 한국어 빠른 말이 초당 6~7자. 그 두 배를 넘으면 환각으로 본다
+
+
+def cap_by_speech_rate(words: list[dict], clip_sec: float) -> list[dict]:
+    """
+    짧은 클립에 말이 되지 않는 분량이 인식되면(Whisper 환각) 잘라낸다.
+
+    0.5초짜리 엔지 조각에 30자짜리 문장이 통째로 들어오는 일이 잦은데, 그대로 두면
+    0.07초짜리 자막이 우수수 지나가고 내용도 틀린다. 실제로 말할 수 있는 분량만 남긴다.
+    """
+    if not words or clip_sec <= 0:
+        return words
+    budget = max(6, int(clip_sec * MAX_CHARS_PER_SEC))
+    used, out = 0, []
+    for w in words:
+        used += len(w["word"]) + (1 if out else 0)
+        if used > budget and out:
+            break
+        out.append(w)
+    return out
+
+
 def transcribe_all_clips(video_path: Path,
                          keep_ranges: list[tuple[float, float, int, int]],
                          script_text: str = "",
@@ -527,6 +549,7 @@ def transcribe_all_clips(video_path: Path,
                         "end": min(max(w["end"], ks), ke),
                         "word": piece,
                     })
+        words = cap_by_speech_rate(words, ke - ks)
         if words:
             text = " ".join(w["word"] for w in words)
         else:
@@ -678,7 +701,58 @@ def strip_periods(text: str) -> str:
     if text == NO_SPEECH_PLACEHOLDER:
         return text
     out = _PERIOD_RE.sub("", text)
-    return re.sub(r"\s{2,}", " ", out).strip()
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    # 자막 끝에 남는 쉼표는 지운다 ("돈 넣은 건," → "돈 넣은 건")
+    return out.rstrip(",").strip()
+
+
+def unify_latin_words(segments: list[dict]) -> int:
+    """
+    영상 전체에서 같은 영어 단어가 제각각 인식된 걸 하나로 통일한다.
+      NVIDIA / Nvidia / MVDIIA  →  가장 많이 나온 표기(NVIDIA)로
+    대소문자만 다른 것은 무조건 합치고, 철자가 살짝 다른 것은 많이 나온 쪽이
+    2번 이상일 때만 합친다. (NAVER 처럼 아예 다른 단어는 건드리지 않는다)
+    반환: 바꾼 단어 수
+    """
+    import difflib
+    from collections import Counter
+    freq = Counter()
+    for seg in segments:
+        for w in seg.get("words") or []:
+            for tok in re.findall(r"[A-Za-z]{2,}", w["word"]):
+                freq[tok] += 1
+    if not freq:
+        return 0
+
+    canon: dict[str, str] = {}
+    ranked = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
+    for tok, n in ranked:
+        for base, bn in ranked:
+            if base == tok or tok in canon:
+                continue
+            if bn < n or (bn == n and base > tok):
+                continue
+            if base.lower() == tok.lower():             # 대소문자만 다름
+                canon[tok] = base
+                break
+            if bn >= 2 and len(tok) >= 4 and \
+                    difflib.SequenceMatcher(None, tok.upper(), base.upper()).ratio() >= 0.65:
+                canon[tok] = base                        # 흔한 표기의 오타
+                break
+    if not canon:
+        return 0
+
+    fixed = 0
+    for seg in segments:
+        for w in seg.get("words") or []:
+            new = re.sub(r"[A-Za-z]{2,}", lambda m: canon.get(m.group(0), m.group(0)), w["word"])
+            if new != w["word"]:
+                w["word"] = new
+                fixed += 1
+        ws = seg.get("words") or []
+        if ws:
+            seg["text"] = " ".join(x["word"] for x in ws)
+    return fixed
 
 
 def build_word_stream(segments: list[dict]) -> list[dict]:
@@ -818,6 +892,30 @@ def _best_break_index(cur: list[dict], soft_min: int) -> int:
     return best_i
 
 
+def limit_groups(groups: list[list[dict]], max_groups: int) -> list[list[dict]]:
+    """
+    조각 수를 max_groups 이하로 줄인다 (짧은 클립에서 자막이 깜빡이지 않게).
+    글자 수가 고르게 나뉘도록 앞에서부터 묶는다. 순서·내용은 그대로 둔다.
+    """
+    if max_groups <= 0 or len(groups) <= max_groups:
+        return groups
+    total = sum(_group_len(g) for g in groups)
+    target = total / max_groups
+    out: list[list[dict]] = []
+    cur: list[dict] = []
+    for i, g in enumerate(groups):
+        cur = cur + g
+        left = len(groups) - i - 1          # 남은 조각 수
+        need = max_groups - len(out) - 1    # 앞으로 더 만들어야 할 묶음 수
+        if len(out) < max_groups - 1 and (_group_len(cur) >= target or left <= need):
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out[:max_groups] if len(out) <= max_groups else out[:max_groups - 1] + [
+        [w for g in out[max_groups - 1:] for w in g]]
+
+
 def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
                        gap_break_us: int = SUB_PAUSE_BREAK_US) -> list[list[dict]]:
     """
@@ -900,6 +998,7 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
     MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
+    MIN_SHOW_US = 300_000    # 한 조각이 최소 이만큼은 떠 있어야 읽힌다 (0.3초)
     # 완성본 자막 기준: 조각 길이 평균 0.93초 / 최대 1.53초, 조각 사이 간격 ~0.03초
 
     stream = build_word_stream(segments)
@@ -928,6 +1027,9 @@ def subtitle_chunks_for_timeline(segments: list[dict],
             total_fixed += fixed
 
         groups = chunk_words_korean(words, max_chars) if words else []
+        # 클립이 짧으면 조각 수를 줄인다 — 0.07초짜리 자막이 우수수 지나가지 않게
+        if groups:
+            groups = limit_groups(groups, max(1, (clip_end - clip_start) // MIN_SHOW_US))
         if not groups:
             # 말이 없거나 전부 걸러진 클립도 자막 클립은 만든다 (클립 길이 그대로)
             if clip_end > clip_start:
@@ -1330,10 +1432,17 @@ MEDIA_PLACE = {"scale": 0.790416, "x_px": 0.0, "y_px": -892.0}
 
 
 def _px_to_norm(x_px: float, y_px: float, canvas: dict) -> tuple[float, float]:
-    """캡컷 위치(픽셀) → draft JSON 정규화 좌표."""
-    half_w = max(canvas.get("width", 1080) / 2, 1)
-    half_h = max(canvas.get("height", 1920) / 2, 1)
-    return x_px / half_w, y_px / half_h
+    """
+    캡컷 위치(픽셀) → draft JSON 정규화 좌표.
+
+    ★ 캡컷은 '화면 전체 크기'를 1.0 으로 잡는다 (화면 절반이 아니라).
+      즉 1080x1920 에서 화면 안쪽이 -0.5 ~ +0.5 이고, y=-892px → -892/1920 = -0.4646.
+      템플릿(손편집본)의 자료화면 y 중앙값이 -0.4775(= -917px)로 여기에 딱 맞는다.
+      예전에는 절반(960)으로 나눠서 두 배로 내려가 화면 밖으로 나갔었다.
+    """
+    w = max(canvas.get("width", 1080), 1)
+    h = max(canvas.get("height", 1920), 1)
+    return x_px / w, y_px / h
 
 # 배경제거 후 적용하는 '발광' 흰색 획 (템플릿에서 추출)
 MATTING_STROKE_RESOURCE_ID = "7172498336719573505"
@@ -2209,6 +2318,10 @@ async def process_video(
                             yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
                     raw_subs = await task
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립별 인식 완료 ({len(raw_subs)}개)'})}\n\n"
+
+                n_uni = unify_latin_words(raw_subs)
+                if n_uni:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'영어 표기 통일 {n_uni}개 (NVIDIA/Nvidia/MVDIIA → 한 가지로)'})}\n\n"
 
                 # ── 같은 말 반복(엔지컷) 중 짧은 테이크 삭제 ──
                 if ng_short > 0:
