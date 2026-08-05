@@ -2491,6 +2491,7 @@ async def process_video(
             # 방 소음 크기가 영상마다 달라서 고정 -40dB로는 무음이 안 잘리는 경우가 많다.
             # 오디오만 뽑아 여러 기준으로 실제 재보고, 말을 토막내기 직전 값을 고른다.
             level_wav = None
+            db_used = noise_db          # 클로저 안에서 바꿀 값은 지역 변수로 복사
             if auto_noise:
                 yield f"data: {json.dumps({'step': 'silence', 'msg': '소리 크기 분석 중... (무음 기준 자동 선택)'})}\n\n"
                 loop0 = asyncio.get_event_loop()
@@ -2501,12 +2502,12 @@ async def process_video(
                         head_trim / 1000.0, tail_trim / 1000.0, min_clip)
                     for ln in lines:
                         yield f"data: {json.dumps({'step': 'silence', 'msg': ln})}\n\n"
-                    noise_db = picked
+                    db_used = picked
                 else:
-                    yield f"data: {json.dumps({'step': 'silence', 'msg': f'⚠ 소리 분석 실패 → 설정값 {noise_db}dB 사용'})}\n\n"
+                    yield f"data: {json.dumps({'step': 'silence', 'msg': f'⚠ 소리 분석 실패 → 설정값 {db_used}dB 사용'})}\n\n"
 
-            yield f"data: {json.dumps({'step': 'silence', 'msg': f'무음 구간 감지 중... ({noise_db}dB / {min_silence}s)'})}\n\n"
-            silences = detect_silence(level_wav or video, noise_db, min_silence,
+            yield f"data: {json.dumps({'step': 'silence', 'msg': f'무음 구간 감지 중... ({db_used}dB / {min_silence}s)'})}\n\n"
+            silences = detect_silence(level_wav or video, db_used, min_silence,
                                       total_duration=duration)
             if level_wav:
                 try:
