@@ -943,6 +943,8 @@ _CONNECTIVE_ENDINGS = (          # 연결어미 — 절이 끝나는 자리라 �
     "도록", "다가", "거나", "든지", "때문에", "덕분에", "위해", "통해",
     "대로", "만큼", "처럼", "같이", "보다", "라서", "느라", "려고", "면은",
 )
+# 그 자체가 한 단어이기도 한 어미들 (짧으면 연결어미로 보지 않는다)
+_STANDALONE_RISK = ("대로", "만큼", "처럼", "같이", "보다")
 _FINAL_ENDINGS = (               # 종결어미 — 문장이 끝나는 자리
     "습니다", "ㅂ니다", "세요", "예요", "이에요", "거든", "잖아", "거야",
     "구나", "네요", "군요", "죠", "요", "다", "야", "해", "지",
@@ -995,6 +997,10 @@ def _break_score(word: str, next_word: str = "") -> int:
         return 0
     if next_word and next_word.strip().rstrip(",.?!") in _BOUND_NOUNS:
         return 0
+    if core.endswith(_STANDALONE_RISK) and len(core) < 5:
+        # "그대로" "이만큼" "이처럼" 처럼 그 자체가 한 단어인 경우 —
+        # 연결어미(-대로/-만큼/-처럼)로 잘못 보고 끊으면 어색하다
+        return 10
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
     if core.endswith(_FINAL_ENDINGS):
@@ -1013,7 +1019,8 @@ def _group_len(ws: list[dict]) -> int:
     return sum(len(x["word"]) for x in ws) + max(0, len(ws) - 1)
 
 
-def _best_break_index(cur: list[dict], soft_min: int, after: str = "") -> int:
+def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
+                      prefer_early: bool = False) -> int:
     """
     cur 안에서 가장 자연스럽게 끊을 수 있는 위치 (동점이면 뒤쪽 우선).
     목표 길이보다 조금 짧은 자리라도 훨씬 자연스러우면 그쪽을 쓴다.
@@ -1028,7 +1035,9 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "") -> int:
         nxt = cur[i + 1]["word"] if i + 1 < len(cur) else after
         sc = _break_score(x["word"], nxt)
         if acc >= soft_min or i == len(cur) - 1:
-            if sc >= late[0]:
+            # prefer_early: 뒤에 붙을 말이 쉼표로 끝나면, 그 말이 앞말과 함께
+            # 한 조각이 되도록 동점일 때 앞쪽에서 끊는다
+            if (sc > late[0]) if prefer_early else (sc >= late[0]):
                 late = (sc, i)
         elif acc >= early_min:
             if sc > early[0]:
@@ -1118,14 +1127,22 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
         # ('확대하면 신나는 / 불장인데' 로 절이 잘리는 것을 막기 위함)
         allow = hard + 2 if sc >= 50 else hard
         if cur and _group_len(cur + [wd]) > allow:
-            i = _best_break_index(cur, soft_min, wd["word"])
+            i = _best_break_index(cur, soft_min, wd["word"], prefer_early=sc >= 80)
             groups.append(cur[:i + 1])
             cur = cur[i + 1:]
 
         cur.append(wd)
         cl = _group_len(cur)
 
+        # 바로 다음 말이 쉼표로 끝나고 같이 담을 자리가 있으면 끊지 않고 붙인다
+        # ("오늘 그 답 주려고 / 왔어, 물타도" → "오늘 그 답 주려고 왔어, / 물타도")
+        if sc < 100 and nxt and _break_score(nxt) >= 80 and \
+                _group_len(cur + [{"word": nxt}]) <= hard + 2:
+            continue
+
         if sc >= 100:                                   # 문장 끝 → 무조건
+            groups.append(cur); cur = []
+        elif cl >= 5 and sc >= 80:                      # 쉼표 → 조금 짧아도 끊는다
             groups.append(cur); cur = []
         elif cl >= soft_min and sc >= 50:               # 어미 → 목표 길이 근처에서
             groups.append(cur); cur = []
