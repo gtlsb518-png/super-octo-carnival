@@ -938,11 +938,36 @@ _FINAL_ENDINGS = (               # 종결어미 — 문장이 끝나는 자리
 )
 _PARTICLES = (                   # 조사 — 명사 뒤라 끊어도 무난
     "에서", "에게", "한테", "으로", "마다", "조차", "밖에", "이랑",
+    "이나", "나마", "이나마", "라도", "이라도", "마저", "치고", "이든", "든",
     "은", "는", "이", "가", "을", "를", "에", "도", "만", "의", "와", "과", "로",
 )
 
 
-def _break_score(word: str) -> int:
+# 앞말에 붙어 다니는 의존명사 — 이 앞에서 끊으면 "하는 / 게" 처럼 어색해진다.
+# ("거래되는" 처럼 우연히 같은 글자로 시작하는 말과 섞이지 않게 통째로 비교한다)
+_BOUND_NOUNS = {
+    "것", "것을", "것이", "것도", "것만", "것과", "것처럼",
+    "거", "거야", "거지", "거든", "거라", "걸", "걸로",
+    "게", "게다", "겁니다", "건", "건데",
+    "수", "수가", "수도", "수는", "수밖에",
+    "때", "때가", "때는", "때도", "때문", "때문에", "때문이야",
+    "중", "중이야", "중이고", "중이다", "중에", "중에서",
+    "뿐", "뿐이야", "뿐만", "데", "데서", "데서나", "데다",
+    "줄", "줄은", "터", "테니깐", "테니까", "셈", "척", "만큼", "동안", "채",
+}
+# 뒷말을 꾸미는 말 — 여기서 끊으면 "전 / 세계" 처럼 한 덩어리가 쪼개진다.
+_NO_END_WORDS = {
+    "전", "제", "약", "총", "각", "매", "첫", "두", "세", "네", "몇", "여러", "온갖",
+    "다", "더", "잘", "못", "안", "왜", "좀", "딱", "꼭", "또", "새", "온", "막",
+    "그", "이", "저", "그런", "이런", "저런", "무슨", "어떤", "어느", "모든", "아무",
+    "같은", "다른", "남은", "좋은", "나쁜", "큰", "작은", "많은", "적은", "높은",
+    "낮은", "빠른", "느린", "새로운", "짧은", "긴", "어린", "젊은", "진짜", "완전",
+}
+# 뒷말을 꾸미는 동사형 어미 — 다음 말이 이걸로 끝나면 그 앞에서 끊는 게 낫다
+_ADNOMINAL_TAILS = ("린", "던", "운", "난", "킨", "친", "된", "한", "인", "는", "울")
+
+
+def _break_score(word: str, next_word: str = "") -> int:
     """이 어절 뒤에서 끊었을 때 얼마나 자연스러운지 (높을수록 좋은 자리)."""
     w = word.strip()
     if not w:
@@ -954,12 +979,21 @@ def _break_score(word: str) -> int:
     core = w.rstrip("\"'”’)]}")
     if not core:
         return 10
+    # 다음 말이 의존명사거나, 이 말이 뒷말을 꾸미는 말이면 끊지 않는다
+    if core in _NO_END_WORDS:
+        return 0
+    if next_word and next_word.strip().rstrip(",.?!") in _BOUND_NOUNS:
+        return 0
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
     if core.endswith(_FINAL_ENDINGS):
         return 50                        # 종결어미
     if core.endswith(_PARTICLES):
         return 30                        # 조사
+    # 다음 말이 뒷말을 꾸미는 형태면("하이닉스 / 물린 사람들") 조금 미룬다
+    nx = next_word.strip().rstrip(",.?!")
+    if len(nx) >= 2 and nx.endswith(_ADNOMINAL_TAILS):
+        return 5
     return 10                            # 그 밖 (관형형 등 — 끊으면 어색)
 
 
@@ -968,17 +1002,52 @@ def _group_len(ws: list[dict]) -> int:
     return sum(len(x["word"]) for x in ws) + max(0, len(ws) - 1)
 
 
-def _best_break_index(cur: list[dict], soft_min: int) -> int:
-    """cur 안에서 가장 자연스럽게 끊을 수 있는 위치 (동점이면 뒤쪽 우선)."""
-    best_i, best_sc, acc = len(cur) - 1, -1, 0
+def _best_break_index(cur: list[dict], soft_min: int, after: str = "") -> int:
+    """
+    cur 안에서 가장 자연스럽게 끊을 수 있는 위치 (동점이면 뒤쪽 우선).
+    목표 길이보다 조금 짧은 자리라도 훨씬 자연스러우면 그쪽을 쓴다.
+      '그래서 오늘 하이닉스 / 물린 사람들' → '그래서 오늘 / 하이닉스 물린 사람들'
+    """
+    late = (-1, len(cur) - 1)            # (점수, 위치)
+    early = (-1, -1)
+    early_min = max(5, soft_min - 1)     # 너무 짧은 조각이 생기지 않는 선까지만 앞당김
+    acc = 0
     for i, x in enumerate(cur):
         acc += len(x["word"]) + (1 if i else 0)
-        if acc < soft_min and i < len(cur) - 1:
-            continue                     # 너무 짧게 잘리지 않도록
-        sc = _break_score(x["word"])
-        if sc >= best_sc:
-            best_sc, best_i = sc, i
-    return best_i
+        nxt = cur[i + 1]["word"] if i + 1 < len(cur) else after
+        sc = _break_score(x["word"], nxt)
+        if acc >= soft_min or i == len(cur) - 1:
+            if sc >= late[0]:
+                late = (sc, i)
+        elif acc >= early_min:
+            if sc > early[0]:
+                early = (sc, i)
+    return early[1] if early[0] > late[0] else late[1]
+
+
+def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
+    """
+    마지막 조각이 "아니야", "1위야" 처럼 혼자 덩그러니 남으면,
+    앞 조각에서 어절 몇 개를 넘겨 두 조각을 고르게 만든다.
+      아무 종목이나 하는 게 / 아니야   →   아무 종목이나 / 하는 게 아니야
+    """
+    if len(groups) < 2:
+        return groups
+    prev, last = groups[-2], groups[-1]
+    if _group_len(last) > 4 or len(prev) < 2:
+        return groups
+    best = None
+    for k in range(1, len(prev)):
+        new_prev, new_last = prev[:-k], prev[-k:] + last
+        if _group_len(new_prev) < 3 or _group_len(new_last) > hard:
+            break
+        sc = _break_score(new_prev[-1]["word"], new_last[0]["word"])
+        balance = -abs(_group_len(new_prev) - _group_len(new_last))
+        if best is None or (sc, balance) > (best[2], best[3]):
+            best = (new_prev, new_last, sc, balance)
+    if best:
+        groups[-2], groups[-1] = best[0], best[1]
+    return groups
 
 
 def limit_groups(groups: list[list[dict]], max_groups: int) -> list[list[dict]]:
@@ -1025,19 +1094,20 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     groups: list[list[dict]] = []
     cur: list[dict] = []
 
-    for wd in words:
+    for wi, wd in enumerate(words):
+        nxt = words[wi + 1]["word"] if wi + 1 < len(words) else ""
         # 말 사이 쉼이 길면 먼저 끊기
         if cur and "tl_start" in wd and "tl_end" in cur[-1]:
             if wd["tl_start"] - cur[-1]["tl_end"] >= gap_break_us:
                 groups.append(cur)
                 cur = []
 
-        sc = _break_score(wd["word"])
+        sc = _break_score(wd["word"], nxt)
         # 어미로 끝나는 어절이면 상한을 조금 넘겨도 붙인다
         # ('확대하면 신나는 / 불장인데' 로 절이 잘리는 것을 막기 위함)
         allow = hard + 2 if sc >= 50 else hard
         if cur and _group_len(cur + [wd]) > allow:
-            i = _best_break_index(cur, soft_min)
+            i = _best_break_index(cur, soft_min, wd["word"])
             groups.append(cur[:i + 1])
             cur = cur[i + 1:]
 
@@ -1048,8 +1118,10 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
             groups.append(cur); cur = []
         elif cl >= soft_min and sc >= 50:               # 어미 → 목표 길이 근처에서
             groups.append(cur); cur = []
-        elif cl >= max_chars:                           # 목표 길이를 넘으면
+        elif cl >= max_chars and sc >= 30:              # 조사 등 무난한 자리에서만
             groups.append(cur); cur = []
+        # 끊기 나쁜 자리(관형형·꾸미는 말·의존명사 앞)면 상한까지 더 붙였다가
+        # 위의 _best_break_index 로 되돌아가 좋은 자리에서 끊는다
 
     if cur:
         cl = _group_len(cur)
@@ -1057,12 +1129,13 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
             prev = groups[-1]
             # 시간 간격이 크지 않을 때만 꼬리 합침
             close = "tl_start" not in cur[0] or (cur[0]["tl_start"] - prev[-1].get("tl_end", cur[0]["tl_start"]) < gap_break_us)
-            if _group_len(prev) + 1 + cl <= hard and close:
+            # 짧은 꼬리("아니야", "1위야")가 혼자 남지 않도록 상한을 조금 넘겨도 합친다
+            if _group_len(prev) + 1 + cl <= hard + 2 and close:
                 groups[-1] = prev + cur
                 cur = []
         if cur:
             groups.append(cur)
-    return groups
+    return _rebalance_tail(groups, hard + 2)
 
 
 def subtitle_chunks_for_timeline(segments: list[dict],
