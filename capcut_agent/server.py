@@ -324,7 +324,8 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
                            번호는 '빼기 전' 목록 기준이고, 빼고 나면 타임라인은
                            빈틈 없이 다시 이어붙인다.
     """
-    floor_sec = max(min_clip_sec, 0.1)   # 0.1초 미만 클립은 어차피 못 쓴다
+    # 0.2초(6프레임) 미만 클립은 편집에도 못 쓰고 자막도 "..." 만 붙어서 지저분하다
+    floor_sec = max(min_clip_sec, 0.2)
 
     # 1) 무음을 뺀 원래 keep 구간
     raw: list[tuple[float, float]] = []
@@ -551,6 +552,30 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
 
 MAX_CHARS_PER_SEC = 14.0    # 한국어 빠른 말이 초당 6~7자. 그 두 배를 넘으면 환각으로 본다
 
+# Whisper가 조용한 구간에 습관적으로 넣는 유튜브 상투 문구 (실제로 말한 적 없음)
+HALLUCINATION_LINES = [
+    "시청해주셔서감사합니다", "시청해주셔서", "시청해주셔서고맙습니다",
+    "끝까지시청해주셔서감사합니다", "지금까지시청해주셔서감사합니다",
+    "봐주셔서감사합니다", "영상시청해주셔서감사합니다", "오늘도시청해주셔서감사합니다",
+    "구독과좋아요", "구독좋아요부탁드립니다", "구독과좋아요부탁드립니다",
+    "다음영상에서만나요", "다음시간에만나요", "다음영상에서뵙겠습니다",
+    "한글자막by", "자막제공", "이덕이", "MBC뉴스",
+]
+_SHORT_ONLY_LINES = {"감사합니다", "고맙습니다", "안녕하세요", "네", "아멘"}
+
+
+def is_hallucinated_line(text: str, clip_sec: float) -> bool:
+    """클립 전체가 Whisper 상투 문구면 실제 발화가 아니라고 본다."""
+    n = re.sub(r"[^0-9A-Za-z가-힣]", "", text)
+    if len(n) < 2:
+        return False
+    for p in HALLUCINATION_LINES:
+        if n == p:
+            return True
+        if len(n) >= 5 and (n.startswith(p) or p.startswith(n)):
+            return True
+    return clip_sec < 1.0 and n in _SHORT_ONLY_LINES
+
 
 def cap_by_speech_rate(words: list[dict], clip_sec: float) -> list[dict]:
     """
@@ -585,6 +610,7 @@ def transcribe_all_clips(video_path: Path,
     """
     segs = []
     total = len(keep_ranges)
+    n_halluc = 0
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
     for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
@@ -603,6 +629,9 @@ def transcribe_all_clips(video_path: Path,
                         "word": piece,
                     })
         words = cap_by_speech_rate(words, ke - ks)
+        if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
+            words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
+            n_halluc += 1
         if words:
             text = " ".join(w["word"] for w in words)
         else:
@@ -611,6 +640,7 @@ def transcribe_all_clips(video_path: Path,
         if progress is not None:
             progress["done"] = i + 1
             progress["total"] = total
+            progress["halluc"] = n_halluc
     return segs
 
 
@@ -731,12 +761,17 @@ def align_clip_to_script(words: list[dict], script_words: list[str], script_norm
 
 # 자막에 허용할 문자: 한글(음절+자모)/영문/숫자/공백/기본 문장부호(. , ? ! % -)
 # 그 외(이모지, ♪·♫ 같은 음악기호, 화살표 등 특수문자)는 전부 제거한다.
-_SUBTITLE_DROP_RE = re.compile(r"[^가-힣ㄱ-ㅣa-zA-Z0-9\s,.?!%\-]")
+_SUBTITLE_DROP_RE = re.compile(r"[^가-힣ㄱ-ㅣa-zA-Z0-9\s,.?!%\-+]")
+
+
+# 같은 글자가 3번 이상 이어지는 인식 오류 ("오를때에에에" → "오를때에")
+_REPEAT_CHAR_RE = re.compile(r"([가-힣])\1{2,}")
 
 
 def sanitize_word(word: str) -> str:
     """한 단어에서 이모지·특수문자 제거 (자막에 이상한 기호가 들어가지 않게)."""
     word = _SUBTITLE_DROP_RE.sub("", word)
+    word = _REPEAT_CHAR_RE.sub(r"\1", word)
     return word.strip()
 
 
@@ -754,6 +789,7 @@ def strip_periods(text: str) -> str:
     if text == NO_SPEECH_PLACEHOLDER:
         return text
     out = _PERIOD_RE.sub("", text)
+    out = re.sub(r",(?=\S)", ", ", out)          # "두고,새" → "두고, 새"
     out = re.sub(r"\s{2,}", " ", out).strip()
     # 자막 끝에 남는 쉼표는 지운다 ("돈 넣은 건," → "돈 넣은 건")
     return out.rstrip(",").strip()
@@ -1094,9 +1130,18 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         # 자막바가 중간에 사라지지 않도록 클립 전체를 빈틈없이 덮는다.
         # 조각이 바뀌는 '경계'만 실제 발화 시각을 따라가고,
         # 첫 조각은 클립 시작, 마지막 조각은 클립 끝까지 이어진다.
+        # 조각 경계는 실제 발화 시각을 따라가되, 각 조각이 최소 MIN_SHOW_US 는
+        # 떠 있도록 앞뒤로 밀어준다 (클립에 자리가 있을 때만).
+        n_g = len(groups)
         bounds = [clip_start]
-        for g in groups[1:]:
-            b = min(max(g[0]["tl_start"], bounds[-1] + MIN_DUR_US), clip_end)
+        for i, g in enumerate(groups[1:], start=1):
+            lo = bounds[-1] + MIN_SHOW_US
+            hi = clip_end - (n_g - i) * MIN_SHOW_US
+            b = g[0]["tl_start"]
+            if lo <= hi:
+                b = min(max(b, lo), hi)
+            else:                       # 자리가 빠듯하면 최소 2프레임만 확보
+                b = min(max(b, bounds[-1] + MIN_DUR_US), clip_end)
             bounds.append(b)
         bounds.append(clip_end)
 
@@ -2454,6 +2499,10 @@ async def process_video(
                             yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
                     raw_subs = await task
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립별 인식 완료 ({len(raw_subs)}개)'})}\n\n"
+                n_halluc = prog.get("halluc", 0)
+                if n_halluc:
+                    msg_h = f"상투 문구 환각 제거 {n_halluc}개 (시청해주셔서 감사합니다 등)"
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': msg_h})}\n\n"
 
                 n_uni = unify_latin_words(raw_subs)
                 if n_uni:
