@@ -208,6 +208,7 @@ def now_us() -> int:
     return int(time.time() * 1_000_000)
 
 FPS = 30.0
+FRAME_US = int(round(1_000_000 / FPS))   # 한 프레임 길이(us)
 
 # 자막 한 조각의 목표 글자 수 (기본값, UI에서 조절 가능).
 # 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
@@ -220,6 +221,16 @@ def snap_to_frame(sec: float) -> float:
     """초 단위 시간을 가장 가까운 프레임 경계로 스냅 (30fps 기준)"""
     frame = round(sec * FPS)
     return frame / FPS
+
+
+def snap_us_to_frame(us: int) -> int:
+    """
+    마이크로초 시각을 가장 가까운 프레임 경계로 스냅 (30fps).
+    영상 클립 경계는 이미 프레임 단위인데 자막 조각 경계는 단어 발화 시각
+    그대로라 프레임 중간에 떨어진다. 캡컷에서 자막이 한 프레임씩 어긋나
+    보이는 것을 막기 위해 자막도 같은 격자에 올린다.
+    """
+    return int(round(round(us * FPS / 1_000_000) * 1_000_000 / FPS))
 
 
 # ══════════════════════════════════════════════════════════
@@ -1215,6 +1226,9 @@ def subtitle_chunks_for_timeline(segments: list[dict],
                 b = min(max(b, lo), hi)
             else:                       # 자리가 빠듯하면 최소 2프레임만 확보
                 b = min(max(b, bounds[-1] + MIN_DUR_US), clip_end)
+            # 영상 클립과 같은 프레임 격자에 올린다 (한 프레임도 어긋나지 않게)
+            b = snap_us_to_frame(b)
+            b = min(max(b, bounds[-1] + FRAME_US), clip_end)
             bounds.append(b)
         bounds.append(clip_end)
 
