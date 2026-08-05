@@ -247,6 +247,59 @@ def detect_silence(video_path: Path, noise_db: float = -40.0, min_silence_sec: f
             result_list.append({"start": s_snap, "end": e_snap, "duration": round(e_snap - s_snap, 4)})
     return result_list
 
+def extract_audio_wav(video_path: Path) -> Path | None:
+    """무음 분석용으로 오디오만 작은 wav로 뽑는다 (여러 번 검사해도 빠르게)."""
+    import tempfile
+    out = Path(tempfile.gettempdir()) / f"_capcut_lvl_{uuid.uuid4().hex}.wav"
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path),
+           "-vn", "-ac", "1", "-ar", "16000", str(out)]
+    try:
+        subprocess.run(cmd, capture_output=True)
+    except Exception:
+        return None
+    return out if out.exists() and out.stat().st_size > 1000 else None
+
+
+AUTO_DB_CANDIDATES = [-45.0, -40.0, -35.0, -32.0, -30.0, -27.0, -25.0, -22.0]
+
+
+def auto_noise_db(audio_path: Path, min_silence_sec: float, total_duration: float,
+                  head_trim: float = 0.0, tail_trim: float = 0.0,
+                  min_clip_sec: float = 0.0) -> tuple[float, list[str]]:
+    """
+    무음 기준(dB)을 영상마다 자동으로 고른다.
+
+    녹음 환경마다 방 소음 크기가 달라서 -40dB 가 어떤 영상에서는 딱 맞고 어떤
+    영상에서는 숨소리·에어컨 소리까지 '말'로 쳐서 무음이 하나도 안 잘린다.
+    그래서 여러 기준으로 실제로 재보고, 말을 자르기 시작하기 직전의 가장 센 값을 쓴다.
+
+    판단 기준:
+      - 잘라낸 비율이 늘어나는 쪽이 좋다 (무음이 실제로 없어짐)
+      - 단, 0.4초 미만 조각이 25%를 넘으면 말을 토막내기 시작한 것 → 탈락
+      - 전체의 75% 넘게 잘라내는 것도 과함 → 탈락
+    반환: (고른 dB, 사람이 읽을 수 있는 검사 결과 줄들)
+    """
+    best, report = None, []
+    for db in AUTO_DB_CANDIDATES:
+        sil = detect_silence(audio_path, db, min_silence_sec, total_duration)
+        keeps = compute_keep_ranges(sil, total_duration, head_trim, tail_trim, min_clip_sec)
+        if not keeps:
+            report.append(f"  {db:>5.0f}dB → 남는 클립 없음")
+            continue
+        kept = sum(e - s for _a, _b, s, e in keeps) / 1e6
+        removed = 1 - kept / total_duration if total_duration else 0
+        tiny = sum(1 for _a, _b, s, e in keeps if e - s < 400_000) / len(keeps)
+        ok = tiny <= 0.25 and removed <= 0.75
+        report.append(f"  {db:>5.0f}dB → 무음 제거 {removed*100:4.1f}% / "
+                      f"클립 {len(keeps):3d}개 / 짧은 조각 {tiny*100:4.1f}% {'✓' if ok else '✗'}")
+        if ok and (best is None or removed > best[1]):
+            best = (db, removed)
+    if best is None:
+        return -40.0, report + ["  → 판단 실패, 기본값 -40dB 사용"]
+    report.append(f"  → 선택: {best[0]:.0f}dB (무음 {best[1]*100:.1f}% 제거)")
+    return best[0], report
+
+
 def get_video_duration(video_path: Path) -> float:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video_path)]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -2272,6 +2325,7 @@ async def process_video(
     tail_trim: float = 0.0,      # 클립 뒤를 더 깎는 양 (ms)
     min_clip: float = 0.0,       # 이보다 짧은 클립은 버림 (초, 0이면 끄기)
     ng_short: float = 0.0,       # 같은 말 반복 중 이보다 짧은 테이크 삭제 (초, 0이면 끄기)
+    auto_noise: bool = True,     # 무음 기준(dB)을 영상에 맞춰 자동으로 고름
     use_subtitle: bool = False,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
@@ -2315,8 +2369,32 @@ async def process_video(
             yield f"data: {json.dumps({'step': 'probe', 'msg': '영상 정보 분석 중...'})}\n\n"
             duration = get_video_duration(video)
 
+            # ── 무음 기준(dB) 자동 선택 ──────────────────────
+            # 방 소음 크기가 영상마다 달라서 고정 -40dB로는 무음이 안 잘리는 경우가 많다.
+            # 오디오만 뽑아 여러 기준으로 실제 재보고, 말을 토막내기 직전 값을 고른다.
+            level_wav = None
+            if auto_noise:
+                yield f"data: {json.dumps({'step': 'silence', 'msg': '소리 크기 분석 중... (무음 기준 자동 선택)'})}\n\n"
+                loop0 = asyncio.get_event_loop()
+                level_wav = await loop0.run_in_executor(None, extract_audio_wav, video)
+                if level_wav:
+                    picked, lines = await loop0.run_in_executor(
+                        None, auto_noise_db, level_wav, min_silence, duration,
+                        head_trim / 1000.0, tail_trim / 1000.0, min_clip)
+                    for ln in lines:
+                        yield f"data: {json.dumps({'step': 'silence', 'msg': ln})}\n\n"
+                    noise_db = picked
+                else:
+                    yield f"data: {json.dumps({'step': 'silence', 'msg': f'⚠ 소리 분석 실패 → 설정값 {noise_db}dB 사용'})}\n\n"
+
             yield f"data: {json.dumps({'step': 'silence', 'msg': f'무음 구간 감지 중... ({noise_db}dB / {min_silence}s)'})}\n\n"
-            silences = detect_silence(video, noise_db, min_silence, total_duration=duration)
+            silences = detect_silence(level_wav or video, noise_db, min_silence,
+                                      total_duration=duration)
+            if level_wav:
+                try:
+                    level_wav.unlink()
+                except OSError:
+                    pass
             yield f"data: {json.dumps({'step': 'silence_done', 'msg': f'무음 구간 {len(silences)}개 발견', 'silences': silences})}\n\n"
 
             keep_ranges = compute_keep_ranges(silences, duration,
@@ -2326,6 +2404,16 @@ async def process_video(
                 tight.append(f"앞 여유 {-head_trim:+.0f}ms / 뒤 여유 {-tail_trim:+.0f}ms")
             if min_clip:
                 tight.append(f"{min_clip}초 미만 클립 제외")
+                n_all = len(compute_keep_ranges(silences, duration,
+                                                head_trim / 1000.0, tail_trim / 1000.0, 0.0))
+                n_cut = n_all - len(keep_ranges)
+                if n_cut > 0:
+                    tight.append(f"이 옵션으로 {n_cut}개 삭제됨")
+                if n_all and n_cut / n_all > 0.3:
+                    warn = (f'⚠ 클립의 {n_cut/n_all*100:.0f}%가 짧다고 삭제됐습니다. '
+                            f'말이 통째로 빠질 수 있으니 “짧은 클립 버리기”를 끄거나 '
+                            f'최소 무음 길이를 올려보세요.')
+                    yield f"data: {json.dumps({'step': 'silence', 'msg': warn})}\n\n"
             if tight:
                 yield f"data: {json.dumps({'step': 'silence', 'msg': '컷 조정: ' + ', '.join(tight)})}\n\n"
             yield f"data: {json.dumps({'step': 'silence', 'msg': f'컷 클립 {len(keep_ranges)}개'})}\n\n"

@@ -292,10 +292,17 @@
     <div class="settings-grid">
       <div class="setting-item">
         <label>
-          노이즈 임계값
-          <span id="db-val">-40 dB</span>
+          <span style="display:flex; align-items:center; gap:6px;">노이즈 임계값
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer; color:var(--accent); font-size:11px;">
+              <input type="checkbox" id="auto-noise" checked style="accent-color:var(--accent);"
+                     onchange="document.getElementById('noise-db').disabled = this.checked;
+                               document.getElementById('db-val').textContent = this.checked ? '자동' : document.getElementById('noise-db').value + ' dB';" />
+              자동
+            </label>
+          </span>
+          <span id="db-val">자동</span>
         </label>
-        <input type="range" id="noise-db" min="-60" max="-20" value="-40" step="1"
+        <input type="range" id="noise-db" min="-60" max="-20" value="-40" step="1" disabled
                oninput="document.getElementById('db-val').textContent = this.value + ' dB'" />
       </div>
       <div class="setting-item">
@@ -333,6 +340,7 @@
                       color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초 미만
       </label>
       <div style="font-size:11px; color:var(--dim); margin-top:8px; line-height:1.6;">
+        ※ 노이즈 임계값 "자동"이면 영상마다 방 소음을 재서 알맞은 값을 고릅니다.<br />
         ※ 기본값은 타이트하게 자르는 쪽(앞 -80ms / 뒤 -120ms)입니다.<br />
         ※ 말이 씹히면 "앞 여유"를 0 → +100ms 쪽으로 올리세요.<br />
         ※ 엔지컷을 남겨서 직접 고르실 거면 "짧은 클립 버리기"는 꺼두세요.
@@ -648,6 +656,7 @@
     document.getElementById('status-text').textContent = '처리 중...';
     setProgress('upload');
 
+    const autoNoise = document.getElementById('auto-noise').checked;
     const noiseDb = document.getElementById('noise-db').value;
     const minSil  = document.getElementById('min-silence').value;
     const useSub  = document.getElementById('use-subtitle').checked ? 'true' : 'false';
@@ -666,7 +675,7 @@
                     ? document.getElementById('ng-short').value : 0;
 
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}&ng_short=${ngShort}`);
+    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}&ng_short=${ngShort}&auto_noise=${autoNoise}`);
 
     xhr.setRequestHeader('Content-Type', 'application/json');
 
