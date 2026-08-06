@@ -943,6 +943,12 @@ _CONNECTIVE_ENDINGS = (          # 연결어미 — 절이 끝나는 자리라 �
     "도록", "다가", "거나", "든지", "때문에", "덕분에", "위해", "통해",
     "대로", "만큼", "처럼", "같이", "보다", "라서", "느라", "려고", "면은",
 )
+# 절(節)의 끝을 알리는 말 — "~할 때 / ~한 뒤 / ~한 다음" 뒤에서 끊으면 자연스럽다.
+# (앞에서 끊으면 안 되는 의존명사이기도 해서 _BOUND_NOUNS 와 짝을 이룬다:
+#  "흔들릴 / 때" 는 막고, "흔들릴 때 / 같이" 는 권한다)
+_CLAUSE_TAILS = ("때", "때는", "때가", "때도", "때면", "뒤", "뒤에", "후", "후에",
+                 "다음", "다음에", "동안", "순간", "순간에", "무렵", "이후", "이전")
+
 # 그 자체가 한 단어이기도 한 어미들 (짧으면 연결어미로 보지 않는다)
 _STANDALONE_RISK = ("대로", "만큼", "처럼", "같이", "보다")
 _FINAL_ENDINGS = (               # 종결어미 — 문장이 끝나는 자리
@@ -980,6 +986,12 @@ _NO_END_WORDS = {
 _ADNOMINAL_TAILS = ("린", "던", "운", "난", "킨", "친", "된", "한", "인", "는", "울")
 
 
+def _is_clause_tail(word: str) -> bool:
+    """"~할 때 / ~한 뒤 / ~한 다음" 처럼 절이 끝나는 말인지."""
+    core = word.strip().rstrip("\"'”’)]}").rstrip(",.?!")
+    return core in _CLAUSE_TAILS or (len(core) > 1 and core.endswith(_CLAUSE_TAILS))
+
+
 def _break_score(word: str, next_word: str = "") -> int:
     """이 어절 뒤에서 끊었을 때 얼마나 자연스러운지 (높을수록 좋은 자리)."""
     w = word.strip()
@@ -1001,6 +1013,10 @@ def _break_score(word: str, next_word: str = "") -> int:
         # "그대로" "이만큼" "이처럼" 처럼 그 자체가 한 단어인 경우 —
         # 연결어미(-대로/-만큼/-처럼)로 잘못 보고 끊으면 어색하다
         return 10
+    if core in _BOUND_NOUNS:
+        return 50                        # "있는 게" 처럼 덩어리가 완성된 자리
+    if core in _CLAUSE_TAILS or (len(core) > 1 and core.endswith(_CLAUSE_TAILS)):
+        return 55                        # "~할 때 / ~한 뒤 / ~한 다음" → 절이 끝나는 자리
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
     if core.endswith(_FINAL_ENDINGS):
@@ -1056,6 +1072,8 @@ def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
     prev, last = groups[-2], groups[-1]
     if _group_len(last) > 4 or len(prev) < 2:
         return groups
+    if _ends_clause(last[-1]["word"]):
+        return groups                    # 꼬리가 그 자체로 한 문장이면(오케이?) 그대로 둔다
     best = None
     for k in range(1, len(prev)):
         new_prev, new_last = prev[:-k], prev[-k:] + last
@@ -1136,12 +1154,17 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
 
         # 바로 다음 말이 쉼표로 끝나고 같이 담을 자리가 있으면 끊지 않고 붙인다
         # ("오늘 그 답 주려고 / 왔어, 물타도" → "오늘 그 답 주려고 왔어, / 물타도")
-        if sc < 100 and nxt and _break_score(nxt) >= 80 and \
+        nxt_sc = _break_score(nxt) if nxt else 0
+        if sc < 100 and 80 <= nxt_sc < 100 and \
                 _group_len(cur + [{"word": nxt}]) <= hard + 2:
-            continue
+            continue                    # 다음이 쉼표 → 같이 담는다 (문장 끝은 제외)
 
         if sc >= 100:                                   # 문장 끝 → 무조건
             groups.append(cur); cur = []
+        elif cl >= 5 and sc >= 50 and nxt_sc >= 100:
+            groups.append(cur); cur = []                # 다음이 한 문장 → 먼저 끊기
+        elif cl >= 5 and sc >= 50 and _is_clause_tail(wd["word"]):
+            groups.append(cur); cur = []                # "~할 때" 뒤 → 절이 끝나는 자리
         elif cl >= 5 and sc >= 80:                      # 쉼표 → 조금 짧아도 끊는다
             groups.append(cur); cur = []
         elif cl >= soft_min and sc >= 50:               # 어미 → 목표 길이 근처에서
