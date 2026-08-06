@@ -1358,6 +1358,13 @@ def subtitle_chunks_for_timeline(segments: list[dict],
                 b = min(max(b, lo), hi)
             else:                       # 자리가 빠듯하면 최소 2프레임만 확보
                 b = min(max(b, bounds[-1] + MIN_DUR_US), clip_end)
+            # ★ 길게 끄는 말("올랐는데~~~")이 잘리지 않게:
+            #   앞 조각은 자기 마지막 말이 끝나기 전에는 절대 안 끊는다.
+            #   (Whisper는 길게 끈 말의 끝과 다음 말의 시작을 겹쳐서 주는 일이 잦다)
+            prev_end = groups[i - 1][-1].get("tl_end")
+            if prev_end:
+                room = clip_end - (n_g - i) * MIN_DUR_US
+                b = min(max(b, prev_end), max(room, bounds[-1] + MIN_DUR_US))
             # 영상 클립과 같은 프레임 격자에 올린다 (한 프레임도 어긋나지 않게)
             b = snap_us_to_frame(b)
             b = min(max(b, bounds[-1] + FRAME_US), clip_end)
