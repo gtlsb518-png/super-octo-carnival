@@ -573,6 +573,9 @@ HALLUCINATION_LINES = [
     "한글자막by", "자막제공", "이덕이", "MBC뉴스",
 ]
 _SHORT_ONLY_LINES = {"감사합니다", "고맙습니다", "안녕하세요", "네", "아멘"}
+# 클립 전체가 아니라 일부만 겹쳐도 환각으로 보는 마무리 인사
+_HALLUC_CONTAINS = ("다음영상에서", "다음시간에", "시청해주셔서", "구독과좋아요",
+                    "구독좋아요", "봐주셔서감사", "영상에서만나")
 
 
 def is_hallucinated_line(text: str, clip_sec: float) -> bool:
@@ -580,12 +583,32 @@ def is_hallucinated_line(text: str, clip_sec: float) -> bool:
     n = re.sub(r"[^0-9A-Za-z가-힣]", "", text)
     if len(n) < 2:
         return False
+    if any(p in n for p in _HALLUC_CONTAINS):
+        return True
     for p in HALLUCINATION_LINES:
         if n == p:
             return True
         if len(n) >= 5 and (n.startswith(p) or p.startswith(n)):
             return True
     return clip_sec < 1.0 and n in _SHORT_ONLY_LINES
+
+
+def collapse_repeats(words: list[dict]) -> list[dict]:
+    """같은 어절이 3번 이상 이어지면 한 번만 남긴다 ("오늘 오늘 오늘" → "오늘")."""
+    out: list[dict] = []
+    i = 0
+    while i < len(words):
+        j = i
+        while j + 1 < len(words) and words[j + 1]["word"] == words[i]["word"]:
+            j += 1
+        if j - i + 1 >= 3:                 # 3번 이상 이어지면 하나로
+            merged = dict(words[i])
+            merged["end"] = words[j].get("end", merged.get("end"))
+            out.append(merged)
+        else:
+            out.extend(words[i:j + 1])
+        i = j + 1
+    return out
 
 
 def cap_by_speech_rate(words: list[dict], clip_sec: float) -> list[dict]:
@@ -639,7 +662,7 @@ def transcribe_all_clips(video_path: Path,
                         "end": min(max(w["end"], ks), ke),
                         "word": piece,
                     })
-        words = cap_by_speech_rate(words, ke - ks)
+        words = cap_by_speech_rate(collapse_repeats(words), ke - ks)
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
             words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
             n_halluc += 1
@@ -758,9 +781,10 @@ def align_clip_to_script(words: list[dict], script_words: list[str], script_norm
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             for k in range(i2 - i1):
-                if words[i1 + k]["word"] != win_words[j1 + k]:
+                sw = sanitize_word(win_words[j1 + k]) or words[i1 + k]["word"]
+                if words[i1 + k]["word"] != sw:
                     fixed += 1
-                out.append({**words[i1 + k], "word": win_words[j1 + k]})
+                out.append({**words[i1 + k], "word": sw})
         elif tag == "replace":
             out.extend(_retime_words(words[i1:i2], win_words[j1:j2]))
             fixed += (i2 - i1)
@@ -779,11 +803,29 @@ _SUBTITLE_DROP_RE = re.compile(r"[^가-힣ㄱ-ㅣa-zA-Z0-9\s,.?!%\-+]")
 _REPEAT_CHAR_RE = re.compile(r"([가-힣])\1{2,}")
 
 
+def _is_gibberish(word: str) -> bool:
+    """
+    Whisper가 잡음에 뱉는 알아볼 수 없는 덩어리인지.
+      "쎈쎼쎽쎵쎶쎱쎡쎴쎰쎬쎩쎸쎠쎹..." 같은 것 (한 어절이 지나치게 길거나
+      된소리(ㄲㄸㅃㅆㅉ)로 시작하는 글자만 잔뜩 이어진 경우)
+    """
+    han = [c for c in word if "가" <= c <= "힣"]
+    if len(han) >= 12:
+        return True
+    if len(han) >= 6:
+        # 한글 음절 코드에서 초성 인덱스: 1=ㄲ 4=ㄸ 8=ㅃ 10=ㅆ 13=ㅉ
+        tense = sum(1 for c in han if (ord(c) - 0xAC00) // 588 in (1, 4, 8, 10, 13))
+        if tense / len(han) >= 0.6:
+            return True
+    return False
+
+
 def sanitize_word(word: str) -> str:
     """한 단어에서 이모지·특수문자 제거 (자막에 이상한 기호가 들어가지 않게)."""
     word = _SUBTITLE_DROP_RE.sub("", word)
     word = _REPEAT_CHAR_RE.sub(r"\1", word)
-    return word.strip()
+    word = word.strip()
+    return "" if _is_gibberish(word) else word
 
 
 # 마침표 제거용: 숫자와 숫자 사이(소수점 3.7%)가 아닌 점만 지운다
