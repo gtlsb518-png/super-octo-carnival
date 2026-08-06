@@ -467,6 +467,8 @@ _LATIN_KEEP = {
     "etf", "ai", "it", "tv", "pc", "cpu", "gpu", "ceo", "gdp", "hbm", "ssd", "ram",
     "gs", "sk", "lg", "kb", "us", "usa", "ok", "no", "yes", "on", "off", "up",
     "iphone", "youtube", "google", "apple", "tesla", "nvidia", "chatgpt", "openai",
+    "lng", "lpg", "kospi", "kosdaq", "sds", "sdi", "skt", "kt", "cj", "gm", "ev",
+    "tsmc", "asml", "amd", "intel", "micron", "meta", "amazon", "microsoft", "sci",
 }
 
 
@@ -593,6 +595,52 @@ def is_hallucinated_line(text: str, clip_sec: float) -> bool:
     return clip_sec < 1.0 and n in _SHORT_ONLY_LINES
 
 
+def _is_syllable_soup(words: list[dict]) -> bool:
+    """
+    "멘 탈 흔" 처럼 한 글자씩 흩어져 나온 인식인지.
+    말이 잘린 자리에서 Whisper가 음절만 토해낸 경우라 자막으로 쓸 수 없다.
+    """
+    if len(words) < 3:
+        return False
+    ones = sum(1 for w in words if len(re.sub(r"[^가-힣]", "", w["word"])) == 1)
+    return ones / len(words) >= 0.7
+
+
+def drop_rare_latin(segments: list[dict], script_tokens: set[str] | None = None) -> int:
+    """
+    영상에서 딱 한 번만 나온 영문 덩어리는 지운다 ("QUES" 같은 환각).
+    - 3글자 이하(AI, GS, LNG)나 알려진 표기, 대본에 있는 말은 그대로 둔다
+    - 두 번 이상 나온 말은 실제로 쓴 표기로 보고 남긴다
+    반환: 지운 개수
+    """
+    from collections import Counter
+    script_tokens = script_tokens or set()
+    freq = Counter()
+    for seg in segments:
+        for w in seg.get("words") or []:
+            for tok in re.findall(r"[A-Za-z]{2,}", w["word"]):
+                freq[tok] += 1
+    drop = {t for t, n in freq.items()
+            if n == 1 and len(t) >= 4
+            and t.lower() not in _LATIN_KEEP and t.lower() not in script_tokens}
+    if not drop:
+        return 0
+    n_drop = 0
+    for seg in segments:
+        ws = []
+        for w in seg.get("words") or []:
+            new = re.sub(r"[A-Za-z]{2,}", lambda m: "" if m.group(0) in drop else m.group(0),
+                         w["word"]).strip()
+            if not new:
+                n_drop += 1
+                continue
+            ws.append({**w, "word": new})
+        if seg.get("words"):
+            seg["words"] = ws
+            seg["text"] = " ".join(x["word"] for x in ws) or NO_SPEECH_PLACEHOLDER
+    return n_drop
+
+
 def collapse_repeats(words: list[dict]) -> list[dict]:
     """같은 어절이 3번 이상 이어지면 한 번만 남긴다 ("오늘 오늘 오늘" → "오늘")."""
     out: list[dict] = []
@@ -663,6 +711,8 @@ def transcribe_all_clips(video_path: Path,
                         "word": piece,
                     })
         words = cap_by_speech_rate(collapse_repeats(words), ke - ks)
+        if _is_syllable_soup(words):
+            words = []                  # "멘 탈 흔" → 말로 치지 않음
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
             words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
             n_halluc += 1
@@ -2674,6 +2724,10 @@ async def process_video(
                     msg_h = f"상투 문구 환각 제거 {n_halluc}개 (시청해주셔서 감사합니다 등)"
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg_h})}\n\n"
 
+                n_rare = drop_rare_latin(raw_subs, {w.lower() for w in script_text.split()})
+                if n_rare:
+                    msg_r = f"한 번만 나온 영문 환각 제거 {n_rare}개 (QUES 등)"
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': msg_r})}\n\n"
                 n_uni = unify_latin_words(raw_subs)
                 if n_uni:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'영어 표기 통일 {n_uni}개 (NVIDIA/Nvidia/MVDIIA → 한 가지로)'})}\n\n"
