@@ -445,12 +445,14 @@
       <br />영상 파일의 배경제거는 캡컷에서 직접 켜주세요.
     </div>
     <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
-      <button class="btn btn-ghost" onclick="buildSequenceOnly()">🎬 선택 파일로만 새 프로젝트</button>
-      <span style="font-size:11px; color:var(--muted);">다운로드(저장) 시간 순으로 자동 정렬됩니다</span>
+      <button class="btn btn-ghost" onclick="buildSequenceOnly()">🎬 자료 파일만으로 새 프로젝트</button>
+      <span style="font-size:11px; color:var(--muted);">영상 없이 자료만 — 배경제거·효과·제목·날짜 그대로 적용</span>
     </div>
     <p style="margin-top:8px; font-size:11px; color:var(--muted);">
-      💡 위에서 <strong style="color:var(--text);">▶ draft 생성</strong>을 누르면 컷편집 영상 <strong style="color:var(--text);">뒤에 이어붙습니다</strong>(통합).
-      선택한 파일들만으로 만들려면 <strong style="color:var(--text);">🎬 선택 파일로만 새 프로젝트</strong>를 누르세요(별도).
+      💡 위에서 <strong style="color:var(--text);">▶ draft 생성</strong>을 누르면 컷편집 영상 <strong style="color:var(--text);">뒤에 이어붙습니다</strong>(통합).<br />
+      영상 없이 <strong style="color:var(--text);">자료 파일만으로</strong> 만들려면 <strong style="color:var(--text);">🎬 자료 파일만으로 새 프로젝트</strong>를 누르세요.
+      영상 파일 경로는 비워둬도 됩니다.<br />
+      배치: 이미지는 크기 79 / Y −892, 영상은 크기 87 / Y −1022 (X는 둘 다 0)
     </p>
   </div>
 
@@ -904,7 +906,10 @@
           stroke_size: (parseFloat(document.getElementById('stroke-size').value) || 0) / 100,
           unify_place: document.getElementById('unify-place').checked,
           effect_dur: document.getElementById('use-effects').checked
-                      ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0
+                      ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0,
+          title: document.getElementById('title-text').value.trim(),
+          date: document.getElementById('today-auto').checked
+                ? todayMMDD() : document.getElementById('date-text').value.trim()
         })
       });
       const data = await res.json();

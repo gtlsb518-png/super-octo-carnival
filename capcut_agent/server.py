@@ -1780,7 +1780,16 @@ def _make_in_animation(anim_id: str, effect: dict, duration_us: int = 500_000) -
 # ── 자료화면 배치 기본값 ──
 # scale은 템플릿 사진 29개의 중간값. 위치는 캡컷 화면에 표시되는 픽셀값으로 지정하며
 # JSON에는 정규화 좌표로 변환해 넣는다 (정규화 = 픽셀 / (캔버스높이/2), 위쪽이 +).
-MEDIA_PLACE = {"scale": 0.790416, "x_px": 0.0, "y_px": -892.0}
+# 이미지는 지금까지 쓰던 값 그대로, 영상은 조금 더 크게·아래로
+MEDIA_PLACE       = {"scale": 0.790416, "x_px": 0.0, "y_px": -892.0}    # 이미지
+MEDIA_PLACE_VIDEO = {"scale": 0.87,     "x_px": 0.0, "y_px": -1022.0}   # 영상
+
+
+def _place_for(is_img: bool, canvas: dict) -> dict:
+    """자료화면 배치값 (이미지/영상이 다르다) → 세그먼트에 넣을 형태로."""
+    p = MEDIA_PLACE if is_img else MEDIA_PLACE_VIDEO
+    nx, ny = _px_to_norm(p["x_px"], p["y_px"], canvas)
+    return {"scale": p["scale"], "x": nx, "y": ny}
 
 
 def assign_random_effects(segments: list[dict], effect_dur_sec: float,
@@ -2194,11 +2203,6 @@ def build_draft(
         timeline_cursor_us += dur
 
     # ── 이어붙일 파일들(통합 모드): 컷편집 영상 뒤에 순서대로 배치 ──
-    place = None
-    if unify_place:
-        nx, ny = _px_to_norm(MEDIA_PLACE["x_px"], MEDIA_PLACE["y_px"], canvas)
-        place = {"scale": MEDIA_PLACE["scale"], "x": nx, "y": ny}
-
     extra_materials = []
     appended_segments = []          # 효과는 이 클립들에만 적용
     cutouts = cutouts or {}
@@ -2222,7 +2226,7 @@ def build_draft(
         extra_materials.append(mat)
         seg = _media_segment_dict(
             str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, timeline_cursor_us, is_img,
-            place=place)
+            place=_place_for(is_img, canvas) if unify_place else None)
         segments.append(seg)
         appended_segments.append(seg)
         timeline_cursor_us += seg_dur
@@ -2512,6 +2516,8 @@ def build_sequence_draft(
     unify_place: bool = True,
     cutouts: dict[str, str] | None = None,
     effect_dur_sec: float = 0.0,
+    title_text: str = "",
+    date_text: str = "",
 ) -> tuple[Path, list[str]]:
     """
     선택한 영상/이미지 파일들을 다운로드(저장) 시간 순으로 메인 트랙에 이어붙인 draft 생성.
@@ -2520,10 +2526,6 @@ def build_sequence_draft(
     """
     bg_files = bg_files or set()
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
-    place = None
-    if unify_place:
-        nx, ny = _px_to_norm(MEDIA_PLACE["x_px"], MEDIA_PLACE["y_px"], canvas)
-        place = {"scale": MEDIA_PLACE["scale"], "x": nx, "y": ny}
     ordered = sort_files_by_download_time(list(files))
 
     timeline_id = str(uuid.uuid4()).upper()
@@ -2556,7 +2558,8 @@ def build_sequence_draft(
         mat = _media_material_dict(mat_id, src_file, w, h, src_dur_us, is_img)
         videos_materials.append(mat)
         segments.append(_media_segment_dict(
-            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img, place=place))
+            str(uuid.uuid4()).upper(), mat_id, 0, seg_dur, cursor, is_img,
+            place=_place_for(is_img, canvas) if unify_place else None))
         cursor += seg_dur
         placed.append(f.name)
 
@@ -2570,8 +2573,27 @@ def build_sequence_draft(
     tracks = [{"attribute": 0, "flag": 0, "id": track_id,
                "is_default_name": True, "name": "", "segments": segments, "type": "video"}]
 
+    # 상단 제목 / 하단 날짜 (컷편집 모드와 똑같은 스타일·위치)
+    text_materials: list = []
+    for txt, style, make_mat in (
+        (date_text.strip(),  DATE_STYLE,  _make_date_material),
+        (title_text.strip(), TITLE_STYLE, _make_title_material),
+    ):
+        if not txt or final_duration <= 0:
+            continue
+        mat_id = str(uuid.uuid4()).upper()
+        anim_id = str(uuid.uuid4()).upper()
+        text_materials.append(make_mat(mat_id, txt))
+        anim_materials.append(_make_sticker_animation(anim_id))
+        tracks.append({
+            "attribute": 0, "flag": 0, "id": str(uuid.uuid4()).upper(),
+            "is_default_name": True, "name": "", "type": "text",
+            "segments": [_make_overlay_text_segment(
+                str(uuid.uuid4()).upper(), mat_id, 0, final_duration, style, anim_id)],
+        })
+
     draft_dir = _finalize_draft(output_dir, draft_name, ratio, canvas,
-                                videos_materials, [], tracks, final_duration,
+                                videos_materials, text_materials, tracks, final_duration,
                                 ordered, timeline_id, project_id, draft_id, ts,
                                 anim_materials)
     return draft_dir, placed
@@ -2958,7 +2980,8 @@ async def build_sequence(request: Request):
         draft_dir, placed = build_sequence_draft(
             files, OUTPUT_DIR, name, ratio, image_dur, bg_set, stroke_sz,
             bool(body.get("unify_place", True)), cutouts,
-            float(body.get("effect_dur") or 0))
+            float(body.get("effect_dur") or 0),
+            (body.get("title") or "").strip(), (body.get("date") or "").strip())
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse({"success": True, "draft_dir": str(draft_dir),
