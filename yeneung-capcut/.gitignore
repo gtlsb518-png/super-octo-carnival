@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.yeneung_*/
+config.toml
+assets/sfx/*
+!assets/sfx/README.md
+!assets/sfx/manifest.example.json

@@ -1,0 +1,105 @@
+# yeneung 설정 파일 예시
+#
+# 이 파일을 config.toml 로 복사한 뒤 필요한 값만 고치세요.
+# 적지 않은 항목은 기본값이 그대로 쓰입니다.
+#
+#   yeneung run 영상.mp4 -c config.toml
+
+# 캡컷 초안 폴더. 비워두면 자동으로 찾습니다.
+# draft_dir = 'C:\Users\내계정\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft'
+
+
+[cut]
+# 무음 구간 자동 컷
+enabled = true
+# 이 dBFS 보다 조용하면 무음. 잡음이 많은 영상은 -30 쯤으로 올리세요.
+threshold_db = -38.0
+# 이 길이(초) 이상 이어진 무음만 잘라냅니다. 낮출수록 템포가 빨라집니다.
+min_silence = 0.60
+# 컷 앞뒤 여유(초). 말꼬리가 잘리면 늘리세요.
+padding = 0.12
+min_keep = 0.30
+trim_edges = true
+
+
+[transcribe]
+# tiny / base / small / medium / large-v3
+# 한국어는 large-v3 가 확실히 좋지만 느립니다. 테스트는 small 로.
+model = "large-v3"
+language = "ko"
+device = "auto"          # auto | cpu | cuda
+vad_filter = true
+
+
+[cuesheet]
+model = "claude-opus-5"
+effort = "high"
+# low | normal | high — 자막과 효과를 얼마나 촘촘히 넣을지
+density = "normal"
+# 프로그램 톤. 이 문장이 자막 문체를 크게 바꿉니다.
+tone = "밝고 빠른 템포의 관찰 예능"
+chunk_lines = 120
+
+
+[subtitle]
+# 아래에 깔리는 대사 자막
+enabled = true
+size = 6.0
+position_y = -0.78       # 양수는 위, 음수는 아래
+max_line_width = 0.82
+
+
+[sfx]
+enabled = true
+library = "assets/sfx"
+volume = 0.65
+
+
+[zoom]
+enabled = true
+ramp = 0.25              # 줌 인/아웃에 걸리는 시간(초)
+min_scale = 1.05
+max_scale = 1.60
+
+
+[effect]
+enabled = true
+
+
+# ---------------------------------------------------------------- 자막 스타일
+# 색은 [r, g, b] (0~1) 또는 "#RRGGBB" 둘 다 됩니다.
+
+[styles.reaction]
+size = 13.0
+color = "#FFEB3B"
+border_width = 65.0
+position_y = 0.58
+intro = "弹出"           # 캡컷 등장 애니메이션 이름
+intro_ms = 350
+
+[styles.emphasis]
+size = 15.0
+color = "#FF5C3D"
+position_y = 0.30
+intro = "放大震动"
+loop = "心跳频闪"
+
+[styles.narration]
+size = 9.0
+color = "#FFFFFF"
+position_y = 0.72
+bold = false
+intro = "渐显"
+
+[styles.whisper]
+size = 8.0
+color = "#BFCCE6"
+position_y = 0.42
+bold = false
+intro = "向上弹入"
+
+[styles.situation]
+size = 10.0
+color = "#66F2FF"
+position_y = 0.66
+intro = "向右滑动"
