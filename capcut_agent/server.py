@@ -212,7 +212,7 @@ FRAME_US = int(round(1_000_000 / FPS))   # 한 프레임 길이(us)
 
 # 자막 한 조각의 목표 글자 수 (기본값, UI에서 조절 가능).
 # 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
-MAX_SUBTITLE_CHARS = 9
+MAX_SUBTITLE_CHARS = 12
 
 # 말 사이가 이만큼 벌어지면 자막을 끊는다 (자연스러운 호흡 단위 분할)
 SUB_PAUSE_BREAK_US = 350_000
@@ -595,6 +595,33 @@ def is_hallucinated_line(text: str, clip_sec: float) -> bool:
     return clip_sec < 1.0 and n in _SHORT_ONLY_LINES
 
 
+_INNER_COMMA_RE = re.compile(r"(?<=[가-힣0-9A-Za-z]),(?=[가-힣A-Za-z])")
+
+
+def split_inner_commas(words: list[dict]) -> list[dict]:
+    """
+    "주주들,그동안" 처럼 쉼표 뒤가 붙어 한 어절이 된 것을 둘로 나눈다.
+    (붙어 있으면 그 자리에서 자막을 끊을 수가 없다)
+    """
+    out: list[dict] = []
+    for w in words:
+        parts = _INNER_COMMA_RE.sub(",\u0000", w["word"]).split("\u0000")
+        if len(parts) == 1:
+            out.append(w)
+            continue
+        keys = ("tl_start", "tl_end") if "tl_start" in w else ("start", "end")
+        st = w.get(keys[0], 0)
+        en = w.get(keys[1], st)
+        span = (en - st) / len(parts) if en > st else 0
+        for i, pt in enumerate(parts):
+            piece = {**w, "word": pt}
+            if span:
+                piece[keys[0]] = type(st)(st + span * i)
+                piece[keys[1]] = type(st)(st + span * (i + 1))
+            out.append(piece)
+    return out
+
+
 def _is_syllable_soup(words: list[dict]) -> bool:
     """
     "멘 탈 흔" 처럼 한 글자씩 흩어져 나온 인식인지.
@@ -710,7 +737,7 @@ def transcribe_all_clips(video_path: Path,
                         "end": min(max(w["end"], ks), ke),
                         "word": piece,
                     })
-        words = cap_by_speech_rate(collapse_repeats(words), ke - ks)
+        words = cap_by_speech_rate(collapse_repeats(split_inner_commas(words)), ke - ks)
         if _is_syllable_soup(words):
             words = []                  # "멘 탈 흔" → 말로 치지 않음
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
@@ -1078,13 +1105,32 @@ _NO_END_WORDS = {
 _ADNOMINAL_TAILS = ("린", "던", "운", "난", "킨", "친", "된", "한", "인", "는", "울")
 
 
-def _is_clause_tail(word: str) -> bool:
-    """"~할 때 / ~한 뒤 / ~한 다음" 처럼 절이 끝나는 말인지."""
+def _is_clause_tail(word: str, prev_word: str = "") -> bool:
+    """
+    "~할 때 / ~한 뒤 / ~한 다음" 처럼 절이 끝나는 말인지.
+    앞말이 뒷말을 꾸미는 형태(흔들릴 때, 되돌린 다음)일 때만 절로 본다.
+    "3시간 동안" "폭락 때" 처럼 명사 뒤에 붙은 건 절이 아니다.
+    """
     core = word.strip().rstrip("\"'”’)]}").rstrip(",.?!")
-    return core in _CLAUSE_TAILS or (len(core) > 1 and core.endswith(_CLAUSE_TAILS))
+    if not (core in _CLAUSE_TAILS or (len(core) > 1 and core.endswith(_CLAUSE_TAILS))):
+        return False
+    if not prev_word:
+        return True
+    return _ends_adnominal(prev_word)
 
 
-def _break_score(word: str, next_word: str = "") -> int:
+def _ends_adnominal(word: str) -> bool:
+    """뒷말을 꾸미는 형태인지 — "물린/했던/흔들릴/할" 처럼."""
+    w = word.strip().rstrip("\"'”’)]}").rstrip(",.?!")
+    if len(w) < 2:
+        return False
+    if w.endswith(_ADNOMINAL_TAILS):
+        return True
+    c = w[-1]
+    return "가" <= c <= "힣" and (ord(c) - 0xAC00) % 28 == 8      # ㄹ 받침 (-을/-ㄹ 관형형)
+
+
+def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
     """이 어절 뒤에서 끊었을 때 얼마나 자연스러운지 (높을수록 좋은 자리)."""
     w = word.strip()
     if not w:
@@ -1102,12 +1148,13 @@ def _break_score(word: str, next_word: str = "") -> int:
     if next_word and next_word.strip().rstrip(",.?!") in _BOUND_NOUNS:
         return 0
     if core.endswith(_STANDALONE_RISK) and len(core) < 5:
-        # "그대로" "이만큼" "이처럼" 처럼 그 자체가 한 단어인 경우 —
-        # 연결어미(-대로/-만큼/-처럼)로 잘못 보고 끊으면 어색하다
-        return 10
-    if core in _BOUND_NOUNS:
+        # "그대로" "이만큼" "다 같이" 처럼 그 자체가 한 단어인 경우 —
+        # 연결어미(-대로/-만큼/-처럼)만큼 좋은 자리는 아니지만 끊어도 무난하다
+        return 30
+    if core in _BOUND_NOUNS and _ends_adnominal(prev_word):
         return 50                        # "있는 게" 처럼 덩어리가 완성된 자리
-    if core in _CLAUSE_TAILS or (len(core) > 1 and core.endswith(_CLAUSE_TAILS)):
+                                         # ("3시간 동안" 처럼 명사 뒤면 해당 없음)
+    if _is_clause_tail(core, prev_word) and (prev_word or _ends_adnominal(prev_word)):
         return 55                        # "~할 때 / ~한 뒤 / ~한 다음" → 절이 끝나는 자리
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
@@ -1116,8 +1163,7 @@ def _break_score(word: str, next_word: str = "") -> int:
     if core.endswith(_PARTICLES):
         return 30                        # 조사
     # 다음 말이 뒷말을 꾸미는 형태면("하이닉스 / 물린 사람들") 조금 미룬다
-    nx = next_word.strip().rstrip(",.?!")
-    if len(nx) >= 2 and nx.endswith(_ADNOMINAL_TAILS):
+    if _ends_adnominal(next_word):
         return 5
     return 10                            # 그 밖 (관형형 등 — 끊으면 어색)
 
@@ -1136,12 +1182,12 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
     """
     late = (-1, len(cur) - 1)            # (점수, 위치)
     early = (-1, -1)
-    early_min = max(5, soft_min - 1)     # 너무 짧은 조각이 생기지 않는 선까지만 앞당김
+    early_min = max(6, soft_min - 4)     # 너무 짧은 조각이 생기지 않는 선까지만 앞당김
     acc = 0
     for i, x in enumerate(cur):
         acc += len(x["word"]) + (1 if i else 0)
         nxt = cur[i + 1]["word"] if i + 1 < len(cur) else after
-        sc = _break_score(x["word"], nxt)
+        sc = _break_score(x["word"], nxt, cur[i - 1]["word"] if i else "")
         if acc >= soft_min or i == len(cur) - 1:
             # prefer_early: 뒤에 붙을 말이 쉼표로 끝나면, 그 말이 앞말과 함께
             # 한 조각이 되도록 동점일 때 앞쪽에서 끊는다
@@ -1151,6 +1197,17 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
             if sc > early[0]:
                 early = (sc, i)
     return early[1] if early[0] > late[0] else late[1]
+
+
+def _rest_len(words: list[dict], i: int, cap: int = 40) -> int:
+    """words[i]부터 문장이 끝날 때까지의 글자 수 (공백 포함, cap에서 멈춤)."""
+    total = 0
+    for k in range(i, len(words)):
+        w = words[k]["word"]
+        total += len(w) + (1 if k > i else 0)
+        if w[-1:] in ".?!…" or total > cap:
+            break
+    return total
 
 
 def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
@@ -1219,6 +1276,7 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     - 단어 사이 시간 간격이 gap_break_us 이상이면(말 사이 쉼) 무조건 끊음
     - 너무 짧은 꼬리 조각은 직전 조각에 합침 (문장부호로 끝난 경우는 유지)
     """
+    words = split_inner_commas(words)
     hard = max_chars + tolerance         # 기본 상한
     soft_min = max(4, max_chars - 2)     # 이 길이부터 어미에서 끊을 수 있음
     groups: list[list[dict]] = []
@@ -1226,13 +1284,14 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
 
     for wi, wd in enumerate(words):
         nxt = words[wi + 1]["word"] if wi + 1 < len(words) else ""
+        prev_word = words[wi - 1]["word"] if wi else ""
         # 말 사이 쉼이 길면 먼저 끊기
         if cur and "tl_start" in wd and "tl_end" in cur[-1]:
             if wd["tl_start"] - cur[-1]["tl_end"] >= gap_break_us:
                 groups.append(cur)
                 cur = []
 
-        sc = _break_score(wd["word"], nxt)
+        sc = _break_score(wd["word"], nxt, prev_word)
         # 어미로 끝나는 어절이면 상한을 조금 넘겨도 붙인다
         # ('확대하면 신나는 / 불장인데' 로 절이 잘리는 것을 막기 위함)
         allow = hard + 2 if sc >= 50 else hard
@@ -1253,14 +1312,24 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
 
         if sc >= 100:                                   # 문장 끝 → 무조건
             groups.append(cur); cur = []
-        elif cl >= 5 and sc >= 50 and nxt_sc >= 100:
-            groups.append(cur); cur = []                # 다음이 한 문장 → 먼저 끊기
-        elif cl >= 5 and sc >= 50 and _is_clause_tail(wd["word"]):
+        elif cl >= 5 and 50 <= sc < 80 and nxt_sc >= 100:
+            groups.append(cur); cur = []                # 어미로 끝났는데 다음이 한 문장 → 먼저 끊기
+        elif cl >= 5 and sc >= 50 and _is_clause_tail(wd["word"], prev_word):
             groups.append(cur); cur = []                # "~할 때" 뒤 → 절이 끝나는 자리
-        elif cl >= 5 and sc >= 80:                      # 쉼표 → 조금 짧아도 끊는다
+        elif cl >= 5 and sc >= 80 and cl + 1 + _rest_len(words, wi + 1) > allow:
+            groups.append(cur); cur = []                # 쉼표 (남은 문장이 다 안 들어갈 때만)
+        elif cl >= soft_min and 50 <= sc < 80:          # 어미 → 목표 길이 근처에서
             groups.append(cur); cur = []
-        elif cl >= soft_min and sc >= 50:               # 어미 → 목표 길이 근처에서
-            groups.append(cur); cur = []
+        elif cl >= max(5, soft_min - 2) and sc >= 30 and nxt \
+                and cl + 1 + len(nxt) > max_chars \
+                and cl + 1 + _rest_len(words, wi + 1) > allow:
+            groups.append(cur); cur = []                # 다음 말까지 넣으면 목표를 넘길 때
+                                                        # (남은 문장이 통째로 들어가면 그냥 붙인다)
+        elif cl >= 6 and sc >= 30 and _ends_adnominal(nxt) \
+                and max_chars < cl + 1 + _rest_len(words, wi + 1) \
+                and _rest_len(words, wi + 1) <= hard:
+            groups.append(cur); cur = []                # "5분 주사로 / 바꿔주는 기술이야"
+                                                        # (남은 문장이 딱 한 줄일 때만)
         elif cl >= max_chars and sc >= 30:              # 조사 등 무난한 자리에서만
             groups.append(cur); cur = []
         # 끊기 나쁜 자리(관형형·꾸미는 말·의존명사 앞)면 상한까지 더 붙였다가
@@ -1361,7 +1430,8 @@ def subtitle_chunks_for_timeline(segments: list[dict],
             # ★ 길게 끄는 말("올랐는데~~~")이 잘리지 않게:
             #   앞 조각은 자기 마지막 말이 끝나기 전에는 절대 안 끊는다.
             #   (Whisper는 길게 끈 말의 끝과 다음 말의 시작을 겹쳐서 주는 일이 잦다)
-            prev_end = groups[i - 1][-1].get("tl_end")
+            # 겹치는 인식 시각을 대비해 앞 조각에서 '가장 늦게 끝나는' 말을 기준으로
+            prev_end = max((w.get("tl_end", 0) for w in groups[i - 1]), default=0)
             if prev_end:
                 room = clip_end - (n_g - i) * MIN_DUR_US
                 b = min(max(b, prev_end), max(room, bounds[-1] + MIN_DUR_US))
