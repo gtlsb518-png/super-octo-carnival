@@ -2255,7 +2255,7 @@ class App:
         for i, coin_info in enumerate(selected_coins, 1):
             coin = {
                 'symbol': coin_info['symbol'],
-                'timeframe': '5m',  # 5분봉
+                'timeframe': '15m',  # 15분봉
                 'amount': 50,  # 진입금 50 USDT
                 'leverage': 3,  # 레버리지 3배 (안전)
                 'tp': 0.3,  # 기본 TP (동적 TP 비활성화 시)
