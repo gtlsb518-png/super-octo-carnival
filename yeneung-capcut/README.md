@@ -183,6 +183,54 @@ python -m yeneung run 영상.mp4 --refresh-transcript # 받아쓰기부터 새�
   겹치는 항목이 있어 트랙을 늘렸습니다: effect 2개, audio 2개, caption 3개
 ```
 
+## 큐시트를 직접 쓰기
+
+Claude 에게 맡기지 않고 자막·효과음·줌을 직접 정해서 넣을 수 있습니다.
+
+```bash
+python -m yeneung check mine.json                          # 먼저 검사
+python -m yeneung run 영상.mp4 --cuesheet mine.json         # Claude 호출 없음
+```
+
+형식은 이게 전부입니다. 섹션도 필드도 필요한 것만 쓰면 됩니다.
+
+```json
+{
+  "captions": [
+    {"start": 0.5, "end": 2.0, "text": "이게 되네"},
+    {"start": 1.5, "end": 3.0, "text": "?!", "style": "emphasis", "position": "top"}
+  ],
+  "sfx":     [{"time": 0.5, "name": "ding"}],
+  "zooms":   [{"start": 4.0, "end": 6.0, "scale": 1.3}],
+  "effects": [{"start": 4.0, "end": 4.5, "name": "flash"}]
+}
+```
+
+- 시각은 **컷 편집이 끝난 뒤** 기준의 초입니다. `--no-cut` 을 쓰면 원본과 같습니다.
+- `style` 은 생략하면 `reaction`, `position` 은 생략하면 스타일 기본 위치입니다.
+- 자막끼리 겹쳐도 됩니다. 트랙이 자동으로 늘어납니다.
+- 준 파일은 고쳐 쓰지 않습니다. 캐시에도 안 남습니다.
+
+`check` 가 틀린 곳을 **한 번에 모아서** 알려줍니다. 오타는 비슷한 이름도 같이
+찾아줍니다.
+
+```
+mine.json 에서 3군데가 잘못됐습니다:
+  - 모르는 항목 'caption' — 'captions' 를 쓰려던 게 아닌가요?
+  - captions[0]: 모르는 필드 'styl' — 'style' 를 쓰려던 게 아닌가요?
+  - zooms[0]: 끝(3.0)이 시작(5.0)보다 뒤여야 합니다
+```
+
+### Claude 가 만든 걸 고쳐서 쓰기
+
+바닥부터 쓰는 것보다 이쪽이 편합니다.
+
+```bash
+python -m yeneung run 영상.mp4 --dry-run     # 큐시트만 생성
+# .yeneung_영상/cuesheet.json 을 열어서 문구·타이밍 수정
+python -m yeneung run 영상.mp4               # 고친 캐시를 그대로 씀
+```
+
 ## 내 자막 스타일 반영하기
 
 다른 사람 영상 링크로 "학습"시키는 건 안 됩니다. Claude 를 파인튜닝하는 게
@@ -262,6 +310,7 @@ python -m yeneung run 영상.mp4 -c config.toml
 | 자막이 화면 밖 | `styles.*.position_y` 부호를 뒤집으세요 |
 | 컷이 너무 과함 | `cut.min_silence` 를 올리거나 `--no-cut` |
 | 자막이 너무 많음 | `--density low` |
+| 큐시트를 직접 쓰고 싶음 | `check` 로 검사 후 `run --cuesheet` |
 | 내 효과음을 안 씀 | `sfx scan` 으로 설명을 붙이세요 |
 | 자막 문체가 내 채널 같지 않음 | `learn` 으로 예전 자막을 뽑아 `--style-ref` |
 | 자막 문체가 안 맞음 | `--tone` 을 구체적으로 |

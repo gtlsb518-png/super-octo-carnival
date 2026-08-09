@@ -70,13 +70,16 @@ class Cuesheet:
 
     @staticmethod
     def load(path: str | Path) -> "Cuesheet":
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        return Cuesheet(
-            captions=[Caption(**c) for c in raw.get("captions", [])],
-            sfx=[SfxCue(**c) for c in raw.get("sfx", [])],
-            zooms=[ZoomCue(**c) for c in raw.get("zooms", [])],
-            effects=[EffectCue(**c) for c in raw.get("effects", [])],
-        )
+        p = Path(path)
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise CuesheetError(
+                f"{p} 을 읽지 못했습니다 — JSON 형식이 아닙니다.\n"
+                f"  {exc.lineno}번째 줄: {exc.msg}\n"
+                "  쉼표를 빠뜨렸거나 따옴표가 안 닫혔을 가능성이 큽니다."
+            ) from exc
+        return parse(raw, source=str(p))
 
     def summary(self) -> str:
         return (
@@ -222,6 +225,186 @@ def _script_lines(utterances: list[Utterance]) -> list[str]:
 
 class CuesheetError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------- 직접 쓴 JSON 읽기
+
+#: 섹션별 필드 규격: (필수 필드, 선택 필드와 기본값, 만들 클래스)
+_SECTIONS: dict[str, tuple[dict[str, type], dict[str, Any], Any]] = {
+    "captions": ({"start": float, "end": float, "text": str},
+                 {"style": "reaction", "position": "default"}, Caption),
+    "sfx":      ({"time": float, "name": str}, {}, SfxCue),
+    "zooms":    ({"start": float, "end": float, "scale": float}, {}, ZoomCue),
+    "effects":  ({"start": float, "end": float, "name": str}, {}, EffectCue),
+}
+
+_EXAMPLE = """\
+{
+  "captions": [
+    {"start": 1.0, "end": 2.2, "text": "?!", "style": "reaction", "position": "top"}
+  ],
+  "sfx":     [{"time": 1.0, "name": "ding"}],
+  "zooms":   [{"start": 4.0, "end": 6.0, "scale": 1.3}],
+  "effects": [{"start": 4.0, "end": 4.5, "name": "flash"}]
+}"""
+
+
+def _suggest(word: str, options: Iterable[str]) -> str:
+    """오타로 보이면 비슷한 이름을 알려준다."""
+    import difflib
+
+    match = difflib.get_close_matches(word, list(options), n=1, cutoff=0.6)
+    return f" — '{match[0]}' 를 쓰려던 게 아닌가요?" if match else ""
+
+
+def parse(data: Any, *, source: str = "큐시트") -> Cuesheet:
+    """사람이 직접 쓴 JSON 을 Cuesheet 로 바꾼다.
+
+    구조가 잘못된 곳을 하나씩 죽지 말고 **전부 모아서** 알려준다.
+    한 번 고치고 다시 돌리는 왕복을 줄이는 게 목적이다.
+    """
+    problems: list[str] = []
+
+    if not isinstance(data, dict):
+        raise CuesheetError(
+            f"{source}: 최상위가 객체({{ }})여야 합니다. 예시:\n{_EXAMPLE}"
+        )
+
+    # 섹션 이름에 오타가 있으면 지적하되, 내용 검사는 이어서 한다.
+    # 이름만 고치고 다시 돌렸더니 그제서야 안쪽 오타가 나오는 왕복을 없앤다.
+    import difflib
+
+    resolved: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in _SECTIONS:
+            resolved[key] = value
+            continue
+        near = difflib.get_close_matches(key, list(_SECTIONS), n=1, cutoff=0.6)
+        if near and near[0] not in data:
+            problems.append(f"모르는 항목 '{key}' — '{near[0]}' 를 쓰려던 게 아닌가요?")
+            resolved[near[0]] = value
+        else:
+            problems.append(f"모르는 항목 '{key}'{_suggest(key, _SECTIONS)}")
+
+    built: dict[str, list] = {name: [] for name in _SECTIONS}
+
+    for section, (required, optional, cls) in _SECTIONS.items():
+        items = resolved.get(section, [])
+        if items is None:
+            continue
+        if not isinstance(items, list):
+            problems.append(f"'{section}' 은 목록([ ])이어야 합니다")
+            continue
+
+        for i, item in enumerate(items):
+            where = f"{section}[{i}]"
+            if not isinstance(item, dict):
+                problems.append(f"{where}: 객체({{ }})여야 합니다")
+                continue
+
+            known = set(required) | set(optional)
+            for key in item:
+                if key not in known:
+                    problems.append(f"{where}: 모르는 필드 '{key}'{_suggest(key, known)}")
+
+            values: dict[str, Any] = {}
+            missing = [k for k in required if k not in item]
+            if missing:
+                problems.append(f"{where}: 빠진 필드 {', '.join(missing)}")
+                continue
+
+            bad = False
+            for key, kind in required.items():
+                value = item[key]
+                if kind is float:
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        problems.append(f"{where}.{key}: 숫자여야 합니다 (받은 값: {value!r})")
+                        bad = True
+                    else:
+                        values[key] = float(value)
+                else:
+                    if not isinstance(value, str):
+                        problems.append(f"{where}.{key}: 문자열이어야 합니다 (받은 값: {value!r})")
+                        bad = True
+                    else:
+                        values[key] = value
+            if bad:
+                continue
+
+            for key, default in optional.items():
+                value = item.get(key, default)
+                if not isinstance(value, str):
+                    problems.append(f"{where}.{key}: 문자열이어야 합니다 (받은 값: {value!r})")
+                    continue
+                values[key] = value
+
+            start, end = values.get("start"), values.get("end")
+            if start is not None and end is not None and end <= start:
+                problems.append(
+                    f"{where}: 끝({end})이 시작({start})보다 뒤여야 합니다"
+                )
+                continue
+            for key in ("start", "end", "time"):
+                if key in values and values[key] < 0:
+                    problems.append(f"{where}.{key}: 음수는 안 됩니다 ({values[key]})")
+                    bad = True
+            if bad:
+                continue
+
+            built[section].append(cls(**values))
+
+    if problems:
+        listing = "\n".join(f"  - {p}" for p in problems)
+        raise CuesheetError(
+            f"{source} 에서 {len(problems)}군데가 잘못됐습니다:\n{listing}\n\n"
+            f"올바른 형식:\n{_EXAMPLE}"
+        )
+
+    return Cuesheet(
+        captions=built["captions"], sfx=built["sfx"],
+        zooms=built["zooms"], effects=built["effects"],
+    )
+
+
+def check_names(
+    sheet: Cuesheet,
+    *,
+    style_names: Iterable[str],
+    sfx_names: Iterable[str],
+    effect_names: Iterable[str],
+    positions: Iterable[str] | None = None,
+) -> list[str]:
+    """이름이 실제로 쓸 수 있는 것인지 본다. 치명적이진 않아 경고로 돌려준다."""
+    styles = set(style_names)
+    sfx = set(sfx_names)
+    effects = set(effect_names)
+    places = set(positions or []) | {"default"}
+
+    warnings: list[str] = []
+    for i, cap in enumerate(sheet.captions):
+        if cap.style not in styles:
+            warnings.append(
+                f"captions[{i}]: 모르는 스타일 '{cap.style}'{_suggest(cap.style, styles)} "
+                f"— reaction 으로 대체됩니다"
+            )
+        if cap.position not in places:
+            warnings.append(
+                f"captions[{i}]: 모르는 위치 '{cap.position}'{_suggest(cap.position, places)} "
+                f"— 스타일 기본 위치를 씁니다"
+            )
+    for i, cue in enumerate(sheet.sfx):
+        if cue.name not in sfx:
+            warnings.append(
+                f"sfx[{i}]: 라이브러리에 없는 효과음 '{cue.name}'{_suggest(cue.name, sfx)} "
+                f"— 무시됩니다"
+            )
+    for i, cue in enumerate(sheet.effects):
+        if cue.name not in effects:
+            warnings.append(
+                f"effects[{i}]: 쓸 수 없는 화면효과 '{cue.name}'{_suggest(cue.name, effects)} "
+                f"— 무시됩니다"
+            )
+    return warnings
 
 
 def _call_claude(

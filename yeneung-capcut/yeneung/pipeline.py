@@ -7,7 +7,7 @@ from typing import Callable
 
 from . import cuesheet as cuesheet_mod
 from . import cuts, draft, media, sfxgen, sfxlib, styleref, styles, transcribe
-from .config import Config, find_capcut_draft_dir
+from .config import POSITION_OVERRIDES, Config, find_capcut_draft_dir
 
 Log = Callable[[str], None]
 
@@ -24,6 +24,8 @@ class RunOptions:
     dry_run: bool = False
     refresh_transcript: bool = False
     refresh_cuesheet: bool = False
+    #: 직접 쓴 큐시트 파일. 주면 Claude 를 호출하지 않는다
+    cuesheet: Path | None = None
 
 
 def _remap(
@@ -118,7 +120,20 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
 
     # 5. 큐시트 -----------------------------------------------------------
     sheet_path = opts.work_dir / "cuesheet.json"
-    if sheet_path.exists() and not opts.refresh_cuesheet:
+    if opts.cuesheet:
+        # 직접 쓴 큐시트를 쓴다. 사용자 파일은 건드리지 않는다.
+        sheet = cuesheet_mod.Cuesheet.load(opts.cuesheet)
+        for warning in cuesheet_mod.check_names(
+            sheet,
+            style_names=list(cfg.styles),
+            sfx_names=library.names(),
+            effect_names=effect_names,
+            positions=POSITION_OVERRIDES,
+        ):
+            log(f"  ! {warning}")
+        sheet = cuesheet_mod.sanitize(sheet, timeline.total)
+        log(f"큐시트: 직접 준 파일 사용 — {sheet.summary()} ({opts.cuesheet})")
+    elif sheet_path.exists() and not opts.refresh_cuesheet:
         sheet = cuesheet_mod.Cuesheet.load(sheet_path)
         log(f"큐시트: 캐시 사용 — {sheet.summary()}")
     elif not cut_utterances:

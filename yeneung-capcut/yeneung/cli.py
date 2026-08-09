@@ -41,6 +41,8 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--work-dir", type=Path, help="중간 파일 폴더 (기본: 영상 옆 .yeneung)")
     r.add_argument("--density", choices=["low", "normal", "high"], help="자막·효과 밀도")
     r.add_argument("--tone", help="프로그램 톤 (예: '차분한 다큐 예능')")
+    r.add_argument("--cuesheet", type=Path,
+                   help="직접 쓴 큐시트 JSON (주면 Claude 를 호출하지 않음)")
     r.add_argument("--sfx-dir", type=Path, help="내 효과음 폴더 경로")
     r.add_argument("--style-ref", type=Path, help="자막 스타일 예시 파일")
     r.add_argument("--whisper-model", help="whisper 모델 (기본: large-v3)")
@@ -54,6 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--replace", action="store_true", help="같은 이름 프로젝트 덮어쓰기")
     r.add_argument("--refresh-transcript", action="store_true", help="받아쓰기 캐시 무시")
     r.add_argument("--refresh-cuesheet", action="store_true", help="큐시트 캐시 무시")
+
+    # -------------------------------------------------------------- check
+    ck = sub.add_parser("check", help="직접 쓴 큐시트 JSON 검사")
+    ck.add_argument("cuesheet", type=Path, help="검사할 큐시트 JSON")
+    ck.add_argument("-c", "--config", help="config.toml 경로")
+    ck.add_argument("--sfx-dir", type=Path, help="효과음 폴더 (이름 확인용)")
 
     # -------------------------------------------------------------- learn
     lr = sub.add_parser(
@@ -236,6 +244,55 @@ def _cmd_sfx_scan(cfg: Config, force: bool) -> int:
     return 0
 
 
+def _cmd_check(cfg: Config, args: argparse.Namespace) -> int:
+    from . import cuesheet as cuesheet_mod
+    from .config import POSITION_OVERRIDES
+
+    if args.sfx_dir:
+        cfg.sfx.library = str(args.sfx_dir)
+
+    try:
+        sheet = cuesheet_mod.Cuesheet.load(args.cuesheet)
+    except FileNotFoundError:
+        print(f"오류: 파일이 없습니다 — {args.cuesheet}", file=sys.stderr)
+        return 2
+    except cuesheet_mod.CuesheetError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    print(f"형식 OK — {sheet.summary()}\n")
+
+    library = sfxlib.load_library(cfg.sfx.library)
+    try:
+        effect_names = styles.available_effects()
+    except Exception:
+        effect_names = []
+
+    warnings = cuesheet_mod.check_names(
+        sheet,
+        style_names=list(cfg.styles),
+        sfx_names=library.names(),
+        effect_names=effect_names,
+        positions=POSITION_OVERRIDES,
+    )
+    for warning in warnings:
+        print(f"  ! {warning}")
+
+    if warnings:
+        print(f"\n{len(warnings)}개 항목이 무시되거나 대체됩니다.")
+        print(f"쓸 수 있는 스타일: {', '.join(cfg.styles)}")
+        print(f"쓸 수 있는 위치:   default, {', '.join(POSITION_OVERRIDES)}")
+        if library:
+            print(f"쓸 수 있는 효과음: {', '.join(library.names())}")
+        if effect_names:
+            print(f"쓸 수 있는 화면효과: {', '.join(effect_names)}")
+        return 1
+
+    print("이름도 모두 확인했습니다. 그대로 쓸 수 있습니다.")
+    print(f"\n  python -m yeneung run 영상.mp4 --cuesheet {args.cuesheet}")
+    return 0
+
+
 def _cmd_learn(cfg: Config, args: argparse.Namespace) -> int:
     from . import styleref
 
@@ -291,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "scan":
             return _cmd_sfx_scan(cfg, args.force)
         return _cmd_sfx_list(cfg)
+    if args.command == "check":
+        return _cmd_check(cfg, args)
     if args.command == "learn":
         return _cmd_learn(cfg, args)
 
@@ -301,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     opts = RunOptions(
+        cuesheet=args.cuesheet.resolve() if args.cuesheet else None,
         video=video.resolve(),
         draft_name=args.name or f"{video.stem}_예능",
         work_dir=(args.work_dir or video.parent / f".yeneung_{video.stem}").resolve(),
