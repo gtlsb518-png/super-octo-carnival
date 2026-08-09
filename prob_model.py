@@ -393,8 +393,10 @@ def triple_barrier(df, tp_pct, sl_pct, max_hold, side=1):
             tp_price = entry * (1 - tp_pct / 100)
             sl_price = entry * (1 + sl_pct / 100)
 
-        end = min(i + 1 + max_hold, n)
-        if end <= i + 1:
+        # 보유 한도만큼의 봉이 남아있지 않으면 표본에서 제외한다.
+        # 강제로 일찍 청산시키면 데이터 끝부분 표본만 성격이 달라져 편향된다.
+        end = i + 1 + max_hold
+        if end > n:
             continue
 
         done = False
@@ -460,6 +462,21 @@ def top_pct_masks(prob, levels):
         thr = float(np.quantile(prob, 1 - q / 100))
         out.append((q, thr, prob >= thr))
     return out
+
+
+def overlap_se(values, avg_hold):
+    """중복 표본을 감안한 표준오차.
+
+    매 봉마다 표본을 만들면, 평균 h봉을 보유하는 매매는 이웃 h개 표본과
+    같은 가격 구간을 공유한다. 즉 표본들이 독립이 아니다.
+    그대로 sd/√n 을 쓰면 표준오차가 과소평가되어, 우연한 결과가
+    '통계적으로 유의'하게 보인다. 유효표본을 n/h 로 보고 보정한다.
+    """
+    n = len(values)
+    if n == 0:
+        return np.inf
+    eff_n = max(1.0, n / max(1.0, avg_hold))
+    return float(np.std(values)) / np.sqrt(eff_n)
 
 
 def kelly_fraction(p, tp, sl):
@@ -533,7 +550,7 @@ def walk_forward(feat, labels, valid, cfg, log=print):
 
 
 # ==================== 리포트 ====================
-def report(prob, actual, gross, known, cfg, log=print):
+def report(prob, actual, gross, known, cfg, avg_hold=1.0, log=print):
     """actual = 순손익>0 여부(0/1), gross = 수수료 제외 전 실현손익 %"""
     tp, sl, fee = cfg['tp'], cfg['sl'], cfg['fee']
     net = gross - fee                              # 실제 손에 쥐는 손익
@@ -588,7 +605,7 @@ def report(prob, actual, gross, known, cfg, log=print):
         wr = float(actual[m].mean())
         avg = float(net[m].mean())
         kf = kelly_fraction(wr, tp, sl) * 0.25
-        rows.append((q, int(m.sum()), wr, avg))
+        rows.append((q, int(m.sum()), wr, avg, net[m]))
         log(f"  {'상위 '+str(q)+'%':>10} | {thr*100:>6.1f}% | {m.sum():>8,} | "
             f"{wr*100:>6.2f}% | {avg:>+9.4f}% | {kf*100:>7.1f}%")
 
@@ -599,6 +616,9 @@ def report(prob, actual, gross, known, cfg, log=print):
     known_rate = float(known.mean()) * 100
     log(f"\n  ℹ️ 검증 표본 중 학습구간에 충분한 사례가 있던 비율: {known_rate:.1f}%")
     log("     (낮으면 상태를 너무 잘게 쪼갠 것 — --state 를 줄이거나 --bins 를 낮추세요)")
+    log(f"  ℹ️ 평균 보유 {avg_hold:.1f}봉 → 유효표본 약 {len(net)/max(1.0,avg_hold):,.0f}건 "
+        f"(표시된 {len(net):,}건이 아님)")
+    log("     매 봉마다 표본을 만들면 이웃 표본끼리 같은 구간을 공유해 독립이 아니다.")
 
     log("\n" + "=" * 66)
     log("📌 판정")
@@ -606,10 +626,10 @@ def report(prob, actual, gross, known, cfg, log=print):
 
     # 필터가 '필터 없음'보다 유의미하게 나은가 (표본오차 감안)
     best = None
-    for q, cnt, wr, avg in rows:
+    for q, cnt, wr, avg, sub in rows:
         if cnt < 200:
             continue
-        se = float(net.std()) / np.sqrt(cnt)      # 표준오차
+        se = overlap_se(sub, avg_hold)            # 중복 표본 보정
         if avg > 0 and avg > base_pnl + 2 * se:   # 2σ 초과여야 인정
             best = (q, cnt, wr, avg, se)
             break
@@ -700,12 +720,11 @@ def analyze_one(df, base_cfg, args, interval, log=print):
     res['skill'] = (1 - bs_m / bs_b) * 100 if bs_b > 0 else 0.0
 
     # 필터를 걸었을 때 필터 없음보다 통계적으로 유의하게 나은가
-    sd = float(net.std())
     for q, thr, m in top_pct_masks(prob, cfg['top_pct']):
         if m.sum() < 200:
             continue
         avg = float(net[m].mean())
-        se = sd / np.sqrt(int(m.sum()))
+        se = overlap_se(net[m], res['hold'])
         if np.isnan(res['best_ev']) or avg > res['best_ev']:
             res['best_ev'], res['best_thr'], res['se'] = avg, q, se
 
@@ -985,6 +1004,11 @@ def main():
     labels = np.zeros(len(gross), dtype=int)
     labels[valid] = (gross[valid] - args.fee > 0).astype(int)
 
+    # 표본 수에 맞춰 상태 해상도 자동 조정 (multi-tf 와 동일 규칙)
+    cfg['state_cols'], cfg['n_bins'] = adapt_state(int(valid.sum()), cfg)
+    print(f"  상태 해상도: {len(cfg['state_cols'])}축 × {cfg['n_bins']}구간 "
+          f"({', '.join(cfg['state_cols'])})")
+
     print("\n[4/4] Walk-forward 검증")
     out = walk_forward(feat, labels, valid, cfg)
     if out is None:
@@ -992,7 +1016,8 @@ def main():
         return 1
     prob, actual, te_idx, known = out
 
-    report(prob, actual, gross[te_idx], known, cfg)
+    report(prob, actual, gross[te_idx], known, cfg,
+           avg_hold=float(held[held > 0].mean()))
     print()
     return 0
 
