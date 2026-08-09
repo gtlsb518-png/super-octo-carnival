@@ -66,6 +66,10 @@ class CuesheetConfig:
     max_tokens: int = 32000
     # 프로그램 톤. 프롬프트에 그대로 들어감
     tone: str = "밝고 빠른 템포의 관찰 예능"
+    # 자막 스타일 예시 파일 (내 예전 자막들). None 이면 안 씀
+    style_ref: str | None = None
+    # 예시를 몇 줄까지 프롬프트에 넣을지
+    style_ref_limit: int = 80
 
 
 # ---------------------------------------------------------------- 자막 스타일
@@ -114,6 +118,10 @@ class SfxConfig:
     library: str = "assets/sfx"
     # 기본 음량 (0.0 ~ 1.0)
     volume: float = 0.65
+    # 효과음이 아주 많을 때 프롬프트에 넣을 최대 개수
+    max_catalog: int = 90
+    # 라이브러리가 비었을 때 기본 팩을 자동 생성할지
+    autogenerate: bool = True
 
 
 @dataclass

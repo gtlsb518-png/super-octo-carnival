@@ -111,40 +111,68 @@ def test_timeline_duration_matches_cuts(built):
     assert content["duration"] == 9_000_000  # 마이크로초
 
 
+def _video_segments(content) -> list[dict]:
+    track = next(t for t in content["tracks"] if t["type"] == "video")
+    return sorted(track["segments"], key=lambda s: s["target_timerange"]["start"])
+
+
 def test_cut_clips_are_contiguous(built):
     _, content = built
-    video_track = next(t for t in content["tracks"] if t["type"] == "video")
-    segs = sorted(video_track["segments"], key=lambda s: s["target_timerange"]["start"])
-    assert len(segs) == 3
+    segs = _video_segments(content)
 
     cursor = 0
     for seg in segs:
         assert seg["target_timerange"]["start"] == cursor
         cursor += seg["target_timerange"]["duration"]
-    assert cursor == 9_000_000
-
-    # 원본에서 가져오는 위치가 keep 범위와 일치해야 한다
-    assert [s["source_timerange"]["start"] for s in segs] == [0, 4_500_000, 8_000_000]
+    assert cursor == 9_000_000, "클립이 타임라인 전체를 빈틈없이 덮어야 한다"
 
 
-def test_zoom_becomes_keyframes_on_right_clip(built):
+def test_clips_are_split_at_zoom_boundaries(built):
+    """줌 하나 = 클립 하나. 그래야 캡컷에서 그 줌만 잡고 고칠 수 있다."""
     _, content = built
-    video_track = next(t for t in content["tracks"] if t["type"] == "video")
-    segs = sorted(video_track["segments"], key=lambda s: s["target_timerange"]["start"])
+    segs = _video_segments(content)
+    # 컷 3개인데 줌(3.2~5.2s)이 두 번째 컷을 쪼개므로 3개보다 많아진다
+    assert len(segs) > 3
 
-    # 줌 큐 3.2s 는 두 번째 클립(3.0s 시작) 안에 있다
-    assert not segs[0].get("common_keyframes")
-    kfs = segs[1]["common_keyframes"]
-    assert kfs, "두 번째 클립에 키프레임이 있어야 한다"
+    zoomed = [s for s in segs if s.get("common_keyframes")]
+    assert len(zoomed) == 1, "줌 클립은 정확히 하나"
 
-    points = kfs[0]["keyframe_list"]
-    assert len(points) == 4                          # 1.0 → 배율 → 배율 → 1.0
+    seg = zoomed[0]
+    assert seg["target_timerange"]["start"] == pytest.approx(3_200_000, abs=2000)
+    assert seg["target_timerange"]["duration"] == pytest.approx(2_000_000, abs=2000)
+
+
+def test_zoom_keyframes_start_and_end_at_normal_scale(built):
+    _, content = built
+    seg = next(s for s in _video_segments(content) if s.get("common_keyframes"))
+    points = seg["common_keyframes"][0]["keyframe_list"]
+
+    assert len(points) == 4                       # 1.0 → 배율 → 배율 → 1.0
     values = [p["values"][0] for p in points]
     assert values[0] == pytest.approx(1.0)
     assert values[1] == pytest.approx(1.35)
+    assert values[2] == pytest.approx(1.35)
     assert values[-1] == pytest.approx(1.0)
-    # 시각은 클립 시작 기준(0.2s = 3.2s - 3.0s)
-    assert points[0]["time_offset"] == pytest.approx(200_000, abs=1000)
+
+    # 클립이 곧 줌 구간이므로 키프레임은 0 에서 시작해 클립 끝에서 끝난다
+    assert points[0]["time_offset"] == 0
+    assert points[-1]["time_offset"] == pytest.approx(
+        seg["target_timerange"]["duration"], abs=2000
+    )
+
+
+def test_source_ranges_stay_consistent(built):
+    """클립을 쪼개도 원본에서 가져오는 위치는 이어져야 한다."""
+    _, content = built
+    segs = _video_segments(content)
+    keeps = [(0.0, 3.0), (4.5, 7.0), (8.0, 11.5)]
+
+    for seg in segs:
+        src = seg["source_timerange"]["start"] / 1e6
+        dur = seg["source_timerange"]["duration"] / 1e6
+        assert any(a - 0.01 <= src and src + dur <= b + 0.01 for a, b in keeps), (
+            f"원본 {src:.2f}~{src + dur:.2f}s 가 어느 컷 구간에도 안 들어감"
+        )
 
 
 def test_captions_have_style_and_no_overlap(built):
@@ -181,6 +209,73 @@ def test_sfx_and_effects_placed(built):
     assert len(audio_track["segments"]) == 2
     effect_track = next(t for t in content["tracks"] if t["type"] == "effect")
     assert len(effect_track["segments"]) == 1
+
+
+def test_overlapping_items_get_extra_tracks(fixtures, library, tmp_path: Path):
+    """겹치는 자막·효과음·화면효과가 하나도 버려지지 않아야 한다."""
+    info = media.probe(fixtures["video"])
+    keeps = [cuts.KeepRange(0.0, 10.0)]
+    sheet = Cuesheet(
+        captions=[                       # 셋이 전부 겹침
+            Caption(1.0, 4.0, "가", "reaction"),
+            Caption(2.0, 5.0, "나", "narration", "top"),
+            Caption(3.0, 6.0, "다", "whisper", "upper"),
+        ],
+        sfx=[SfxCue(1.0, "ding"), SfxCue(1.1, "ding")],   # ding 은 1.1초짜리라 겹침
+        effects=[EffectCue(1.0, 3.0, "flash"), EffectCue(2.0, 4.0, "shake")],
+    )
+    drafts = tmp_path / "packed"
+    drafts.mkdir()
+
+    report = draft.build(
+        video=info, keeps=keeps, timeline=cuts.TimelineMap(keeps), sheet=sheet,
+        cfg=Config(), draft_dir=drafts, draft_name="겹침", sfx_library=library,
+        srt_path=None, allow_replace=True,
+    )
+
+    assert report.captions == 3, "자막이 버려졌다"
+    assert report.sfx == 2, "효과음이 버려졌다"
+    assert report.effects == 2, "화면효과가 버려졌다"
+    assert report.tracks["caption"] == 3
+    assert report.tracks["audio"] == 2
+    assert report.tracks["effect"] == 2
+
+    content = json.loads((report.draft_path / "draft_content.json").read_text(encoding="utf-8"))
+    for track in content["tracks"]:
+        segs = sorted(track["segments"], key=lambda s: s["target_timerange"]["start"])
+        for a, b in zip(segs, segs[1:]):
+            a_end = a["target_timerange"]["start"] + a["target_timerange"]["duration"]
+            assert b["target_timerange"]["start"] >= a_end, (
+                f"{track['type']} 트랙 안에서 클립이 겹침"
+            )
+
+
+def test_every_item_is_its_own_segment(fixtures, library, tmp_path: Path):
+    """캡컷에서 하나씩 잡고 고칠 수 있도록, 항목마다 독립된 클립이어야 한다."""
+    info = media.probe(fixtures["video"])
+    keeps = [cuts.KeepRange(0.0, 10.0)]
+    sheet = Cuesheet(
+        captions=[Caption(i * 1.5, i * 1.5 + 1.0, f"자막{i}", "reaction") for i in range(5)],
+        sfx=[SfxCue(i * 2.0, "ding") for i in range(4)],
+    )
+    drafts = tmp_path / "each"
+    drafts.mkdir()
+
+    report = draft.build(
+        video=info, keeps=keeps, timeline=cuts.TimelineMap(keeps), sheet=sheet,
+        cfg=Config(), draft_dir=drafts, draft_name="개별", sfx_library=library,
+        srt_path=None, allow_replace=True,
+    )
+    content = json.loads((report.draft_path / "draft_content.json").read_text(encoding="utf-8"))
+
+    text_segs = sum(len(t["segments"]) for t in content["tracks"] if t["type"] == "text")
+    audio_segs = sum(len(t["segments"]) for t in content["tracks"] if t["type"] == "audio")
+    assert text_segs == 5, "자막 5개가 각각 별도 클립이어야 한다"
+    assert audio_segs == 4, "효과음 4개가 각각 별도 클립이어야 한다"
+
+    # 자막마다 고유한 텍스트 소재를 가져야 개별 편집이 된다
+    texts = [json.loads(m["content"])["text"] for m in content["materials"]["texts"]]
+    assert sorted(texts) == [f"자막{i}" for i in range(5)]
 
 
 def test_unknown_sfx_is_warned_not_fatal(fixtures, library, tmp_path: Path):

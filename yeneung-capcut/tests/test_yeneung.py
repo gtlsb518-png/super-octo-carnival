@@ -109,14 +109,33 @@ def test_cut_start_of():
 # ---------------------------------------------------------------- 큐시트 정리
 
 
-def test_sanitize_separates_overlapping_captions():
+def test_sanitize_keeps_overlapping_captions():
+    """겹친다고 버리거나 밀지 않는다. 트랙을 나누는 건 배치 단계의 일."""
     sheet = Cuesheet(captions=[
         Caption(1.0, 2.0, "가", "reaction"),
         Caption(1.5, 2.5, "나", "reaction"),   # 앞과 겹침
     ])
     out = sanitize(sheet, total=30.0)
     assert len(out.captions) == 2
-    assert out.captions[1].start >= out.captions[0].end + 0.14
+    assert out.captions[0].start == 1.0 and out.captions[0].end == 2.0
+    assert out.captions[1].start == 1.5 and out.captions[1].end == 2.5
+
+
+def test_sanitize_drops_duplicate_captions_from_chunk_overlap():
+    """청크 경계에서 같은 자막이 두 번 나오는 건 중복이므로 하나만 남긴다."""
+    sheet = Cuesheet(captions=[
+        Caption(10.0, 11.0, "이게 되네", "reaction"),
+        Caption(10.2, 11.2, "이게 되네", "reaction"),
+        Caption(30.0, 31.0, "이게 되네", "reaction"),   # 한참 뒤면 다른 자막
+    ])
+    out = sanitize(sheet, total=60.0)
+    assert len(out.captions) == 2
+
+
+def test_sanitize_drops_duplicate_sfx():
+    sheet = Cuesheet(sfx=[SfxCue(5.0, "ding"), SfxCue(5.01, "ding"), SfxCue(5.0, "drum")])
+    out = sanitize(sheet, total=30.0)
+    assert len(out.sfx) == 2  # 같은 시각의 ding 둘은 하나로, drum 은 별개
 
 
 def test_sanitize_clamps_to_total():
@@ -133,14 +152,15 @@ def test_sanitize_drops_empty_and_reversed():
     assert sanitize(sheet, total=10.0).captions == []
 
 
-def test_sanitize_dedupes_overlapping_zooms_and_effects():
+def test_sanitize_keeps_overlapping_zooms_and_effects():
+    """겹치는 화면효과는 트랙을 나눠 둘 다 살린다. 줌은 배치 단계에서 걸러진다."""
     sheet = Cuesheet(
         zooms=[ZoomCue(1.0, 3.0, 1.3), ZoomCue(2.0, 4.0, 1.4)],
         effects=[EffectCue(1.0, 2.0, "flash"), EffectCue(1.5, 2.5, "shake")],
     )
     out = sanitize(sheet, total=30.0)
-    assert len(out.zooms) == 1
-    assert len(out.effects) == 1
+    assert len(out.zooms) == 2
+    assert len(out.effects) == 2
 
 
 def test_sanitize_keeps_sfx_within_range():

@@ -141,7 +141,7 @@ _USER_TEMPLATE = """\
 
 # 자막 위치 값
 {position_list}
-
+{style_ref_block}
 # 대사 스크립트
 {context_block}{script}
 
@@ -276,6 +276,7 @@ def generate(
     sfx_names: list[str],
     effect_names: list[str],
     *,
+    style_ref: list[str] | None = None,
     client: Any | None = None,
     progress: Any = None,
 ) -> Cuesheet:
@@ -299,6 +300,16 @@ def generate(
     )
     density = _DENSITY_GUIDE.get(cfg.density, _DENSITY_GUIDE["normal"])
 
+    style_ref_block = ""
+    if style_ref:
+        samples = "\n".join(f"- {line}" for line in style_ref[: cfg.style_ref_limit])
+        style_ref_block = (
+            "\n# 이 채널의 자막 예시\n"
+            "아래는 실제로 이 채널에서 쓰던 자막들이다. 문구를 베끼지 말고, "
+            "길이·말투·호흡·어떤 순간에 자막을 넣는지를 따라라.\n"
+            f"{samples}\n"
+        )
+
     sheet = Cuesheet()
     step = max(1, cfg.chunk_lines)
 
@@ -321,6 +332,7 @@ def generate(
             sfx_catalog=sfx_catalog,
             effect_catalog=effect_catalog,
             position_list=position_list,
+            style_ref_block=style_ref_block,
             context_block=context_block,
             script="\n".join(lines[begin:end]),
         )
@@ -346,48 +358,48 @@ def generate(
 # ---------------------------------------------------------------- 후처리
 
 
-def sanitize(sheet: Cuesheet, total: float, min_gap: float = 0.15) -> Cuesheet:
-    """겹침·범위 초과·길이 이상을 정리한다. 모델 출력을 그대로 믿지 않는다."""
-    captions = sorted(
-        (c for c in sheet.captions if c.text.strip() and c.end > c.start),
-        key=lambda c: c.start,
-    )
-    fixed: list[Caption] = []
-    for cap in captions:
-        cap.start = max(0.0, min(cap.start, total))
-        cap.end = max(cap.start + 0.3, min(cap.end, total))
-        if fixed and cap.start < fixed[-1].end + min_gap:
-            shift = fixed[-1].end + min_gap
-            if shift + 0.3 > total:
-                continue  # 뒤로 밀 자리가 없으면 버린다
-            cap.end += shift - cap.start
-            cap.start = shift
-            cap.end = min(cap.end, total)
-        if cap.end > cap.start:
-            fixed.append(cap)
+def sanitize(sheet: Cuesheet, total: float) -> Cuesheet:
+    """범위 초과·길이 이상·중복을 정리한다. 모델 출력을 그대로 믿지 않는다.
 
-    def clamp_range(items, total_: float):
+    겹치는 항목은 여기서 버리지 않는다. 트랙을 늘려 담는 건 배치 단계(packing)의
+    일이고, 한 클립에 둘 다 걸 수 없는 줌 같은 경우만 거기서 걸러진다.
+    """
+    captions: list[Caption] = []
+    seen: set[tuple[str, int]] = set()
+    for cap in sorted(sheet.captions, key=lambda c: c.start):
+        if not cap.text.strip() or cap.end <= cap.start:
+            continue
+        cap.start = max(0.0, min(cap.start, total))
+        cap.end = min(max(cap.end, cap.start + 0.3), total)
+        if cap.end <= cap.start:
+            continue
+        # 같은 문구가 거의 같은 시각에 두 번 나온 건 청크 경계 중복이다
+        key = (cap.text.strip(), int(cap.start * 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        captions.append(cap)
+
+    def clamp(items):
         out = []
         for it in sorted(items, key=lambda x: x.start):
-            it.start = max(0.0, min(it.start, total_))
-            it.end = max(it.start + 0.2, min(it.end, total_))
+            it.start = max(0.0, min(it.start, total))
+            it.end = min(max(it.end, it.start + 0.2), total)
             if it.end > it.start:
                 out.append(it)
         return out
 
-    return Cuesheet(
-        captions=fixed,
-        sfx=[s for s in sorted(sheet.sfx, key=lambda x: x.time) if 0.0 <= s.time <= total],
-        zooms=_dedupe_overlap(clamp_range(sheet.zooms, total)),
-        effects=_dedupe_overlap(clamp_range(sheet.effects, total)),
-    )
-
-
-def _dedupe_overlap(items: list) -> list:
-    """겹치는 구간은 앞의 것만 남긴다 (줌/화면효과는 겹치면 이상해진다)."""
-    out: list = []
-    for it in items:
-        if out and it.start < out[-1].end:
+    sfx: list[SfxCue] = []
+    seen_sfx: set[tuple[str, int]] = set()
+    for cue in sorted(sheet.sfx, key=lambda x: x.time):
+        if not 0.0 <= cue.time <= total:
             continue
-        out.append(it)
-    return out
+        key = (cue.name, int(cue.time * 20))  # 0.05초 안에 같은 소리 두 번은 중복
+        if key in seen_sfx:
+            continue
+        seen_sfx.add(key)
+        sfx.append(cue)
+
+    return Cuesheet(
+        captions=captions, sfx=sfx, zooms=clamp(sheet.zooms), effects=clamp(sheet.effects)
+    )

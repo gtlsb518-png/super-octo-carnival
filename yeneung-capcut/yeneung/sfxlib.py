@@ -41,9 +41,12 @@ class SfxLibrary:
     def names(self) -> list[str]:
         return sorted(self._entries)
 
-    def catalog(self) -> str:
+    def catalog(self, limit: int | None = None) -> str:
         """프롬프트에 넣을 '이름: 설명' 목록."""
-        return "\n".join(f"- {s.name}: {s.description}" for s in self)
+        items = sorted(self, key=lambda s: s.name)
+        if limit is not None:
+            items = items[:limit]
+        return "\n".join(f"- {s.name}: {s.description}" for s in items)
 
 
 def load_library(root: str | Path) -> SfxLibrary:
@@ -65,9 +68,15 @@ def load_library(root: str | Path) -> SfxLibrary:
                 continue  # 매니페스트에 적혔지만 파일이 없으면 조용히 건너뜀
             entries[name] = Sfx(name, path.resolve(), item.get("desc", name))
     else:
-        for path in sorted(base.iterdir()):
-            if path.suffix.lower() in _AUDIO_EXT:
-                entries[path.stem] = Sfx(path.stem, path.resolve(), path.stem)
+        # 매니페스트가 없으면 하위 폴더까지 훑어 파일명 그대로 등록한다.
+        # 설명이 없으니 Claude 가 언제 쓸지 판단하기 어렵다 — `sfx scan` 을 권한다.
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in _AUDIO_EXT:
+                continue
+            name = path.stem
+            if name in entries:  # 다른 폴더에 같은 이름이 있으면 폴더명을 붙인다
+                name = f"{path.parent.name}_{path.stem}"
+            entries[name] = Sfx(name, path.resolve(), path.stem)
 
     return SfxLibrary(entries, base)
 

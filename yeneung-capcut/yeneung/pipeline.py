@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import cuesheet as cuesheet_mod
-from . import cuts, draft, media, sfxgen, sfxlib, styles, transcribe
+from . import cuts, draft, media, sfxgen, sfxlib, styleref, styles, transcribe
 from .config import Config, find_capcut_draft_dir
 
 Log = Callable[[str], None]
@@ -84,19 +84,37 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
 
     # 4. 효과음 라이브러리 ------------------------------------------------
     if cfg.sfx.enabled:
-        library = sfxlib.load_library(cfg.sfx.library)
-        if not library:
+        root = Path(cfg.sfx.library).resolve()
+        library = sfxlib.load_library(root)
+        if not library and cfg.sfx.autogenerate:
             # 처음 돌릴 때 효과음이 없으면 기본 팩을 만들어 준다.
             # 합성으로 만드는 것이라 저작권 문제가 없고 1초도 안 걸린다.
-            log(f"효과음이 없어 기본 팩을 생성합니다 — {Path(cfg.sfx.library).resolve()}")
-            created, _ = sfxgen.generate_pack(cfg.sfx.library)
+            log(f"효과음이 없어 기본 팩을 생성합니다 — {root}")
+            created, _ = sfxgen.generate_pack(root)
             log(f"  {len(created)}개 생성 (마음에 안 들면 같은 이름 파일로 덮어쓰세요)")
-            library = sfxlib.load_library(cfg.sfx.library)
-        log(f"효과음: {len(library)}개 사용 가능")
+            library = sfxlib.load_library(root)
+
+        if not library:
+            log(f"  ! 효과음이 없습니다 ({root}) — 효과음 없이 진행합니다")
+        else:
+            log(f"효과음: {len(library)}개 사용 가능 — {root}")
+            undescribed = [s.name for s in library if s.description == s.name]
+            if undescribed:
+                log(f"  ! {len(undescribed)}개에 설명이 없습니다. "
+                    f"`yeneung sfx scan` 을 돌리면 훨씬 잘 골라 씁니다")
+            if len(library) > cfg.sfx.max_catalog:
+                log(f"  ! 효과음이 많아 앞 {cfg.sfx.max_catalog}개만 후보로 씁니다 "
+                    f"(config 의 sfx.max_catalog 로 조절)")
     else:
         library = sfxlib.SfxLibrary({}, Path("."))
 
     effect_names = styles.available_effects() if cfg.effect.enabled else []
+
+    # 자막 스타일 예시 (내가 예전에 쓰던 자막)
+    style_examples: list[str] | None = None
+    if cfg.cuesheet.style_ref:
+        style_examples = styleref.load(cfg.cuesheet.style_ref)
+        log(f"자막 스타일 예시: {len(style_examples)}줄 — {cfg.cuesheet.style_ref}")
 
     # 5. 큐시트 -----------------------------------------------------------
     sheet_path = opts.work_dir / "cuesheet.json"
@@ -117,8 +135,9 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             timeline.total,
             cfg.cuesheet,
             style_names=list(cfg.styles),
-            sfx_names=library.names(),
+            sfx_names=library.names()[: cfg.sfx.max_catalog],
             effect_names=effect_names,
+            style_ref=style_examples,
             progress=progress,
         )
         sheet.save(sheet_path)

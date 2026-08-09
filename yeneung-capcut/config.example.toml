@@ -39,6 +39,9 @@ density = "normal"
 # 프로그램 톤. 이 문장이 자막 문체를 크게 바꿉니다.
 tone = "밝고 빠른 템포의 관찰 예능"
 chunk_lines = 120
+# 내 자막 스타일 예시 파일. `yeneung learn` 으로 만들 수 있습니다.
+# style_ref = "style_ref.txt"
+style_ref_limit = 80
 
 
 [subtitle]
@@ -51,8 +54,14 @@ max_line_width = 0.82
 
 [sfx]
 enabled = true
+# 내 효과음 폴더를 여기에 지정하세요. 하위 폴더까지 훑습니다.
+# library = 'C:\Users\내계정\Desktop\효과음'
 library = "assets/sfx"
 volume = 0.65
+# 효과음이 아주 많을 때 후보로 넘길 최대 개수
+max_catalog = 90
+# 폴더가 비어 있으면 기본 팩을 자동 생성할지
+autogenerate = true
 
 
 [zoom]
