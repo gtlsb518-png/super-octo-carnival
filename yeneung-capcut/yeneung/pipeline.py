@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import cuesheet as cuesheet_mod
-from . import cuts, draft, media, sfxgen, sfxlib, styleref, styles, transcribe
+from . import cuts, draft, media, packing, sfxgen, sfxlib, styleref, styles, transcribe
 from .config import POSITION_OVERRIDES, Config, find_capcut_draft_dir
 
 Log = Callable[[str], None]
@@ -111,6 +111,13 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
         library = sfxlib.SfxLibrary({}, Path("."))
 
     effect_names = styles.available_effects() if cfg.effect.enabled else []
+    anim_names = styles.available_caption_anims()
+    boundaries = packing.cut_boundaries(timeline)
+    transition_names = (
+        styles.available_transitions() if cfg.transition.enabled and boundaries else []
+    )
+    if cfg.transition.enabled and boundaries:
+        log(f"컷 경계 {len(boundaries)}곳 — 장면 전환을 넣을 수 있는 지점")
 
     # 자막 스타일 예시 (내가 예전에 쓰던 자막)
     style_examples: list[str] | None = None
@@ -129,6 +136,8 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             sfx_names=library.names(),
             effect_names=effect_names,
             positions=POSITION_OVERRIDES,
+            anim_names=anim_names,
+            transition_names=transition_names,
         ):
             log(f"  ! {warning}")
         sheet = cuesheet_mod.sanitize(sheet, timeline.total)
@@ -152,6 +161,9 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             style_names=list(cfg.styles),
             sfx_names=library.names()[: cfg.sfx.max_catalog],
             effect_names=effect_names,
+            anim_names=anim_names,
+            transition_names=transition_names,
+            boundaries=boundaries,
             style_ref=style_examples,
             progress=progress,
         )
@@ -167,7 +179,7 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             draft_path=Path("(dry-run)"), name=opts.draft_name, duration=timeline.total,
             clips=len(keeps), captions=len(sheet.captions), subtitles=len(cut_utterances),
             sfx=len(sheet.sfx), zooms=len(sheet.zooms), effects=len(sheet.effects),
-            warnings=[],
+            transitions=len(sheet.transitions), warnings=[],
         )
 
     draft_dir = opts.draft_dir or (Path(cfg.draft_dir) if cfg.draft_dir else find_capcut_draft_dir())

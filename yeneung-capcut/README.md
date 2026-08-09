@@ -25,7 +25,7 @@
    │
    ├─ 무음 구간 감지        → 늘어지는 부분 자동 컷
    ├─ Whisper 받아쓰기      → 대사 자막(SRT)
-   ├─ Claude 큐시트 생성    → 예능 자막 / 효과음 / 줌 / 화면효과
+   ├─ Claude 큐시트 생성    → 예능 자막 / 애니메이션 / 효과음 / 줌 / 전환
    └─ 캡컷 초안 생성        → 캡컷에서 열기
 ```
 
@@ -38,6 +38,7 @@
 | 대사 자막 | 받아쓴 대사. 하단 기본 자막 |
 | 효과음 | 자막 타이밍에 맞춘 효과음 |
 | 화면효과 | 플래시, 흔들림, 글리치 등 |
+| 장면 전환 | 컷과 컷 사이 디졸브·페이드 등 |
 
 ## 요구 사항
 
@@ -202,11 +203,14 @@ python -m yeneung run 영상.mp4 --cuesheet mine.json         # Claude 호출 �
   ],
   "sfx":     [{"time": 0.5, "name": "ding"}],
   "zooms":   [{"start": 4.0, "end": 6.0, "scale": 1.3}],
-  "effects": [{"start": 4.0, "end": 4.5, "name": "flash"}]
+  "effects": [{"start": 4.0, "end": 4.5, "name": "flash"}],
+  "transitions": [{"time": 8.0, "name": "dissolve", "duration": 0.5}]
 }
 ```
 
 - 시각은 **컷 편집이 끝난 뒤** 기준의 초입니다. `--no-cut` 을 쓰면 원본과 같습니다.
+- `transitions` 의 `time` 은 **컷 경계**여야 합니다. 다른 시각은 무시되고 경고가 뜹니다.
+- `anim` 으로 자막마다 등장 애니메이션을 지정할 수 있습니다 (생략하면 스타일 기본값).
 - `style` 은 생략하면 `reaction`, `position` 은 생략하면 스타일 기본 위치입니다.
 - 자막끼리 겹쳐도 됩니다. 트랙이 자동으로 늘어납니다.
 - 준 파일은 고쳐 쓰지 않습니다. 캐시에도 안 남습니다.
@@ -310,6 +314,8 @@ python -m yeneung run 영상.mp4 -c config.toml
 | 자막이 화면 밖 | `styles.*.position_y` 부호를 뒤집으세요 |
 | 컷이 너무 과함 | `cut.min_silence` 를 올리거나 `--no-cut` |
 | 자막이 너무 많음 | `--density low` |
+| 전환이 안 들어감 | 컷 경계에만 들어갑니다. `--no-cut` 이면 경계가 없습니다 |
+| 전환이 너무 잦음 | `--no-transitions` 또는 `--density low` |
 | 큐시트를 직접 쓰고 싶음 | `check` 로 검사 후 `run --cuesheet` |
 | 내 효과음을 안 씀 | `sfx scan` 으로 설명을 붙이세요 |
 | 자막 문체가 내 채널 같지 않음 | `learn` 으로 예전 자막을 뽑아 `--style-ref` |

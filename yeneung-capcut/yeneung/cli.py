@@ -51,6 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-sfx", action="store_true", help="효과음 끄기")
     r.add_argument("--no-zoom", action="store_true", help="줌 끄기")
     r.add_argument("--no-effects", action="store_true", help="화면효과 끄기")
+    r.add_argument("--no-transitions", action="store_true", help="장면 전환 끄기")
     r.add_argument("--no-subtitle", action="store_true", help="대사 자막 끄기")
     r.add_argument("--dry-run", action="store_true", help="큐시트만 만들고 초안은 안 씀")
     r.add_argument("--replace", action="store_true", help="같은 이름 프로젝트 덮어쓰기")
@@ -97,6 +98,8 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.zoom.enabled = False
     if args.no_effects:
         cfg.effect.enabled = False
+    if args.no_transitions:
+        cfg.transition.enabled = False
     if args.no_subtitle:
         cfg.subtitle.enabled = False
     return cfg
@@ -274,6 +277,8 @@ def _cmd_check(cfg: Config, args: argparse.Namespace) -> int:
         sfx_names=library.names(),
         effect_names=effect_names,
         positions=POSITION_OVERRIDES,
+        anim_names=styles.available_caption_anims(),
+        transition_names=styles.available_transitions(),
     )
     for warning in warnings:
         print(f"  ! {warning}")
@@ -286,6 +291,8 @@ def _cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             print(f"쓸 수 있는 효과음: {', '.join(library.names())}")
         if effect_names:
             print(f"쓸 수 있는 화면효과: {', '.join(effect_names)}")
+        print(f"쓸 수 있는 애니메이션: default, {', '.join(styles.available_caption_anims())}")
+        print(f"쓸 수 있는 전환: {', '.join(styles.available_transitions())}")
         return 1
 
     print("이름도 모두 확인했습니다. 그대로 쓸 수 있습니다.")
@@ -317,8 +324,12 @@ def _cmd_learn(cfg: Config, args: argparse.Namespace) -> int:
         print("예능 자막이 들어간 프로젝트를 지정해 주세요.")
         return 1
 
-    out = styleref.save(lines, args.out, source=str(target))
-    print(f"자막 {len(lines)}개를 뽑았습니다 — {out}\n")
+    animations = styleref.extract_animations(target)
+    out = styleref.save(lines, args.out, source=str(target), animations=animations)
+    print(f"자막 {len(lines)}개를 뽑았습니다 — {out}")
+    if animations:
+        print(f"쓰신 자막 애니메이션: {', '.join(animations[:6])}")
+    print()
     for line in lines[:15]:
         print(f"  {line}")
     if len(lines) > 15:
@@ -380,13 +391,13 @@ def main(argv: list[str] | None = None) -> int:
     print()
     if args.dry_run:
         print(f"큐시트 준비 완료 — 자막 {report.captions} · 효과음 {report.sfx} · "
-              f"줌 {report.zooms} · 화면효과 {report.effects}")
+              f"줌 {report.zooms} · 화면효과 {report.effects} · 전환 {report.transitions}")
         return 0
 
     print(f"완료: {report.draft_path}")
     print(f"  길이 {report.duration:.1f}초 · 클립 {report.clips}개 · 대사자막 {report.subtitles}개")
     print(f"  예능자막 {report.captions}개 · 효과음 {report.sfx}개 · "
-          f"줌 {report.zooms}개 · 화면효과 {report.effects}개")
+          f"줌 {report.zooms}개 · 화면효과 {report.effects}개 · 전환 {report.transitions}개")
 
     extra = {k: v for k, v in report.tracks.items() if v > 1}
     if extra:

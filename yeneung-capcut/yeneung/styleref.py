@@ -67,6 +67,26 @@ def extract_from_draft(draft_content: str | Path) -> list[str]:
     return _filter(texts)
 
 
+def extract_animations(draft_content: str | Path) -> list[str]:
+    """초안에서 실제로 쓴 자막 등장 애니메이션 이름을 세어 많이 쓴 순으로."""
+    from collections import Counter
+
+    p = Path(draft_content)
+    if p.is_dir():
+        p = p / "draft_content.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    counter: Counter[str] = Counter()
+    for material in data.get("materials", {}).get("material_animations", []):
+        for anim in material.get("animations", []):
+            if anim.get("type") == "in" and anim.get("name"):
+                counter[anim["name"]] += 1
+    return [name for name, _ in counter.most_common()]
+
+
 def _filter(texts: list[str]) -> list[str]:
     """예능 자막처럼 보이는 것만 남기고 중복을 없앤다."""
     out: list[str] = []
@@ -81,7 +101,10 @@ def _filter(texts: list[str]) -> list[str]:
     return out
 
 
-def save(lines: list[str], path: str | Path, *, source: str = "") -> Path:
+def save(
+    lines: list[str], path: str | Path, *, source: str = "",
+    animations: list[str] | None = None,
+) -> Path:
     """예시를 파일로 저장한다. 사람이 직접 손보기 좋게 주석을 붙인다."""
     header = [
         "# 자막 스타일 예시",
@@ -90,6 +113,8 @@ def save(lines: list[str], path: str | Path, *, source: str = "") -> Path:
     ]
     if source:
         header.append(f"# 출처: {source}")
+    if animations:
+        header.append(f"# 이 프로젝트에서 쓴 자막 애니메이션: {', '.join(animations[:6])}")
     header.append("")
 
     p = Path(path)

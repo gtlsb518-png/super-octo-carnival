@@ -139,6 +139,15 @@ class EffectConfig:
     enabled: bool = True
 
 
+@dataclass
+class TransitionConfig:
+    """장면 전환 설정."""
+
+    enabled: bool = True
+    # 큐 시각이 컷 경계에서 이만큼(초) 안쪽이면 그 경계로 붙인다
+    snap: float = 0.4
+
+
 # ---------------------------------------------------------------- 전체
 
 
@@ -151,6 +160,7 @@ class Config:
     sfx: SfxConfig = field(default_factory=SfxConfig)
     zoom: ZoomConfig = field(default_factory=ZoomConfig)
     effect: EffectConfig = field(default_factory=EffectConfig)
+    transition: TransitionConfig = field(default_factory=TransitionConfig)
     # 캡컷 초안 폴더. None 이면 자동 탐지
     draft_dir: str | None = None
     # 자막 스타일 프리셋
@@ -234,6 +244,7 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
     simple = {
         "cut": "cut", "transcribe": "transcribe", "cuesheet": "cuesheet",
         "subtitle": "subtitle", "sfx": "sfx", "zoom": "zoom", "effect": "effect",
+        "transition": "transition",
     }
     for section, attr in simple.items():
         if section in raw:

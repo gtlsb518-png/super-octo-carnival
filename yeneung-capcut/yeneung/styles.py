@@ -24,6 +24,34 @@ EFFECT_CANDIDATES: dict[str, tuple[str, ...]] = {
     "freeze":    ("相片定格", "定格闪烁", "故障定格"),
 }
 
+#: 장면 전환: 논리 이름 → 캡컷 TransitionType 후보
+#: 컷과 컷 사이에만 들어간다. 같은 장면을 쪼갠 자리에는 넣지 않는다.
+TRANSITION_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "dissolve":    ("叠化", "色彩溶解", "丝滑渐隐"),      # 가장 무난한 디졸브
+    "fade_black":  ("闪黑", "闪黑_II", "微震闪黑"),        # 검게 떨어졌다 올라옴
+    "flash_white": ("闪白", "闪白_II"),                    # 하얗게 번쩍
+    "blur":        ("转场_模糊", "横向模糊", "竖向模糊"),  # 흐려졌다 선명해짐
+    "slide":       ("滑动", "向右滑动", "交错滑动"),        # 밀려 들어옴
+    "push":        ("推近", "拉近"),                        # 확 다가감
+    "pull":        ("拉远", "拉伸"),                        # 확 물러남
+    "glitch":      ("故障", "信号故障", "彩色故障"),        # 신호 튐
+    "spin":        ("中轴旋转", "顺时针旋转", "三维旋转"),  # 돌아가며 전환
+}
+
+#: 자막 등장 애니메이션: 큐시트에서 쓰는 논리 이름 → 캡컷 TextIntro 후보.
+#: 스타일에 박힌 기본값 대신 장면마다 골라 쓸 수 있게 한다.
+CAPTION_ANIM_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "pop":        ("弹出", "弹入", "放大"),               # 툭 튀어나옴 (기본)
+    "fade":       ("渐显", "魔幻渐显"),                    # 조용히 떠오름
+    "slide_up":   ("向上弹入", "向上滑动", "滑入上升"),
+    "slide_side": ("向右滑动", "向右缓入", "环绕滑入"),
+    "typewriter": ("打字机", "打字机_I", "随机打字机"),    # 한 글자씩
+    "zoom":       ("放大震动", "放大旋转", "波浪放大"),    # 크게 터짐
+    "shake":      ("抖动甩入", "抖动拼凑", "故障弹跳"),    # 흔들며 등장
+    "glitch":     ("故障", "乱码故障", "故障翻转"),
+    "sparkle":    ("星光闪闪", "辉光入场", "金光弹出"),
+}
+
 #: 자막 등장 애니메이션 후보
 INTRO_CANDIDATES: dict[str, tuple[str, ...]] = {
     "弹出":      ("弹出", "弹入", "放大"),
@@ -77,6 +105,32 @@ def loop_type(name: str | None) -> Any | None:
     return _resolve(TextLoopAnim, LOOP_CANDIDATES.get(name, (name,)))
 
 
+@lru_cache(maxsize=None)
+def transition_type(name: str) -> Any | None:
+    """'dissolve' 같은 논리 이름 → TransitionType 멤버 (없으면 None)."""
+    from pycapcut import TransitionType
+
+    return _resolve(TransitionType, TRANSITION_CANDIDATES.get(name, (name,)))
+
+
+@lru_cache(maxsize=None)
+def caption_anim_type(name: str | None) -> Any | None:
+    """'pop' 같은 논리 이름 → TextIntro 멤버 (없으면 None)."""
+    if not name:
+        return None
+    from pycapcut import TextIntro
+
+    return _resolve(TextIntro, CAPTION_ANIM_CANDIDATES.get(name, (name,)))
+
+
 def available_effects() -> list[str]:
     """이 캡컷 설치본에서 실제로 쓸 수 있는 논리 효과 이름들."""
     return [name for name in EFFECT_CANDIDATES if effect_type(name) is not None]
+
+
+def available_transitions() -> list[str]:
+    return [name for name in TRANSITION_CANDIDATES if transition_type(name) is not None]
+
+
+def available_caption_anims() -> list[str]:
+    return [name for name in CAPTION_ANIM_CANDIDATES if caption_anim_type(name) is not None]

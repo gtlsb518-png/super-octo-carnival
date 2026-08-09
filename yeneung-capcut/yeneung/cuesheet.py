@@ -24,6 +24,8 @@ class Caption:
     text: str
     style: str
     position: str = "default"
+    #: 등장 애니메이션 논리 이름. 비우면 스타일에 정해진 기본값을 쓴다
+    anim: str = "default"
 
 
 @dataclass
@@ -47,11 +49,21 @@ class EffectCue:
 
 
 @dataclass
+class TransitionCue:
+    """컷과 컷 사이에 넣을 장면 전환."""
+
+    time: float          # 전환이 걸릴 컷 경계 시각
+    name: str            # dissolve, fade_black, ...
+    duration: float = 0.5
+
+
+@dataclass
 class Cuesheet:
     captions: list[Caption] = field(default_factory=list)
     sfx: list[SfxCue] = field(default_factory=list)
     zooms: list[ZoomCue] = field(default_factory=list)
     effects: list[EffectCue] = field(default_factory=list)
+    transitions: list[TransitionCue] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -60,6 +72,7 @@ class Cuesheet:
                 "sfx": [asdict(c) for c in self.sfx],
                 "zooms": [asdict(c) for c in self.zooms],
                 "effects": [asdict(c) for c in self.effects],
+                "transitions": [asdict(c) for c in self.transitions],
             },
             ensure_ascii=False,
             indent=2,
@@ -84,7 +97,8 @@ class Cuesheet:
     def summary(self) -> str:
         return (
             f"자막 {len(self.captions)}개 · 효과음 {len(self.sfx)}개 · "
-            f"줌 {len(self.zooms)}개 · 화면효과 {len(self.effects)}개"
+            f"줌 {len(self.zooms)}개 · 화면효과 {len(self.effects)}개 · "
+            f"전환 {len(self.transitions)}개"
         )
 
 
@@ -116,17 +130,41 @@ _SYSTEM = """\
 - whisper: 속마음, 작은 목소리, 소심한 딴지.
 - situation: 장소·시간·상황 안내 CG.
 
+# 자막 등장 애니메이션 (anim)
+- 자막의 성격에 맞춰 고른다. 매번 같은 걸 쓰면 지루하지만, 한 영상에서
+  너무 여러 종류를 쓰면 산만하다. 2~3종을 주로 쓰고 가끔 변주한다.
+- pop: 기본. 툭 튀어나온다. 대부분의 리액션 자막.
+- fade: 조용히 떠오른다. 나레이션, 상황 설명, 정적.
+- zoom: 크게 터진다. 그 구간의 핵심 한 방에만.
+- typewriter: 한 글자씩. 뜸 들이는 순간, 진지한 설명.
+- shake / glitch: 흔들리거나 튄다. 당황, 충격, 사고.
+- slide_up / slide_side: 옆이나 아래에서 들어온다. 부가 정보.
+- sparkle: 반짝인다. 자화자찬, 예쁜 것, 뿌듯한 순간.
+- default: 스타일에 정해진 기본 애니메이션을 쓴다.
+
 # 효과음과 줌
 - 효과음은 자막이 뜨는 바로 그 순간에 겹쳐야 산다. 아무 데나 깔지 않는다.
 - 줌은 표정이 결정적으로 변하는 순간에 0.8~2.5초로 짧게. 계속 당겨져 있으면 피곤하다.
 - 화면효과는 정말 큰 반전에만. 남발하면 촌스러워진다.
+
+# 장면 전환 (transitions)
+- 컷 경계 목록을 준다. 그 시각에만 전환을 넣을 수 있다. 다른 시각은 무시된다.
+- 모든 컷에 전환을 넣지 마라. 대부분의 컷은 그냥 붙는 게 낫다.
+  화제가 바뀌거나, 시간이 건너뛰거나, 장소가 달라질 때만 넣는다.
+- dissolve: 부드럽게 겹친다. 시간 경과, 잔잔한 마무리.
+- fade_black: 검게 떨어졌다 올라온다. 챕터가 끝날 때.
+- flash_white: 하얗게 번쩍. 빠른 화제 전환, 리듬을 끊을 때.
+- blur / slide / push / pull: 가볍게 넘긴다.
+- glitch / spin: 강하다. 아주 가끔만.
+- 길이는 0.3~0.8초. 짧을수록 템포가 산다.
 
 # 지켜야 할 규칙
 - 모든 시각은 제공된 타임라인의 초 단위이며, 대사 구간 안이나 그 바로 뒤여야 한다.
 - 자막끼리 시간이 겹치면 안 된다. 최소 0.15초는 띄운다.
 - 자막 길이는 0.6~2.5초.
 - 효과음은 반드시 제공된 목록의 이름만 쓴다. 목록에 없으면 쓰지 않는다.
-- 화면효과도 반드시 제공된 목록의 이름만 쓴다.
+- 화면효과와 전환도 반드시 제공된 목록의 이름만 쓴다.
+- 전환은 제공된 컷 경계 시각에만 넣는다.
 - 대사가 비어 있는 구간에 억지로 채우지 않는다.
 """
 
@@ -142,6 +180,15 @@ _USER_TEMPLATE = """\
 # 쓸 수 있는 화면효과
 {effect_catalog}
 
+# 쓸 수 있는 장면 전환
+{transition_catalog}
+
+# 컷 경계 (이 시각에만 전환을 넣을 수 있음)
+{boundary_list}
+
+# 쓸 수 있는 자막 애니메이션
+{anim_list}
+
 # 자막 위치 값
 {position_list}
 {style_ref_block}
@@ -153,7 +200,14 @@ _USER_TEMPLATE = """\
 """
 
 
-def _schema(styles: Iterable[str], sfx_names: list[str], effect_names: list[str]) -> dict[str, Any]:
+def _schema(
+    styles: Iterable[str],
+    sfx_names: list[str],
+    effect_names: list[str],
+    anim_names: list[str],
+    transition_names: list[str],
+    boundaries: list[float],
+) -> dict[str, Any]:
     """구조화 출력용 JSON 스키마. 선택지를 enum 으로 못박아 잘못된 이름을 막는다."""
     positions = ["default", *POSITION_OVERRIDES]
 
@@ -165,8 +219,10 @@ def _schema(styles: Iterable[str], sfx_names: list[str], effect_names: list[str]
             "text": {"type": "string", "description": "화면에 뜰 짧은 한국어 자막"},
             "style": {"type": "string", "enum": list(styles)},
             "position": {"type": "string", "enum": positions},
+            "anim": {"type": "string", "enum": ["default", *anim_names],
+                     "description": "등장 애니메이션. 고민되면 default"},
         },
-        "required": ["start", "end", "text", "style", "position"],
+        "required": ["start", "end", "text", "style", "position", "anim"],
         "additionalProperties": False,
     }
     sfx = {
@@ -199,6 +255,17 @@ def _schema(styles: Iterable[str], sfx_names: list[str], effect_names: list[str]
         "additionalProperties": False,
     }
 
+    transition = {
+        "type": "object",
+        "properties": {
+            "time": {"type": "number", "description": "컷 경계 시각. 목록에 있는 값만"},
+            "name": {"type": "string", "enum": transition_names},
+            "duration": {"type": "number", "description": "전환 길이(초). 0.3~0.8 권장"},
+        },
+        "required": ["time", "name", "duration"],
+        "additionalProperties": False,
+    }
+
     props: dict[str, Any] = {
         "captions": {"type": "array", "items": caption},
         "zooms": {"type": "array", "items": zoom},
@@ -207,6 +274,8 @@ def _schema(styles: Iterable[str], sfx_names: list[str], effect_names: list[str]
         props["sfx"] = {"type": "array", "items": sfx}
     if effect_names:
         props["effects"] = {"type": "array", "items": effect}
+    if transition_names and boundaries:
+        props["transitions"] = {"type": "array", "items": transition}
 
     return {
         "type": "object",
@@ -232,10 +301,11 @@ class CuesheetError(RuntimeError):
 #: 섹션별 필드 규격: (필수 필드, 선택 필드와 기본값, 만들 클래스)
 _SECTIONS: dict[str, tuple[dict[str, type], dict[str, Any], Any]] = {
     "captions": ({"start": float, "end": float, "text": str},
-                 {"style": "reaction", "position": "default"}, Caption),
+                 {"style": "reaction", "position": "default", "anim": "default"}, Caption),
     "sfx":      ({"time": float, "name": str}, {}, SfxCue),
     "zooms":    ({"start": float, "end": float, "scale": float}, {}, ZoomCue),
     "effects":  ({"start": float, "end": float, "name": str}, {}, EffectCue),
+    "transitions": ({"time": float, "name": str}, {"duration": 0.5}, TransitionCue),
 }
 
 _EXAMPLE = """\
@@ -245,7 +315,8 @@ _EXAMPLE = """\
   ],
   "sfx":     [{"time": 1.0, "name": "ding"}],
   "zooms":   [{"start": 4.0, "end": 6.0, "scale": 1.3}],
-  "effects": [{"start": 4.0, "end": 4.5, "name": "flash"}]
+  "effects": [{"start": 4.0, "end": 4.5, "name": "flash"}],
+  "transitions": [{"time": 8.0, "name": "dissolve", "duration": 0.5}]
 }"""
 
 
@@ -333,10 +404,19 @@ def parse(data: Any, *, source: str = "큐시트") -> Cuesheet:
 
             for key, default in optional.items():
                 value = item.get(key, default)
-                if not isinstance(value, str):
-                    problems.append(f"{where}.{key}: 문자열이어야 합니다 (받은 값: {value!r})")
-                    continue
-                values[key] = value
+                if isinstance(default, str):
+                    if not isinstance(value, str):
+                        problems.append(f"{where}.{key}: 문자열이어야 합니다 (받은 값: {value!r})")
+                        continue
+                    values[key] = value
+                else:  # 숫자 기본값을 가진 선택 필드 (전환 길이 등)
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        problems.append(f"{where}.{key}: 숫자여야 합니다 (받은 값: {value!r})")
+                        continue
+                    if value <= 0:
+                        problems.append(f"{where}.{key}: 0보다 커야 합니다 ({value})")
+                        continue
+                    values[key] = float(value)
 
             start, end = values.get("start"), values.get("end")
             if start is not None and end is not None and end <= start:
@@ -361,8 +441,8 @@ def parse(data: Any, *, source: str = "큐시트") -> Cuesheet:
         )
 
     return Cuesheet(
-        captions=built["captions"], sfx=built["sfx"],
-        zooms=built["zooms"], effects=built["effects"],
+        captions=built["captions"], sfx=built["sfx"], zooms=built["zooms"],
+        effects=built["effects"], transitions=built["transitions"],
     )
 
 
@@ -373,12 +453,16 @@ def check_names(
     sfx_names: Iterable[str],
     effect_names: Iterable[str],
     positions: Iterable[str] | None = None,
+    anim_names: Iterable[str] | None = None,
+    transition_names: Iterable[str] | None = None,
 ) -> list[str]:
     """이름이 실제로 쓸 수 있는 것인지 본다. 치명적이진 않아 경고로 돌려준다."""
     styles = set(style_names)
     sfx = set(sfx_names)
     effects = set(effect_names)
     places = set(positions or []) | {"default"}
+    anims = set(anim_names or []) | {"default"}
+    trans = set(transition_names or [])
 
     warnings: list[str] = []
     for i, cap in enumerate(sheet.captions):
@@ -391,6 +475,18 @@ def check_names(
             warnings.append(
                 f"captions[{i}]: 모르는 위치 '{cap.position}'{_suggest(cap.position, places)} "
                 f"— 스타일 기본 위치를 씁니다"
+            )
+    for i, cap in enumerate(sheet.captions):
+        if anim_names is not None and cap.anim not in anims:
+            warnings.append(
+                f"captions[{i}]: 모르는 애니메이션 '{cap.anim}'{_suggest(cap.anim, anims)} "
+                f"— 스타일 기본값을 씁니다"
+            )
+    for i, cue in enumerate(sheet.transitions):
+        if transition_names is not None and cue.name not in trans:
+            warnings.append(
+                f"transitions[{i}]: 쓸 수 없는 전환 '{cue.name}'{_suggest(cue.name, trans)} "
+                f"— 무시됩니다"
             )
     for i, cue in enumerate(sheet.sfx):
         if cue.name not in sfx:
@@ -459,6 +555,9 @@ def generate(
     sfx_names: list[str],
     effect_names: list[str],
     *,
+    anim_names: list[str] | None = None,
+    transition_names: list[str] | None = None,
+    boundaries: list[float] | None = None,
     style_ref: list[str] | None = None,
     client: Any | None = None,
     progress: Any = None,
@@ -473,11 +572,18 @@ def generate(
         raise CuesheetError("anthropic 이 설치되어 있지 않습니다. `pip install anthropic`") from exc
 
     client = client or anthropic.Anthropic()
-    schema = _schema(style_names, sfx_names, effect_names)
+    anim_names = anim_names or []
+    transition_names = transition_names or []
+    boundaries = boundaries or []
+    schema = _schema(
+        style_names, sfx_names, effect_names, anim_names, transition_names, boundaries
+    )
     lines = _script_lines(utterances)
 
     sfx_catalog = "\n".join(f"- {n}" for n in sfx_names) or "(없음 — 효과음을 만들지 마라)"
     effect_catalog = "\n".join(f"- {n}" for n in effect_names) or "(없음 — 화면효과를 만들지 마라)"
+    transition_catalog = "\n".join(f"- {n}" for n in transition_names) or "(없음 — 전환을 만들지 마라)"
+    anim_list = "\n".join(f"- {n}" for n in ["default", *anim_names])
     position_list = "\n".join(
         [f"- default: 스타일 기본 위치"] + [f"- {k}" for k in POSITION_OVERRIDES]
     )
@@ -506,6 +612,8 @@ def generate(
                 "\n".join(lines[ctx_start:begin]) + "\n<<여기부터 작업 구간>>\n"
 
         window = utterances[begin:end]
+        in_window = [b for b in boundaries if window[0].start <= b <= window[-1].end + 3.0]
+        boundary_list = ", ".join(f"{b:.2f}" for b in in_window) or "(이 구간엔 컷 경계 없음)"
         user = _USER_TEMPLATE.format(
             tone=cfg.tone,
             total=total_duration,
@@ -514,6 +622,9 @@ def generate(
             density=density,
             sfx_catalog=sfx_catalog,
             effect_catalog=effect_catalog,
+            transition_catalog=transition_catalog,
+            boundary_list=boundary_list,
+            anim_list=anim_list,
             position_list=position_list,
             style_ref_block=style_ref_block,
             context_block=context_block,
@@ -533,6 +644,9 @@ def generate(
         sheet.zooms += [ZoomCue(**c) for c in data.get("zooms", []) if lo <= c["start"] <= hi]
         sheet.effects += [
             EffectCue(**c) for c in data.get("effects", []) if lo <= c["start"] <= hi
+        ]
+        sheet.transitions += [
+            TransitionCue(**c) for c in data.get("transitions", []) if lo <= c["time"] <= hi
         ]
 
     return sanitize(sheet, total_duration)
@@ -583,6 +697,19 @@ def sanitize(sheet: Cuesheet, total: float) -> Cuesheet:
         seen_sfx.add(key)
         sfx.append(cue)
 
+    transitions: list[TransitionCue] = []
+    seen_at: set[int] = set()
+    for cue in sorted(sheet.transitions, key=lambda x: x.time):
+        if not 0.0 <= cue.time <= total:
+            continue
+        key = int(cue.time * 100)  # 한 경계에 전환은 하나만
+        if key in seen_at:
+            continue
+        seen_at.add(key)
+        cue.duration = max(0.1, min(cue.duration, 2.0))
+        transitions.append(cue)
+
     return Cuesheet(
-        captions=captions, sfx=sfx, zooms=clamp(sheet.zooms), effects=clamp(sheet.effects)
+        captions=captions, sfx=sfx, zooms=clamp(sheet.zooms),
+        effects=clamp(sheet.effects), transitions=transitions,
     )

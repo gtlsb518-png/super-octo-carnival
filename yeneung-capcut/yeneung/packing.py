@@ -62,6 +62,7 @@ class VideoPiece:
     cut_start: float      # 편집본 타임라인에서의 시작 시각
     duration: float
     zoom_scale: float | None = None   # 이 조각 전체에 걸리는 줌 배율
+    keep_index: int = 0   # 몇 번째 컷 구간에서 나왔는지
 
     @property
     def cut_end(self) -> float:
@@ -117,10 +118,21 @@ def split_video_pieces(
                     cut_start=a,
                     duration=b - a,
                     zoom_scale=scale,
+                    keep_index=index,
                 )
             )
 
     return pieces
+
+
+def cut_boundaries(timeline: TimelineMap) -> list[float]:
+    """실제 '컷' 이 일어난 시각들.
+
+    줌 때문에 쪼갠 자리는 화면이 이어지므로 전환을 넣으면 안 된다.
+    여기서 돌려주는 건 원본에서 내용이 실제로 건너뛴 지점뿐이다.
+    맨 앞(0초)과 맨 끝은 전환을 걸 상대가 없으므로 뺀다.
+    """
+    return [timeline.cut_start_of(i) for i in range(1, len(timeline.keeps))]
 
 
 def _tidy(values: list[float], lo: float, hi: float) -> list[float]:
