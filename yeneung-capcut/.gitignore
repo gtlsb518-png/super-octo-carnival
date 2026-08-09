@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .yeneung_*/
 config.toml
+
+# 효과음은 sfx generate 로 만들어지는 생성물이라 커밋하지 않음
 assets/sfx/*
 !assets/sfx/README.md
-!assets/sfx/manifest.example.json

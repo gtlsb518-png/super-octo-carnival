@@ -22,8 +22,13 @@ def _build_parser() -> argparse.ArgumentParser:
     doc.add_argument("-c", "--config", help="config.toml 경로")
 
     # ---------------------------------------------------------------- sfx
-    s = sub.add_parser("sfx", help="효과음 라이브러리 확인")
+    s = sub.add_parser("sfx", help="효과음 라이브러리 확인 / 기본 팩 생성")
+    s.add_argument(
+        "action", nargs="?", default="list", choices=["list", "generate"],
+        help="list: 목록 보기 (기본) · generate: 기본 효과음 팩 만들기",
+    )
     s.add_argument("-c", "--config", help="config.toml 경로")
+    s.add_argument("--force", action="store_true", help="generate: 기존 파일도 덮어쓰기")
 
     # ---------------------------------------------------------------- run
     r = sub.add_parser("run", help="영상 → 캡컷 초안 생성")
@@ -108,7 +113,7 @@ def _cmd_doctor(cfg: Config) -> int:
         print(f"  [OK]   효과음 {len(lib)}개 — {Path(cfg.sfx.library).resolve()}")
     else:
         print(f"  [주의] 효과음이 없습니다 — {Path(cfg.sfx.library).resolve()}")
-        print("         효과음 없이도 동작하지만, 넣으면 훨씬 예능다워집니다.")
+        print("         →  python -m yeneung sfx generate   (기본 팩 자동 생성)")
     for miss in sfxlib.missing_files(cfg.sfx.library):
         print(f"  [주의] 매니페스트에 있으나 파일 없음: {miss}")
 
@@ -123,17 +128,40 @@ def _cmd_doctor(cfg: Config) -> int:
     return 0 if ok else 1
 
 
-def _cmd_sfx(cfg: Config) -> int:
+def _cmd_sfx_generate(cfg: Config, force: bool) -> int:
+    from . import sfxgen
+
+    root = Path(cfg.sfx.library).resolve()
+    print(f"기본 효과음 팩 생성 중 — {root}\n")
+    created, skipped = sfxgen.generate_pack(root, overwrite=force)
+
+    for name in created:
+        print(f"  [생성] {name}.wav")
+    for name in skipped:
+        print(f"  [유지] {name}.wav — 이미 있음")
+
+    print(f"\n{len(created)}개 생성, {len(skipped)}개 유지. manifest.json 갱신 완료.")
+    if skipped and not force:
+        print("기존 파일까지 다시 만들려면 --force 를 붙이세요.")
+    print("\n소리가 마음에 안 들면 같은 이름의 파일로 덮어쓰면 그대로 대체됩니다.")
+    print("웃음소리(방청객 리액션)는 합성으로 흉내 낼 수 없어 빠져 있습니다.")
+    print("필요하면 직접 구해서 laugh.wav 로 넣고 manifest.json 에 설명을 적어주세요.")
+    return 0
+
+
+def _cmd_sfx_list(cfg: Config) -> int:
     lib = sfxlib.load_library(cfg.sfx.library)
     root = Path(cfg.sfx.library).resolve()
     if not lib:
         print(f"효과음이 없습니다: {root}")
-        print("\n오디오 파일을 넣고 manifest.json 에 이름과 설명을 적어주세요.")
-        print("설명은 Claude 가 '언제 이 효과음을 쓸지' 판단하는 근거가 됩니다.")
+        print("\n기본 팩을 만들려면:  python -m yeneung sfx generate")
+        print("직접 넣으려면 오디오 파일을 두고 manifest.json 에 이름과 설명을 적으세요.")
         return 1
     print(f"효과음 {len(lib)}개 — {root}\n")
     for s in lib:
         print(f"  {s.name:16s} {s.description}")
+    for miss in sfxlib.missing_files(cfg.sfx.library):
+        print(f"\n  ! 매니페스트에 있으나 파일 없음: {miss}")
     return 0
 
 
@@ -149,7 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         return _cmd_doctor(cfg)
     if args.command == "sfx":
-        return _cmd_sfx(cfg)
+        if args.action == "generate":
+            return _cmd_sfx_generate(cfg, args.force)
+        return _cmd_sfx_list(cfg)
 
     cfg = _apply_overrides(cfg, args)
     video: Path = args.video

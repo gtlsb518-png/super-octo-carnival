@@ -67,35 +67,38 @@ python -m yeneung doctor
 %LOCALAPPDATA%\CapCut\User Data\Projects\com.lveditor.draft
 ```
 
-## 효과음 준비
+## 효과음
 
-효과음 파일은 저작권 때문에 포함되어 있지 않습니다. 직접 넣으세요.
+**따로 준비할 필요 없습니다.** 처음 실행하면 기본 효과음 12종이 자동으로
+생성됩니다. 어디서 받아오는 게 아니라 **합성해서 만드는 것**이라 저작권 문제가
+없고 네트워크도 필요 없습니다.
+
+띵(`ding`) · 딩동댕(`correct`) · 삐-(`error`) · 뿅(`boing`) · 뾱(`pop`) ·
+슝(`swoosh`) · 둥(`drum`) · 두구두구(`tension`) · 뿌우-(`fail`) ·
+반짝(`sparkle`) · 귀뚜라미(`crickets`) · 찌익(`record_scratch`)
 
 ```bash
-cd assets/sfx
-cp manifest.example.json manifest.json
-# 여기에 wav/mp3 파일들을 넣고 manifest.json 을 실제 파일에 맞게 수정
+python -m yeneung sfx            # 목록 확인
+python -m yeneung sfx generate   # 직접 만들기 (자동 생성이 안 됐을 때)
 ```
 
-`manifest.json` 의 `desc` 는 Claude 가 **언제 이 효과음을 쓸지** 판단하는
-유일한 근거입니다. 소리 생김새와 쓰임새를 같이 적어주세요.
+**소리를 바꾸려면** 같은 이름의 파일로 덮어쓰면 됩니다. 이미 있는 파일은
+다시 만들지 않습니다.
+
+```
+assets/sfx/ding.wav   ← 원하는 파일로 덮어쓰기
+```
+
+**새 효과음을 추가하려면** 파일을 넣고 `assets/sfx/manifest.json` 에 항목을
+추가하세요. `desc` 는 Claude 가 **언제 이 소리를 쓸지** 판단하는 유일한
+근거이니 쓰임새까지 적어주세요.
 
 ```json
-{
-  "record_scratch": {
-    "file": "scratch.wav",
-    "desc": "찌익. 분위기가 급정지하는 순간, 예상 빗나감"
-  }
-}
+{ "laugh": { "file": "laugh.wav", "desc": "방청객 웃음소리. 확실한 웃음 포인트" } }
 ```
 
-확인:
-
-```bash
-python -m yeneung sfx
-```
-
-효과음이 없어도 동작합니다. 다만 예능 맛은 확 떨어집니다.
+> 방청객 웃음소리는 합성으로 흉내 낼 수 없어 기본 팩에 없습니다. 예능에서
+> 꽤 중요한 소리라, 필요하면 직접 구해서 위처럼 추가하세요.
 
 ## 사용
 
@@ -218,6 +221,7 @@ yeneung/
   transcribe.py  faster-whisper 받아쓰기, SRT 출력
   cuesheet.py    Claude 로 예능 큐시트 생성
   styles.py      논리 이름 → 캡컷 내부 리소스 매핑
+  sfxgen.py      효과음 합성 (numpy 로 직접 생성)
   sfxlib.py      효과음 라이브러리
   draft.py       pycapcut 으로 초안 굽기
   pipeline.py    전체 흐름

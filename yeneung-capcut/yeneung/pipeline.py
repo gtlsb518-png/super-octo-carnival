@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import cuesheet as cuesheet_mod
-from . import cuts, draft, media, sfxlib, styles, transcribe
+from . import cuts, draft, media, sfxgen, sfxlib, styles, transcribe
 from .config import Config, find_capcut_draft_dir
 
 Log = Callable[[str], None]
@@ -83,12 +83,18 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
         transcribe.write_srt(cut_utterances, srt_path)
 
     # 4. 효과음 라이브러리 ------------------------------------------------
-    library = sfxlib.load_library(cfg.sfx.library) if cfg.sfx.enabled else sfxlib.SfxLibrary({}, Path("."))
     if cfg.sfx.enabled:
-        if library:
-            log(f"효과음: {len(library)}개 사용 가능")
-        else:
-            log(f"  ! 효과음 폴더가 비어 있습니다 ({cfg.sfx.library}) — 효과음 없이 진행합니다")
+        library = sfxlib.load_library(cfg.sfx.library)
+        if not library:
+            # 처음 돌릴 때 효과음이 없으면 기본 팩을 만들어 준다.
+            # 합성으로 만드는 것이라 저작권 문제가 없고 1초도 안 걸린다.
+            log(f"효과음이 없어 기본 팩을 생성합니다 — {Path(cfg.sfx.library).resolve()}")
+            created, _ = sfxgen.generate_pack(cfg.sfx.library)
+            log(f"  {len(created)}개 생성 (마음에 안 들면 같은 이름 파일로 덮어쓰세요)")
+            library = sfxlib.load_library(cfg.sfx.library)
+        log(f"효과음: {len(library)}개 사용 가능")
+    else:
+        library = sfxlib.SfxLibrary({}, Path("."))
 
     effect_names = styles.available_effects() if cfg.effect.enabled else []
 
