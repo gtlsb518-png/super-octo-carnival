@@ -212,7 +212,7 @@ FRAME_US = int(round(1_000_000 / FPS))   # 한 프레임 길이(us)
 
 # 자막 한 조각의 목표 글자 수 (기본값, UI에서 조절 가능).
 # 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
-MAX_SUBTITLE_CHARS = 12
+MAX_SUBTITLE_CHARS = 9
 
 # 말 사이가 이만큼 벌어지면 자막을 끊는다 (자연스러운 호흡 단위 분할)
 SUB_PAUSE_BREAK_US = 350_000
@@ -1076,6 +1076,7 @@ _CONNECTIVE_ENDINGS = (          # 연결어미 — 절이 끝나는 자리라 �
     "아서", "어서", "여서", "지만", "으니까", "니까", "니깐",
     "까지", "부터", "는지", "은지", "인지", "이라", "아니라",
     "도록", "다가", "거나", "든지", "때문에", "덕분에", "위해", "통해",
+    "해도", "아도", "어도", "여도", "더라도", "면서도", "는데도",
     "대로", "만큼", "처럼", "같이", "보다", "라서", "느라", "려고", "면은",
 )
 # 절(節)의 끝을 알리는 말 — "~할 때 / ~한 뒤 / ~한 다음" 뒤에서 끊으면 자연스럽다.
@@ -1215,6 +1216,24 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
     return early[1] if early[0] > late[0] else late[1]
 
 
+def _good_break_ahead(words: list[dict], i: int, budget: int) -> bool:
+    """
+    앞으로 budget 글자 안에 '어미로 끝나는 좋은 자리'가 있는지.
+    있으면 지금 어정쩡하게 끊지 않고 거기까지 붙이는 게 낫다.
+      "전력 사이클이 / 한번 돌면" X → "전력 사이클이 한번 돌면" O
+    """
+    used = 0
+    for k in range(i, len(words)):
+        used += len(words[k]["word"]) + (1 if k > i else 0)
+        if used > budget:
+            return False
+        nxt = words[k + 1]["word"] if k + 1 < len(words) else ""
+        prev = words[k - 1]["word"] if k else ""
+        if _break_score(words[k]["word"], nxt, prev) >= 50:
+            return True
+    return False
+
+
 def _rest_len(words: list[dict], i: int, cap: int = 40) -> int:
     """words[i]부터 문장이 끝날 때까지의 글자 수 (공백 포함, cap에서 멈춤)."""
     total = 0
@@ -1336,9 +1355,10 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
             groups.append(cur); cur = []                # 쉼표 (남은 문장이 다 안 들어갈 때만)
         elif cl >= soft_min and 50 <= sc < 80:          # 어미 → 목표 길이 근처에서
             groups.append(cur); cur = []
-        elif cl >= max(5, soft_min - 2) and sc >= 30 and nxt \
+        elif cl >= max(5, soft_min - 2) and 30 <= sc < 50 and nxt \
                 and cl + 1 + len(nxt) > max_chars \
-                and cl + 1 + _rest_len(words, wi + 1) > allow:
+                and cl + 1 + _rest_len(words, wi + 1) > allow \
+                and not _good_break_ahead(words, wi + 1, hard + 2 - cl - 1):
             groups.append(cur); cur = []                # 다음 말까지 넣으면 목표를 넘길 때
                                                         # (남은 문장이 통째로 들어가면 그냥 붙인다)
         elif cl >= 6 and sc >= 30 and _ends_adnominal(nxt) \
