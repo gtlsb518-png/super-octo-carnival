@@ -173,7 +173,7 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
     # 6. 초안 생성 ---------------------------------------------------------
     if opts.dry_run:
         log("\n--- dry-run: 캡컷 초안을 쓰지 않았습니다 ---")
-        log(f"큐시트 미리보기: {sheet_path}")
+        log(f"큐시트: {opts.cuesheet or sheet_path}")
         _preview(sheet, log)
         return draft.BuildReport(
             draft_path=Path("(dry-run)"), name=opts.draft_name, duration=timeline.total,

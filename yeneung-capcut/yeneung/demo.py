@@ -11,17 +11,31 @@ from __future__ import annotations
 
 from .cuesheet import Caption, Cuesheet, EffectCue, SfxCue, TransitionCue, ZoomCue
 
-#: 데모에서 훑어볼 자막 스타일과 애니메이션 조합
+#: 데모 자막은 **자기가 무엇을 검사 중인지** 말하도록 적는다.
+#: 그래야 캡컷에서 열었을 때 위치가 뒤집혔는지, 어느 스타일이 이상한지를
+#: 눈으로 바로 짚을 수 있다.
 _SAMPLES: list[tuple[str, str, str, str]] = [
     # (문구, 스타일, 위치, 애니메이션)
-    ("이게 되네?!", "reaction", "top", "pop"),
-    ("(정적)", "narration", "upper", "fade"),
-    ("결국 실패", "emphasis", "default", "zoom"),
-    ("속으로 당황", "whisper", "center", "slide_up"),
-    ("오후 3시", "situation", "lower", "slide_side"),
-    ("한 글자씩", "reaction", "top", "typewriter"),
-    ("흔들흔들", "reaction", "upper", "shake"),
-    ("반짝", "emphasis", "default", "sparkle"),
+    ("① 맨위 top", "reaction", "top", "pop"),
+    ("② 중상 upper", "narration", "upper", "fade"),
+    ("③ 한가운데 center", "whisper", "center", "slide_up"),
+    ("④ 중하 lower", "situation", "lower", "slide_side"),
+    ("⑤ 기본위치 강조", "emphasis", "default", "zoom"),
+    ("⑥ 타자기 효과", "reaction", "top", "typewriter"),
+    ("⑦ 흔들림 효과", "reaction", "upper", "shake"),
+    ("⑧ 반짝 효과", "emphasis", "default", "sparkle"),
+]
+
+#: 캡컷에서 열었을 때 확인할 항목. CLI 가 그대로 출력한다.
+CHECKLIST = [
+    "자막 ①②③④ 가 위에서 아래 순서로 떠 있는가 (뒤집혔으면 알려주세요)",
+    "한글이 □□□ 로 깨지지 않는가 (깨지면 폰트 문제)",
+    "자막마다 등장 방식이 다른가 (①툭 ②서서히 ③아래서 ⑥한글자씩 ⑦흔들림)",
+    "스타일별로 크기·색이 다른가 (⑤가 가장 크고 붉은 계열)",
+    "영상이 여러 클립으로 잘려 있는가",
+    "효과음이 자막 뜰 때 같이 들리는가",
+    "줌 클립에서 화면이 확대됐다 돌아오는가",
+    "컷 경계에 전환(디졸브 등)이 걸려 있는가",
 ]
 
 _SFX_CYCLE = ["ding", "boing", "drum", "swoosh", "pop", "sparkle"]
@@ -49,7 +63,7 @@ def build_cuesheet(
     effect_pool = [n for n in _EFFECT_CYCLE if n in set(effect_names or [])]
     transition_pool = [n for n in _TRANSITION_CYCLE if n in set(transition_names or [])]
 
-    # 자막은 2초 간격으로, 스타일과 애니메이션을 돌아가며
+    # 자막은 앞에서부터 순서대로. ①②③④ 가 차례로 떠야 위치를 확인할 수 있다.
     slots = max(1, min(len(_SAMPLES), int(total // 2)))
     for i in range(slots):
         start = 0.6 + i * (total - 1.2) / slots

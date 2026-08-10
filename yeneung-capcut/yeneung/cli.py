@@ -340,8 +340,13 @@ def _cmd_demo(cfg: Config, args: argparse.Namespace) -> int:
 
     print("\n캡컷을 열고 프로젝트 목록에서 확인하세요.")
     print("목록에 안 보이면 아무 프로젝트나 열었다 나오거나 캡컷을 재시작하면 갱신됩니다.")
-    print("\n이게 정상적으로 열린다면 캡컷 호환성은 문제없습니다.")
-    print("그다음 `run` 으로 실제 자막 생성을 돌려보세요.")
+
+    print("\n== 열어서 확인할 것 ==")
+    for item in demo.CHECKLIST:
+        print(f"  [ ] {item}")
+
+    print("\n다 정상이면 캡컷 호환성은 문제없습니다. `run` 으로 넘어가세요.")
+    print("이상한 게 있으면 몇 번 항목인지 알려주시면 바로 고칩니다.")
     return 0
 
 
