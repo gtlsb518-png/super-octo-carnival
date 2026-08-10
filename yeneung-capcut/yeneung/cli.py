@@ -58,6 +58,18 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--refresh-transcript", action="store_true", help="받아쓰기 캐시 무시")
     r.add_argument("--refresh-cuesheet", action="store_true", help="큐시트 캐시 무시")
 
+    # --------------------------------------------------------------- demo
+    dm = sub.add_parser(
+        "demo",
+        help="Whisper·API 없이 샘플 초안 생성 (캡컷에서 열리는지 확인용)",
+    )
+    dm.add_argument("video", type=Path, help="아무 영상 파일")
+    dm.add_argument("-n", "--name", help="프로젝트 이름 (기본: 파일명_데모)")
+    dm.add_argument("-c", "--config", help="config.toml 경로")
+    dm.add_argument("--draft-dir", type=Path, help="캡컷 초안 폴더 (기본: 자동 탐지)")
+    dm.add_argument("--sfx-dir", type=Path, help="효과음 폴더")
+    dm.add_argument("--no-cut", action="store_true", help="무음 컷 끄기")
+
     # -------------------------------------------------------------- check
     ck = sub.add_parser("check", help="직접 쓴 큐시트 JSON 검사")
     ck.add_argument("cuesheet", type=Path, help="검사할 큐시트 JSON")
@@ -247,6 +259,92 @@ def _cmd_sfx_scan(cfg: Config, force: bool) -> int:
     return 0
 
 
+def _cmd_demo(cfg: Config, args: argparse.Namespace) -> int:
+    """받아쓰기도 Claude 도 없이 샘플 초안을 만든다."""
+    from . import cuts, demo, draft, media, packing, sfxgen
+
+    if args.sfx_dir:
+        cfg.sfx.library = str(args.sfx_dir)
+    if args.no_cut:
+        cfg.cut.enabled = False
+
+    video = args.video
+    if not video.exists():
+        print(f"오류: 영상 파일이 없습니다 — {video}", file=sys.stderr)
+        return 2
+
+    try:
+        info = media.probe(video)
+    except Exception as exc:
+        print(f"오류: 영상을 읽지 못했습니다 — {exc}", file=sys.stderr)
+        return 1
+    print(f"영상: {info.width}x{info.height} @ {info.fps:.2f}fps, {info.duration:.1f}초")
+
+    if cfg.cut.enabled and info.has_audio:
+        from .media import decode_audio_mono
+
+        print("무음 구간 분석 중...")
+        samples = decode_audio_mono(video, 16_000)
+        keeps = cuts.detect_keep_ranges(samples, 16_000, info.duration, cfg.cut)
+    else:
+        keeps = [cuts.KeepRange(0.0, info.duration)]
+
+    timeline = cuts.TimelineMap(keeps)
+    boundaries = packing.cut_boundaries(timeline)
+    print(f"컷: {len(keeps)}개 구간, {timeline.total:.1f}초 · 컷 경계 {len(boundaries)}곳")
+
+    library = sfxlib.load_library(cfg.sfx.library)
+    if not library:
+        print("효과음 기본 팩 생성 중...")
+        sfxgen.generate_pack(cfg.sfx.library)
+        library = sfxlib.load_library(cfg.sfx.library)
+
+    sheet = demo.build_cuesheet(
+        timeline.total,
+        boundaries=boundaries,
+        sfx_names=library.names(),
+        effect_names=styles.available_effects(),
+        transition_names=styles.available_transitions(),
+    )
+    print(f"샘플 큐시트: {sheet.summary()}")
+
+    draft_dir = args.draft_dir or (
+        Path(cfg.draft_dir) if cfg.draft_dir else find_capcut_draft_dir()
+    )
+    if draft_dir is None:
+        print(
+            "오류: 캡컷 초안 폴더를 찾지 못했습니다. --draft-dir 로 지정해 주세요.\n"
+            r"      보통 %LOCALAPPDATA%\CapCut\User Data\Projects\com.lveditor.draft",
+            file=sys.stderr,
+        )
+        return 2
+
+    name = args.name or f"{video.stem}_데모"
+    print(f"초안 생성 중: {Path(draft_dir) / name}")
+    try:
+        report = draft.build(
+            video=info, keeps=keeps, timeline=timeline, sheet=sheet, cfg=cfg,
+            draft_dir=Path(draft_dir), draft_name=name, sfx_library=library,
+            srt_path=None, allow_replace=True,
+        )
+    except Exception as exc:
+        print(f"\n오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"\n완료: {report.draft_path}")
+    print(f"  클립 {report.clips}개 · 예능자막 {report.captions}개 · "
+          f"효과음 {report.sfx}개 · 줌 {report.zooms}개 · "
+          f"화면효과 {report.effects}개 · 전환 {report.transitions}개")
+    for w in report.warnings:
+        print(f"  ! {w}")
+
+    print("\n캡컷을 열고 프로젝트 목록에서 확인하세요.")
+    print("목록에 안 보이면 아무 프로젝트나 열었다 나오거나 캡컷을 재시작하면 갱신됩니다.")
+    print("\n이게 정상적으로 열린다면 캡컷 호환성은 문제없습니다.")
+    print("그다음 `run` 으로 실제 자막 생성을 돌려보세요.")
+    return 0
+
+
 def _cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     from . import cuesheet as cuesheet_mod
     from .config import POSITION_OVERRIDES
@@ -359,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "scan":
             return _cmd_sfx_scan(cfg, args.force)
         return _cmd_sfx_list(cfg)
+    if args.command == "demo":
+        return _cmd_demo(cfg, args)
     if args.command == "check":
         return _cmd_check(cfg, args)
     if args.command == "learn":
