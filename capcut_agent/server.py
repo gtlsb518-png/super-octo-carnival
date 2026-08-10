@@ -464,8 +464,8 @@ _SOUND_TAG_WORDS = {
 
 # 소문자 영어라도 실제로 쓰이는 표기는 남긴다
 _LATIN_KEEP = {
-    "etf", "ai", "it", "tv", "pc", "cpu", "gpu", "ceo", "gdp", "hbm", "ssd", "ram",
-    "gs", "sk", "lg", "kb", "us", "usa", "ok", "no", "yes", "on", "off", "up",
+    "etf", "ai", "tv", "pc", "cpu", "gpu", "ceo", "gdp", "hbm", "ssd", "ram",
+    "gs", "sk", "lg", "kb", "usa",
     "iphone", "youtube", "google", "apple", "tesla", "nvidia", "chatgpt", "openai",
     "lng", "lpg", "kospi", "kosdaq", "sds", "sdi", "skt", "kt", "cj", "gm", "ev",
     "tsmc", "asml", "amd", "intel", "micron", "meta", "amazon", "microsoft", "sci",
@@ -487,10 +487,12 @@ def _clean_latin_run(seg: str, script_tokens: set[str]) -> str:
     low = seg.lower()
     if low in _SOUND_TAG_WORDS:
         return ""
+    if len(seg) == 1:
+        return ""            # "I", "E", "U" — 잡음 구간에서 나오는 한 글자는 전부 환각
     if low in _LATIN_KEEP or low in script_tokens:
         return seg
-    if seg.isupper() and 1 <= len(seg) <= 6:
-        return seg           # ETF, GS, AI 같은 대문자 약어
+    if seg.isupper() and 2 <= len(seg) <= 6:
+        return seg           # ETF, GS, AI 같은 대문자 약어 (한 글자는 제외)
     return ""                # 나머지는 전부 환각으로 간주해 제거
 
 
@@ -580,8 +582,22 @@ _HALLUC_CONTAINS = ("다음영상에서", "다음시간에", "시청해주셔서
                     "구독좋아요", "봐주셔서감사", "영상에서만나")
 
 
+def _is_number_babble(text: str) -> bool:
+    """
+    "1, 2, 2 2, 3" 처럼 한 자리 숫자만 늘어놓은 인식인지 (잡음 구간 환각).
+    "+12%" "2만 2천" "120일선" 같은 실제 표기는 건드리지 않는다.
+    """
+    t = text.strip()
+    if not t or re.search(r"[가-힣A-Za-z%+]", t):
+        return False
+    nums = re.findall(r"\d+", t)
+    return bool(nums) and all(len(n) == 1 for n in nums)
+
+
 def is_hallucinated_line(text: str, clip_sec: float) -> bool:
     """클립 전체가 Whisper 상투 문구면 실제 발화가 아니라고 본다."""
+    if _is_number_babble(text):
+        return True
     n = re.sub(r"[^0-9A-Za-z가-힣]", "", text)
     if len(n) < 2:
         return False

@@ -908,7 +908,7 @@
           effect_dur: document.getElementById('use-effects').checked
                       ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0,
           title: document.getElementById('title-text').value.trim(),
-          date: document.getElementById('today-auto').checked
+          date: document.getElementById('date-today').checked
                 ? todayMMDD() : document.getElementById('date-text').value.trim()
         })
       });

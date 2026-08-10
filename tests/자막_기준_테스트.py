@@ -71,6 +71,28 @@ GOLD_RULES = [
 ]
 
 
+# ── 3) 잡음 구간 환각 (C3870 사례) ──
+GOLD_NOISE = [
+    ("I", ""), ("I it", ""), ("I I, I I, I", ""), ("E E", ""),
+    ("1, 2, 2 2, 3", ""), ("2 2", ""), ("4 4 0", ""),
+    ("OCI", "OCI"), ("+12%", "+12%"), ("2만 2천", "2만 2천"),
+    ("120일선 하나 남았어", "120일선 하나 남았어"),
+]
+
+
+def run_noise():
+    ok = 0
+    for src, want in GOLD_NOISE:
+        c = S.clean_recognized_text(src, set())
+        got = "" if (not c or S.is_hallucinated_line(c, 1.0)) else c
+        if got == want:
+            ok += 1
+        else:
+            print(f"  X  {src!r} → {got!r} (기준 {want!r})")
+    print(f"  잡음 환각: {ok}/{len(GOLD_NOISE)} 통과")
+    return ok == len(GOLD_NOISE)
+
+
 def run(name, cases):
     ok = 0
     for src, want in cases:
@@ -90,7 +112,8 @@ if __name__ == "__main__":
     print(f"자막 끊기 기준 테스트 (글자 수 {MAX_CHARS})")
     a = run("알테오젠 원고", GOLD_SCRIPT)
     b = run("개별 규칙", GOLD_RULES)
+    c = run_noise()
     n_lines = sum(len(w) for _s, w in GOLD_SCRIPT)
     print(f"\n원고 기준 총 {n_lines}줄")
-    print("전부 통과 ✓" if a and b else "기준과 다름 ✗")
-    sys.exit(0 if (a and b) else 1)
+    print("전부 통과 ✓" if a and b and c else "기준과 다름 ✗")
+    sys.exit(0 if (a and b and c) else 1)
