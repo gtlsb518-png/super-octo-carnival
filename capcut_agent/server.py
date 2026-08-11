@@ -1075,7 +1075,7 @@ _CONNECTIVE_ENDINGS = (          # 연결어미 — 절이 끝나는 자리라 �
     "는데", "ㄴ데", "은데", "인데", "면서", "으면", "라면", "다면", "면",
     "아서", "어서", "여서", "지만", "으니까", "니까", "니깐",
     "까지", "부터", "는지", "은지", "인지", "이라", "아니라",
-    "도록", "거나", "든지", "때문에", "덕분에", "위해", "통해",
+    "도록", "다가", "거나", "든지", "때문에", "덕분에", "위해", "통해",
     "해도", "아도", "어도", "여도", "더라도", "면서도", "는데도",
     "대로", "만큼", "처럼", "같이", "보다", "라서", "느라", "려고", "면은",
 )
@@ -1085,21 +1085,8 @@ _CONNECTIVE_ENDINGS = (          # 연결어미 — 절이 끝나는 자리라 �
 _CLAUSE_TAILS = ("때", "때는", "때가", "때도", "때면", "뒤", "뒤에", "후", "후에",
                  "다음", "다음에", "동안", "순간", "순간에", "무렵", "이후", "이전")
 
-# 뒷말과 한 덩어리로 이어지는 연결어미 — 어미이긴 하지만 여기서 끊으면
-# "갔다가 / 오기라도 했지" 처럼 한 동작이 두 줄로 쪼개진다. 되도록 안 끊는다.
-#   반도체는 다 같이 갔다가 / 오기라도 했지,  X
-#   반도체는 다 같이 / 갔다가 오기라도 했지,  O
-_CHAINING_ENDINGS = ("다가",)
-
 # 그 자체가 한 단어이기도 한 어미들 (짧으면 연결어미로 보지 않는다)
 _STANDALONE_RISK = ("대로", "만큼", "처럼", "같이", "보다")
-
-# 어미처럼 끝나지만 사실은 명사인 말들 — 여기서 끊으면 명사구가 잘린다.
-#   "레버리지 상품이" 의 '레버리지' 를 종결어미 '-지' 로 잘못 보던 문제
-_ENDING_LOOKALIKE_NOUNS = {
-    "레버리지", "이미지", "메시지", "페이지", "패키지", "에너지", "스테이지",
-    "브릿지", "시야", "분야", "바다", "사이다", "소다", "미디어", "데이터",
-}
 _FINAL_ENDINGS = (               # 종결어미 — 문장이 끝나는 자리
     "습니다", "ㅂ니다", "세요", "예요", "이에요", "거든", "잖아", "거야",
     "구나", "네요", "군요", "죠", "요", "다", "야", "해", "지",
@@ -1186,10 +1173,6 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
                                          # ("3시간 동안" 처럼 명사 뒤면 해당 없음)
     if _is_clause_tail(core, prev_word) and (prev_word or _ends_adnominal(prev_word)):
         return 55                        # "~할 때 / ~한 뒤 / ~한 다음" → 절이 끝나는 자리
-    if core in _ENDING_LOOKALIKE_NOUNS:
-        return 10                        # 어미처럼 보이는 명사 ("레버리지")
-    if core.endswith(_CHAINING_ENDINGS) and len(core) > 2:
-        return 20                        # "갔다가" — 뒷말과 한 덩어리라 되도록 안 끊는다
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
     if core.endswith(_FINAL_ENDINGS):
@@ -1372,7 +1355,7 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
             groups.append(cur); cur = []                # 쉼표 (남은 문장이 다 안 들어갈 때만)
         elif cl >= soft_min and 50 <= sc < 80:          # 어미 → 목표 길이 근처에서
             groups.append(cur); cur = []
-        elif cl >= max(5, soft_min - 1) and 30 <= sc < 50 and nxt \
+        elif cl >= max(5, soft_min - 2) and 30 <= sc < 50 and nxt \
                 and cl + 1 + len(nxt) > max_chars \
                 and cl + 1 + _rest_len(words, wi + 1) > allow \
                 and not _good_break_ahead(words, wi + 1, hard + 2 - cl - 1):
