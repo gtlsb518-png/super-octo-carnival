@@ -66,9 +66,47 @@ def ensure_faster_whisper() -> tuple[bool, str]:
     importlib.invalidate_caches()
     try:
         importlib.import_module("faster_whisper")
+        ensure_cuda_libs()
         return True, "자막 기능 설치 완료"
     except ImportError as e:
         return False, f"설치 후에도 불러오지 못함: {e}"
+
+
+def has_nvidia_gpu() -> bool:
+    """NVIDIA 그래픽카드가 있는지 (nvidia-smi 로 확인)."""
+    try:
+        r = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=15)
+        return r.returncode == 0 and "GPU" in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def ensure_cuda_libs() -> tuple[bool, str]:
+    """
+    NVIDIA 그래픽카드가 있으면 자막 인식을 GPU로 돌리는 데 필요한
+    CUDA 라이브러리(cuBLAS·cuDNN)를 깔아준다.
+    이게 없으면 그래픽카드가 있어도 조용히 CPU로 떨어져서 아주 느리다.
+    (그래픽카드가 없으면 아무것도 하지 않는다)
+    """
+    if not has_nvidia_gpu():
+        return False, "NVIDIA 그래픽카드 없음 — CPU로 인식합니다"
+    try:
+        import importlib
+        importlib.import_module("nvidia.cudnn")
+        return True, "GPU 준비됨"
+    except Exception:
+        pass
+    cmd = [sys.executable, "-m", "pip", "install", "--no-warn-script-location",
+           "nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, f"GPU 라이브러리 설치 실패: {e}"
+    if r.returncode != 0:
+        return False, "GPU 라이브러리 설치 실패 — CPU로 인식합니다"
+    return True, "GPU 라이브러리 설치 완료"
 
 
 def ensure_rembg() -> tuple[bool, str]:
@@ -177,17 +215,76 @@ def build_cutouts(files: list[Path], out_dir: Path, stroke: bool, stroke_frac: f
     return made
 
 
+WHISPER_DEVICE = ""          # 실제로 무엇으로 돌고 있는지 (로그에 표시)
+
+
+def _add_cuda_dll_dirs() -> None:
+    """
+    윈도우에서 pip 로 깐 CUDA 라이브러리(nvidia\\...\\bin)를 찾을 수 있게 등록한다.
+    이걸 안 하면 cuDNN DLL 을 못 찾아서 GPU 로드가 실패하고 CPU 로 떨어진다.
+    """
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    try:
+        import nvidia
+    except Exception:
+        return
+    for root in getattr(nvidia, "__path__", []):
+        for sub in Path(root).glob("*/bin"):
+            try:
+                os.add_dll_directory(str(sub))
+            except Exception:
+                pass
+
+
 def get_whisper_model():
-    global _whisper_model
+    global _whisper_model, WHISPER_DEVICE
     if _whisper_model is None:
         from faster_whisper import WhisperModel
+        _add_cuda_dll_dirs()
         try:
             _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+            WHISPER_DEVICE = "GPU (CUDA float16)"
             print("[Whisper] GPU 로드 완료")
-        except Exception:
-            print("[Whisper] GPU 실패 → CPU int8 fallback")
-            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+        except Exception as e:
+            # CPU 로 떨어질 때는 코어를 전부 쓴다 (기본값 4개만 쓰느라 느렸다)
+            threads = max(1, os.cpu_count() or 4)
+            WHISPER_DEVICE = f"CPU int8 · {threads}스레드"
+            print(f"[Whisper] GPU 실패({type(e).__name__}) → CPU int8 {threads}스레드")
+            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8",
+                                          cpu_threads=threads)
     return _whisper_model
+
+
+# 인식용 오디오 샘플레이트 (Whisper 고정값)
+WHISPER_SR = 16000
+
+
+def load_audio_16k(video_path: Path):
+    """
+    영상에서 오디오를 '딱 한 번만' 16kHz 모노로 뽑아 메모리에 올린다.
+    예전에는 클립마다 ffmpeg 를 다시 돌려 임시 wav 를 만들었는데,
+    클립이 100개면 ffmpeg 도 100번 돌아서 그만큼 느렸다.
+    """
+    import wave
+    import numpy as np
+    wav = extract_audio_wav(video_path)
+    if not wav:
+        return None
+    try:
+        with wave.open(str(wav), "rb") as f:
+            if f.getsampwidth() != 2 or f.getframerate() != WHISPER_SR:
+                return None
+            raw = f.readframes(f.getnframes())
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        return data
+    except Exception:
+        return None
+    finally:
+        try:
+            wav.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════
@@ -513,7 +610,7 @@ def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> s
 
 
 def transcribe_clip_words(video_path: Path, start: float, end: float,
-                          initial_prompt: str = "") -> list[dict]:
+                          initial_prompt: str = "", audio=None) -> list[dict]:
     """
     영상의 [start, end] 구간만 잘라내 단독 인식하고, 원본 영상 기준
     '절대 시각'을 가진 단어 목록을 반환한다.
@@ -526,18 +623,28 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
     """
     import tempfile
     model = get_whisper_model()
-    tmp = Path(tempfile.gettempdir()) / f"_capcut_clip_{uuid.uuid4().hex}.wav"
-    offset = max(start - 0.05, 0)  # ffmpeg로 잘라낸 구간의 시작 = 원본 영상에서의 오프셋
+    tmp = None
+    offset = max(start - 0.05, 0)  # 잘라낸 구간의 시작 = 원본 영상에서의 오프셋
     try:
-        cmd = ["ffmpeg", "-y", "-v", "error",
-               "-ss", f"{offset:.3f}", "-to", f"{end + 0.05:.3f}",
-               "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(tmp)]
-        subprocess.run(cmd, capture_output=True)
-        if not tmp.exists() or tmp.stat().st_size < 1500:
-            return []
+        if audio is not None:
+            # ★ 미리 뽑아둔 오디오에서 필요한 구간만 잘라 바로 넘긴다 (ffmpeg 호출 없음)
+            i0 = int(offset * WHISPER_SR)
+            i1 = min(int((end + 0.05) * WHISPER_SR), len(audio))
+            if i1 - i0 < 800:            # 0.05초 미만이면 인식할 게 없다
+                return []
+            source = audio[i0:i1]
+        else:
+            tmp = Path(tempfile.gettempdir()) / f"_capcut_clip_{uuid.uuid4().hex}.wav"
+            cmd = ["ffmpeg", "-y", "-v", "error",
+                   "-ss", f"{offset:.3f}", "-to", f"{end + 0.05:.3f}",
+                   "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(tmp)]
+            subprocess.run(cmd, capture_output=True)
+            if not tmp.exists() or tmp.stat().st_size < 1500:
+                return []
+            source = str(tmp)
         kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
         segs, _ = model.transcribe(
-            str(tmp), language="ko", beam_size=1,
+            source, language="ko", beam_size=1,
             vad_filter=False,                  # 이미 잘라낸 구간이라 VAD 불필요
             condition_on_previous_text=False,
             no_repeat_ngram_size=3,
@@ -560,7 +667,8 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
         return []
     finally:
         try:
-            tmp.unlink()
+            if tmp is not None:
+                tmp.unlink()
         except Exception:
             pass
 
@@ -738,10 +846,12 @@ def transcribe_all_clips(video_path: Path,
     n_halluc = 0
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
+    # ★ 오디오는 여기서 딱 한 번만 뽑는다. 클립마다 ffmpeg 를 다시 돌리지 않는다.
+    audio = load_audio_16k(video_path)
     for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
         words = []
         if ke - ks >= 0.15:
-            raw_words = transcribe_clip_words(video_path, ks, ke, script_text)
+            raw_words = transcribe_clip_words(video_path, ks, ke, script_text, audio)
             for w in raw_words:
                 # 효과음 태그·영어 환각·이모지/특수문자 제거 (단어 단위로 적용)
                 cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
@@ -2844,6 +2954,7 @@ async def process_video(
 
             if want_sub:
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 하나씩 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                t_asr = time.time()
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
@@ -2858,7 +2969,12 @@ async def process_video(
                             last = d
                             yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
                     raw_subs = await task
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립별 인식 완료 ({len(raw_subs)}개)'})}\n\n"
+                asr_sec = time.time() - t_asr
+                dev = WHISPER_DEVICE or "?"
+                msg_done = (f"클립별 인식 완료 ({len(raw_subs)}개) · {asr_sec/60:.1f}분 · {dev}")
+                yield f"data: {json.dumps({'step': 'asr', 'msg': msg_done})}\n\n"
+                if "CPU" in dev:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': '💡 NVIDIA 그래픽카드가 있으면 자막이 훨씬 빨라집니다 (지금은 CPU로 인식 중)'})}\n\n"
                 n_halluc = prog.get("halluc", 0)
                 if n_halluc:
                     msg_h = f"상투 문구 환각 제거 {n_halluc}개 (시청해주셔서 감사합니다 등)"
