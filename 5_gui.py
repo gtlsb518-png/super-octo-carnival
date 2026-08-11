@@ -2258,7 +2258,7 @@ class App:
                 'timeframe': '1h',  # 🔥 1시간봉
                 'amount': 50,  # 진입금 50 USDT
                 'leverage': 3,  # 레버리지 3배 (안전)
-                'tp': 0.3,  # 기본 TP (동적 TP 비활성화 시)
+                'tp': 2.0,  # 기본 TP (동적 TP 비활성화 시)
                 'sl': 0,  # AUTO 고정
                 'ut_sens': 10,  # 🔥 UT Bot Key Value
                 'ut_atr': 2,   # 🔥 UT Bot ATR Period
@@ -2267,8 +2267,8 @@ class App:
                 'long_active': False,
                 'short_active': False,
                 # 🔥 동적 TP 설정
-                'tp_trend': 1.2,  # ✅ 추세장 TP 1.2% (ADX >= 21)
-                'tp_sideways': 1.0,  # ✅ 횡보장 TP 1.0% (ADX < 21)
+                'tp_trend': 3.0,  # ✅ 추세장 TP 3.0% (ADX >= 21) — 1시간봉 기준
+                'tp_sideways': 2.0,  # ✅ 횡보장 TP 2.0% (ADX < 21) — 1시간봉 기준
                 'adx_period': 10,  # ADX 기간
                 'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
                 # 🔥 거래량 필터 비활성화
@@ -3529,7 +3529,7 @@ class App:
         update_fee_estimate()  # 초기 표시
         
         tk.Label(dialog, text="익절 (%) - 기본:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
-        tp_var = tk.DoubleVar(value=0.5)  # 🔥 0.5% (손익비 개선!)
+        tp_var = tk.DoubleVar(value=2.0)  # 🔥 2.0% (1시간봉 기준)
         tk.Entry(dialog, textvariable=tp_var, font=('Arial', 11)).pack(pady=5)
         
         # 🔥 동적 TP 설정
@@ -3537,11 +3537,11 @@ class App:
         tk.Label(dialog, text="📊 동적 TP (ADX 기반)", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
         
         tk.Label(dialog, text="추세장 TP (%) - ADX >= 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
-        tp_trend_var = tk.DoubleVar(value=1.2)  # ✅ 1.2% (추세장)
+        tp_trend_var = tk.DoubleVar(value=3.0)  # ✅ 3.0% (추세장, 1시간봉)
         tk.Entry(dialog, textvariable=tp_trend_var, font=('Arial', 11)).pack(pady=5)
         
         tk.Label(dialog, text="횡보장 TP (%) - ADX < 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
-        tp_sideways_var = tk.DoubleVar(value=1.0)  # ✅ 1.0% (횡보장)
+        tp_sideways_var = tk.DoubleVar(value=2.0)  # ✅ 2.0% (횡보장, 1시간봉)
         tk.Entry(dialog, textvariable=tp_sideways_var, font=('Arial', 11)).pack(pady=5)
         
         tk.Label(dialog, text="ADX 기간 (코인 최적: 10):", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
@@ -3928,11 +3928,11 @@ class App:
         tk.Label(scrollable_frame, text="📊 동적 TP (ADX 기반)", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
         
         tk.Label(scrollable_frame, text="추세장 TP (%) - ADX >= 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
-        tp_trend_var = tk.DoubleVar(value=coin.get('tp_trend', 1.2))  # ✅ 기본값 1.2%
+        tp_trend_var = tk.DoubleVar(value=coin.get('tp_trend', 3.0))  # ✅ 기본값 3.0%
         tk.Entry(scrollable_frame, textvariable=tp_trend_var, font=('Arial', 11)).pack(pady=3)
         
         tk.Label(scrollable_frame, text="횡보장 TP (%) - ADX < 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
-        tp_sideways_var = tk.DoubleVar(value=coin.get('tp_sideways', 1.0))  # ✅ 기본값 1.0%
+        tp_sideways_var = tk.DoubleVar(value=coin.get('tp_sideways', 2.0))  # ✅ 기본값 2.0%
         tk.Entry(scrollable_frame, textvariable=tp_sideways_var, font=('Arial', 11)).pack(pady=3)
         
         tk.Label(scrollable_frame, text="ADX 기간 (코인 최적: 10):", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
@@ -4474,10 +4474,10 @@ class App:
                                 adx_value = Indicators.calculate_adx(df_full[:-1], period=adx_period)
                                 
                                 if adx_value >= 21:
-                                    dynamic_tp = coin.get('tp_trend', 1.2)  # ✅ 1.2%
+                                    dynamic_tp = coin.get('tp_trend', 3.0)  # ✅ 3.0%
                                     market_type = '추세장'
                                 else:
-                                    dynamic_tp = coin.get('tp_sideways', 1.0)  # ✅ 1.0%
+                                    dynamic_tp = coin.get('tp_sideways', 2.0)  # ✅ 2.0%
                                     market_type = '횡보장'
                                 
                                 # 진입 시점 TP 저장 (LONG/SHORT 분리!)
@@ -4844,11 +4844,11 @@ class App:
                         if adx_value >= 21:
                             market_type = '추세장'
                             market_color = '#00ff00'
-                            current_tp = coin.get('tp_trend', 1.2)  # ✅ 1.2%
+                            current_tp = coin.get('tp_trend', 3.0)  # ✅ 3.0%
                         else:
                             market_type = '횡보장'
                             market_color = '#ffaa00'
-                            current_tp = coin.get('tp_sideways', 1.0)  # ✅ 1.0%
+                            current_tp = coin.get('tp_sideways', 2.0)  # ✅ 2.0%
                         
                         # ADX 값 라벨 업데이트
                         coin['adx_value_label'].config(text=f"{adx_value:.1f}", fg=market_color)
