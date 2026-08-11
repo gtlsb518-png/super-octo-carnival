@@ -217,6 +217,11 @@ def build_cutouts(files: list[Path], out_dir: Path, stroke: bool, stroke_frac: f
 
 WHISPER_DEVICE = ""          # 실제로 무엇으로 돌고 있는지 (로그에 표시)
 
+# 클립 몇 개를 동시에 인식할지. 클립 하나하나가 짧아서 혼자서는 CPU/GPU 를
+# 다 못 채우기 때문에, 2개를 나란히 돌리면 같은 결과를 더 빨리 얻는다.
+# (인식 자체는 클립별로 완전히 독립이라 결과는 순서대로 돌린 것과 똑같다)
+ASR_WORKERS = 2
+
 
 def _add_cuda_dll_dirs() -> None:
     """
@@ -243,16 +248,19 @@ def get_whisper_model():
         from faster_whisper import WhisperModel
         _add_cuda_dll_dirs()
         try:
-            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-            WHISPER_DEVICE = "GPU (CUDA float16)"
+            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16",
+                                          num_workers=ASR_WORKERS)
+            WHISPER_DEVICE = f"GPU (CUDA float16) · {ASR_WORKERS}개 동시"
             print("[Whisper] GPU 로드 완료")
         except Exception as e:
-            # CPU 로 떨어질 때는 코어를 전부 쓴다 (기본값 4개만 쓰느라 느렸다)
-            threads = max(1, os.cpu_count() or 4)
-            WHISPER_DEVICE = f"CPU int8 · {threads}스레드"
+            # CPU 로 떨어질 때는 코어를 전부 쓴다 (기본값 4개만 쓰느라 느렸다).
+            # 클립 2개를 동시에 돌리므로 코어를 반씩 나눠 준다.
+            cores = max(1, os.cpu_count() or 4)
+            threads = max(2, cores // ASR_WORKERS)
+            WHISPER_DEVICE = f"CPU int8 · {threads}스레드 × {ASR_WORKERS}개 동시"
             print(f"[Whisper] GPU 실패({type(e).__name__}) → CPU int8 {threads}스레드")
             _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8",
-                                          cpu_threads=threads)
+                                          cpu_threads=threads, num_workers=ASR_WORKERS)
     return _whisper_model
 
 
@@ -841,14 +849,21 @@ def transcribe_all_clips(video_path: Path,
     각 단어는 클립 안에서의 실제 발화 시각을 그대로 갖고 있어 자막이
     영상과 밀리지 않는다.
     """
-    segs = []
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
     total = len(keep_ranges)
-    n_halluc = 0
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
     # ★ 오디오는 여기서 딱 한 번만 뽑는다. 클립마다 ffmpeg 를 다시 돌리지 않는다.
     audio = load_audio_16k(video_path)
-    for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+    get_whisper_model()                 # 모델 로딩은 한 번만 (동시에 두 번 안 하도록)
+
+    counter = {"done": 0, "halluc": 0}
+    lock = threading.Lock()
+
+    def one_clip(item: tuple[int, tuple]) -> tuple[int, dict]:
+        i, (ks, ke, _tl_s, _tl_e) = item
         words = []
         if ke - ks >= 0.15:
             raw_words = transcribe_clip_words(video_path, ks, ke, script_text, audio)
@@ -866,19 +881,29 @@ def transcribe_all_clips(video_path: Path,
         words = cap_by_speech_rate(collapse_repeats(split_inner_commas(words)), ke - ks)
         if _is_syllable_soup(words):
             words = []                  # "멘 탈 흔" → 말로 치지 않음
+        halluc = 0
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
             words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
-            n_halluc += 1
-        if words:
-            text = " ".join(w["word"] for w in words)
-        else:
-            text = NO_SPEECH_PLACEHOLDER
-        segs.append({"start": ks, "end": ke, "text": text, "words": words})
-        if progress is not None:
-            progress["done"] = i + 1
-            progress["total"] = total
-            progress["halluc"] = n_halluc
-    return segs
+            halluc = 1
+        text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
+        with lock:
+            counter["done"] += 1
+            counter["halluc"] += halluc
+            if progress is not None:
+                progress["done"] = counter["done"]
+                progress["total"] = total
+                progress["halluc"] = counter["halluc"]
+        return i, {"start": ks, "end": ke, "text": text, "words": words}
+
+    # ★ 클립 ASR_WORKERS 개를 동시에 인식한다. 클립끼리는 서로 영향을 주지 않아
+    #   (condition_on_previous_text=False) 결과는 하나씩 돌린 것과 완전히 같고,
+    #   결과는 아래에서 원래 순서대로 다시 정렬한다.
+    if total > 1 and ASR_WORKERS > 1:
+        with ThreadPoolExecutor(max_workers=ASR_WORKERS) as pool:
+            done = list(pool.map(one_clip, enumerate(keep_ranges)))
+    else:
+        done = [one_clip(item) for item in enumerate(keep_ranges)]
+    return [seg for _i, seg in sorted(done, key=lambda x: x[0])]
 
 
 
@@ -2953,7 +2978,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 하나씩 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {ASR_WORKERS}개씩 동시에 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
                 t_asr = time.time()
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
