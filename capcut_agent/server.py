@@ -49,6 +49,9 @@ def ensure_faster_whisper() -> tuple[bool, str]:
     import importlib
     try:
         importlib.import_module("faster_whisper")
+        # 이미 깔려 있어도 GPU 라이브러리는 따로 확인한다.
+        # (예전 버전에서 깔았다면 CUDA 라이브러리가 없어서 CPU 로만 돌고 있다)
+        ensure_cuda_libs()
         return True, "자막 기능 준비됨"
     except ImportError:
         pass
