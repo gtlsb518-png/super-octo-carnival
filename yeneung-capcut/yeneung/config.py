@@ -55,6 +55,10 @@ class TranscribeConfig:
 class CuesheetConfig:
     """Claude 로 예능 큐시트를 생성할 때의 설정."""
 
+    # auto: API 키가 있으면 Claude, 없으면 규칙 기반
+    # claude: 항상 Claude (키 없으면 오류)
+    # rules: 항상 규칙 기반 (API 안 씀)
+    mode: str = "auto"
     model: str = "claude-opus-5"
     effort: str = "high"
     # 한 번에 보낼 대사 줄 수. 길면 맥락은 좋지만 응답이 길어짐

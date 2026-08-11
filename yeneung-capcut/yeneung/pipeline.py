@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import cuesheet as cuesheet_mod
-from . import cuts, draft, media, packing, sfxgen, sfxlib, styleref, styles, transcribe
+from . import autocue, cuts, draft, media, packing, sfxgen, sfxlib, styleref, styles, transcribe
 from .config import POSITION_OVERRIDES, Config, find_capcut_draft_dir
 
 Log = Callable[[str], None]
@@ -41,31 +41,40 @@ def _remap(
     return out
 
 
-def _check_api_key() -> None:
-    """큐시트를 만들기 전에 API 키가 있는지 먼저 본다.
-
-    받아쓰기에 몇 분 쓰고 나서 키가 없어 죽으면 그 시간이 통째로 날아간다.
-    """
+def _has_api_key() -> bool:
     import os
 
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return
-    raise RuntimeError(
-        "Anthropic API 키가 없습니다.\n"
-        "  명령 프롬프트에서 아래를 실행하고, cmd 를 껐다 다시 켜세요:\n"
-        '    setx ANTHROPIC_API_KEY "sk-ant-..."\n'
-        "  키는 https://console.anthropic.com 에서 발급합니다.\n"
-        "  키 없이 돌려보려면 --cuesheet 로 큐시트를 직접 주면 됩니다."
+    return bool(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
     )
+
+
+def _resolve_mode(cfg: Config) -> str:
+    """큐시트를 무엇으로 만들지 정한다: 'claude' 또는 'rules'."""
+    mode = cfg.cuesheet.mode
+    if mode == "rules":
+        return "rules"
+    if mode == "claude":
+        if not _has_api_key():
+            raise RuntimeError(
+                "Anthropic API 키가 없습니다 (cuesheet.mode = claude).\n"
+                "  cmd 에서 아래를 실행하고 cmd 를 껐다 켜세요:\n"
+                '    setx ANTHROPIC_API_KEY "sk-ant-..."\n'
+                "  API 없이 쓰려면 --no-api 를 붙이세요."
+            )
+        return "claude"
+    return "claude" if _has_api_key() else "rules"
 
 
 def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
     opts.work_dir.mkdir(parents=True, exist_ok=True)
 
-    # 큐시트를 새로 만들어야 하는 상황이면 API 키부터 확인한다
+    # 큐시트를 새로 만들어야 하는 상황이면 방식을 먼저 정한다.
+    # 받아쓰기에 몇 분 쓰고 나서 막히면 그 시간이 통째로 날아간다.
     sheet_cached = (opts.work_dir / "cuesheet.json").exists() and not opts.refresh_cuesheet
+    mode = "cached"
     if not opts.cuesheet and not sheet_cached:
-        _check_api_key()
+        mode = _resolve_mode(cfg)
 
     # 1. 영상 정보 --------------------------------------------------------
     info = media.probe(opts.video)
@@ -190,6 +199,20 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
     elif not cut_utterances:
         sheet = cuesheet_mod.Cuesheet()
         log("큐시트: 대사가 없어 건너뜁니다")
+    elif mode == "rules":
+        log(f"큐시트 생성 중 (규칙 기반, API 안 씀, 밀도 {cfg.cuesheet.density})...")
+        sheet = autocue.build_cuesheet(
+            cut_utterances, timeline.total,
+            density=cfg.cuesheet.density,
+            sfx_names=library.names(),
+            effect_names=effect_names,
+            transition_names=transition_names,
+            boundaries=boundaries,
+        )
+        sheet = cuesheet_mod.sanitize(sheet, timeline.total)
+        sheet.save(sheet_path)
+        log(f"큐시트: {sheet.summary()}")
+        log("  규칙 기반이라 맥락은 못 읽습니다. 캡컷에서 지우고 고치시면 됩니다.")
     else:
         log(f"큐시트 생성 중 ({cfg.cuesheet.model}, 밀도 {cfg.cuesheet.density})...")
 

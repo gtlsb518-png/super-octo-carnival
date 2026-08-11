@@ -41,6 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--work-dir", type=Path, help="중간 파일 폴더 (기본: 영상 옆 .yeneung)")
     r.add_argument("--density", choices=["low", "normal", "high"], help="자막·효과 밀도")
     r.add_argument("--tone", help="프로그램 톤 (예: '차분한 다큐 예능')")
+    r.add_argument("--no-api", action="store_true",
+                   help="Anthropic API 안 쓰고 규칙만으로 자막 생성")
+    r.add_argument("--api", action="store_true",
+                   help="반드시 Claude 로 생성 (키 없으면 오류)")
     r.add_argument("--cuesheet", type=Path,
                    help="직접 쓴 큐시트 JSON (주면 Claude 를 호출하지 않음)")
     r.add_argument("--sfx-dir", type=Path, help="내 효과음 폴더 경로")
@@ -108,6 +112,10 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.sfx.enabled = False
     if args.no_zoom:
         cfg.zoom.enabled = False
+    if args.no_api:
+        cfg.cuesheet.mode = "rules"
+    if args.api:
+        cfg.cuesheet.mode = "claude"
     if args.no_effects:
         cfg.effect.enabled = False
     if args.no_transitions:
@@ -121,20 +129,23 @@ def _cmd_doctor(cfg: Config) -> int:
     ok = True
     print("== 환경 점검 ==\n")
 
-    for module, package, label in [
-        ("pycapcut", "pycapcut", "캡컷 초안 생성"),
-        ("pymediainfo", "pymediainfo", "영상 정보 읽기"),
-        ("av", "av", "오디오 디코딩"),
-        ("numpy", "numpy", "무음 분석"),
-        ("faster_whisper", "faster-whisper", "받아쓰기"),
-        ("anthropic", "anthropic", "큐시트 생성"),
+    for module, package, label, required in [
+        ("pycapcut", "pycapcut", "캡컷 초안 생성", True),
+        ("pymediainfo", "pymediainfo", "영상 정보 읽기", True),
+        ("av", "av", "오디오 디코딩", True),
+        ("numpy", "numpy", "무음 분석", True),
+        ("faster_whisper", "faster-whisper", "받아쓰기", True),
+        # 없어도 된다. 규칙 기반으로 큐시트를 만들면 API 를 안 쓴다.
+        ("anthropic", "anthropic", "큐시트 생성 (선택 — API 쓸 때만)", False),
     ]:
         try:
             __import__(module)
             print(f"  [OK]   {module:16s} — {label}")
         except ImportError:
-            ok = False
-            print(f"  [없음] {module:16s} — {label}  →  pip install {package}")
+            if required:
+                ok = False
+            mark = "[없음]" if required else "[선택]"
+            print(f"  {mark} {module:16s} — {label}  →  pip install {package}")
 
     print()
     draft_dir = Path(cfg.draft_dir) if cfg.draft_dir else find_capcut_draft_dir()

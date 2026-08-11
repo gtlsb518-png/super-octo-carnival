@@ -28,7 +28,8 @@
    │
    ├─ 무음 구간 감지        → 늘어지는 부분 자동 컷
    ├─ Whisper 받아쓰기      → 대사 자막(SRT)
-   ├─ Claude 큐시트 생성    → 예능 자막 / 애니메이션 / 효과음 / 줌 / 전환
+   ├─ 큐시트 생성           → 예능 자막 / 애니메이션 / 효과음 / 줌 / 전환
+   │    규칙 기반(기본, API 안 씀) 또는 Claude(키가 있으면)
    └─ 캡컷 초안 생성        → 캡컷에서 열기
 ```
 
@@ -47,28 +48,33 @@
 
 - **윈도우 + 캡컷 데스크톱** (초안 생성은 어디서든 되지만, 열고 내보내는 건 윈도우 캡컷)
 - Python 3.11 이상
-- Anthropic API 키 (`ANTHROPIC_API_KEY` 환경변수)
 - ffmpeg는 **필요 없습니다**
+- API 키도 **필요 없습니다** (기본은 규칙 기반. 아래 [큐시트를 만드는 두 가지
+  방법](#큐시트를-만드는-두-가지-방법) 참고)
 
 ## 설치
 
-**윈도우는 `설치.bat` 더블클릭이면 끝입니다.** 그다음 `실행.bat` 위에 영상을
-끌어다 놓으세요. 자세한 순서는 [시작하기.md](시작하기.md) 에 있습니다.
+**윈도우는 `실행.bat` 위에 영상을 끌어다 놓기만 하면 됩니다.** 처음 한 번은
+필요한 것들을 알아서 설치합니다. 자세한 순서는 [시작하기.md](시작하기.md) 에
+있습니다. 뭔가 꼬이면 `점검.bat`.
 
 직접 하시려면:
 
 ```bash
 cd yeneung-capcut
-pip install -r requirements.txt
-setx ANTHROPIC_API_KEY "sk-ant-..."     REM cmd 를 껐다 켜야 적용
-python -m yeneung run 영상.mp4
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m yeneung run 영상.mp4
 ```
 
 환경 점검:
 
 ```bash
-python -m yeneung doctor
+.venv\Scripts\python -m yeneung doctor
 ```
+
+> 아래 예시에서는 짧게 `python` 이라고 씁니다. `실행.bat` 으로 설치했다면
+> `.venv\Scripts\python` 으로 읽으세요.
 
 캡컷 초안 폴더를 못 찾는다고 나오면 `--draft-dir` 로 직접 알려주면 됩니다.
 보통 여기 있습니다:
@@ -76,6 +82,32 @@ python -m yeneung doctor
 ```
 %LOCALAPPDATA%\CapCut\User Data\Projects\com.lveditor.draft
 ```
+
+## 큐시트를 만드는 두 가지 방법
+
+"어디에 무슨 자막을 넣을지" 를 정한 표를 큐시트라고 부릅니다. 만드는 방법이
+두 가지입니다.
+
+| | 규칙 기반 (기본) | Claude |
+|---|---|---|
+| API 키 | 필요 없음 | 필요 |
+| 비용 | 없음 | 영상 길이에 비례 |
+| 판단 근거 | 대사의 **글자**만 봄 | 대사의 **맥락**을 읽음 |
+| 결과 | 항상 같음 | 매번 조금씩 다름 |
+
+규칙 기반은 "대박", "됐다", "어?", 웃음(`ㅋㅋ`), 긴 정적처럼 글자로 알 수 있는
+신호를 찾아 자막을 붙입니다. 왜 웃긴지는 모르니 Claude 판보다 밋밋하고 가끔
+엉뚱한 데 붙습니다. 캡컷에서 지우고 고치는 걸 전제로 쓰면 충분합니다.
+
+Claude 를 쓰려면:
+
+```bash
+.venv\Scripts\python -m pip install -r requirements-api.txt
+setx ANTHROPIC_API_KEY "sk-ant-..."     REM cmd 를 껐다 켜야 적용
+```
+
+키가 있으면 자동으로 Claude 를 씁니다. 강제로 정하려면 `--no-api` / `--api`,
+또는 `config.toml` 의 `[cuesheet] mode = "rules" | "claude" | "auto"`.
 
 ## 내 효과음 폴더 쓰기
 
@@ -137,14 +169,13 @@ assets/sfx/ding.wav   ← 원하는 파일로 덮어쓰기
 
 ## 뭔가 잘못됐을 때 (원인 가르기)
 
-받아쓰기도 Claude 도 쓰지 않고 샘플 초안만 만들어 봅니다. API 키가 없어도
-됩니다.
+받아쓰기도 큐시트 생성도 건너뛰고 샘플 초안만 만들어 봅니다.
 
 ```bash
 python -m yeneung demo 영상.mp4
 ```
 
-이건 되는데 `run` 이 안 되면 받아쓰기나 API 쪽 문제이고, 이것부터 안 되면
+이건 되는데 `run` 이 안 되면 받아쓰기 쪽 문제이고, 이것부터 안 되면
 캡컷 쪽 문제입니다.
 
 ## 사용
@@ -162,7 +193,11 @@ python -m yeneung run 영상.mp4
 # 자막·효과를 촘촘하게
 python -m yeneung run 영상.mp4 --density high
 
-# 프로그램 톤 바꾸기 — 자막 문체가 실제로 달라집니다
+# 큐시트 만드는 방법 강제
+python -m yeneung run 영상.mp4 --no-api     # 규칙 기반
+python -m yeneung run 영상.mp4 --api        # Claude (키 필요)
+
+# 프로그램 톤 바꾸기 — 자막 문체가 달라집니다 (Claude 일 때만)
 python -m yeneung run 영상.mp4 --tone "차분한 다큐 예능"
 
 # 초안은 안 만들고 큐시트만 확인
@@ -207,11 +242,11 @@ python -m yeneung run 영상.mp4 --refresh-transcript # 받아쓰기부터 새�
 
 ## 큐시트를 직접 쓰기
 
-Claude 에게 맡기지 않고 자막·효과음·줌을 직접 정해서 넣을 수 있습니다.
+자동 생성에 맡기지 않고 자막·효과음·줌을 직접 정해서 넣을 수 있습니다.
 
 ```bash
 python -m yeneung check mine.json                          # 먼저 검사
-python -m yeneung run 영상.mp4 --cuesheet mine.json         # Claude 호출 없음
+python -m yeneung run 영상.mp4 --cuesheet mine.json         # 자동 생성 안 함
 ```
 
 형식은 이게 전부입니다. 섹션도 필드도 필요한 것만 쓰면 됩니다.
@@ -246,7 +281,7 @@ mine.json 에서 3군데가 잘못됐습니다:
   - zooms[0]: 끝(3.0)이 시작(5.0)보다 뒤여야 합니다
 ```
 
-### Claude 가 만든 걸 고쳐서 쓰기
+### 자동 생성된 걸 고쳐서 쓰기
 
 바닥부터 쓰는 것보다 이쪽이 편합니다.
 
@@ -290,7 +325,9 @@ python -m yeneung run 영상.mp4 -c config.toml
 | `cut.min_silence` | 이 길이 이상 무음만 자름. 낮추면 템포가 빨라짐 |
 | `cut.threshold_db` | 잡음 많은 영상은 `-30` 정도로 올리세요 |
 | `cut.padding` | 말꼬리가 잘리면 늘리세요 |
-| `cuesheet.tone` | 프로그램 톤. 자막 문체를 가장 크게 바꿉니다 |
+| `cuesheet.mode` | `auto` / `rules`(API 안 씀) / `claude` |
+| `cuesheet.density` | 자막을 얼마나 촘촘히 넣을지 |
+| `cuesheet.tone` | 프로그램 톤. Claude 일 때 문체를 가장 크게 바꿉니다 |
 | `styles.*` | 자막 크기·색·위치·등장 애니메이션 |
 
 `position_y` 는 **양수가 위쪽**입니다. 자막이 반대로 가면 부호를 뒤집으세요.
@@ -340,13 +377,14 @@ python -m yeneung run 영상.mp4 -c config.toml
 | 큐시트를 직접 쓰고 싶음 | `check` 로 검사 후 `run --cuesheet` |
 | 내 효과음을 안 씀 | `sfx scan` 으로 설명을 붙이세요 |
 | 자막 문체가 내 채널 같지 않음 | `learn` 으로 예전 자막을 뽑아 `--style-ref` |
-| 자막 문체가 안 맞음 | `--tone` 을 구체적으로 |
+| 자막 문체가 안 맞음 | `--tone` 을 구체적으로 (Claude 일 때만) |
+| 자막이 밋밋함 | 규칙 기반의 한계입니다. 키를 넣고 `--api` 를 쓰세요 |
 | 효과음이 안 들어감 | `python -m yeneung sfx` 로 라이브러리 확인 |
 
 ## 테스트
 
 ```bash
-pip install pytest imageio-ffmpeg
+python -m pip install pytest imageio-ffmpeg
 python -m pytest tests/ -q
 ```
 
@@ -359,7 +397,8 @@ yeneung/
   media.py       영상 정보 읽기, 오디오 디코딩
   cuts.py        무음 감지, 컷 계산, 타임라인 재매핑
   transcribe.py  faster-whisper 받아쓰기, SRT 출력
-  cuesheet.py    Claude 로 예능 큐시트 생성
+  cuesheet.py    큐시트 형식·검사, Claude 로 생성
+  autocue.py     규칙 기반 큐시트 생성 (API 안 씀)
   styles.py      논리 이름 → 캡컷 내부 리소스 매핑
   packing.py     트랙 배치, 줌 경계에서 클립 분할
   styleref.py    내 자막 스타일 예시 추출

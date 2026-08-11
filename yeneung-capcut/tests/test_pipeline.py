@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 pytest.importorskip("pycapcut")
 pytest.importorskip("av")
 
+from yeneung import cuesheet as cuesheet_mod  # noqa: E402
 from yeneung import pipeline, sfxgen, transcribe  # noqa: E402
 from yeneung.config import Config  # noqa: E402
 
@@ -65,12 +66,44 @@ def _cuesheet(tmp_path: Path) -> Path:
     return p
 
 
-# ---------------------------------------------------------------- API 키
+# ---------------------------------------------------------------- API 없이
 
 
-def test_missing_api_key_fails_before_transcribing(env, monkeypatch):
+def test_no_api_key_falls_back_to_rules(env, monkeypatch):
+    """키가 없어도 그냥 돌아야 한다. 규칙 기반으로 알아서 넘어간다."""
+    opts, cfg = env
+    monkeypatch.setattr(
+        transcribe, "transcribe",
+        lambda *a, **k: [transcribe.Utterance(0.5, 2.0, "와 진짜 대박이다")],
+    )
+
+    logs: list[str] = []
+    report = pipeline.run(opts, cfg, log=logs.append)
+    assert report.captions >= 1
+    assert any("규칙 기반" in line for line in logs)
+
+
+def test_rules_mode_never_touches_claude(env, monkeypatch):
+    """키가 있어도 mode=rules 면 API 를 부르면 안 된다."""
+    opts, cfg = env
+    cfg.cuesheet.mode = "rules"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(
+        transcribe, "transcribe",
+        lambda *a, **k: [transcribe.Utterance(0.5, 2.0, "와 진짜 대박이다")],
+    )
+
+    def boom(*_a, **_k):
+        raise AssertionError("규칙 모드인데 Claude 를 불렀다")
+
+    monkeypatch.setattr(cuesheet_mod, "generate", boom)
+    assert pipeline.run(opts, cfg, log=lambda _m: None).captions >= 1
+
+
+def test_claude_mode_without_key_fails_before_transcribing(env, monkeypatch):
     """받아쓰기에 몇 분 쓰고 나서 키가 없다고 죽으면 안 된다."""
     opts, cfg = env
+    cfg.cuesheet.mode = "claude"
     called: list[int] = []
     monkeypatch.setattr(
         transcribe, "transcribe", lambda *a, **k: called.append(1) or []
@@ -83,11 +116,12 @@ def test_missing_api_key_fails_before_transcribing(env, monkeypatch):
 
 def test_error_message_tells_how_to_fix(env):
     opts, cfg = env
+    cfg.cuesheet.mode = "claude"
     with pytest.raises(RuntimeError) as info:
         pipeline.run(opts, cfg, log=lambda _m: None)
     message = str(info.value)
     assert "setx ANTHROPIC_API_KEY" in message
-    assert "--cuesheet" in message
+    assert "--no-api" in message
 
 
 def test_own_cuesheet_needs_no_api_key(env, tmp_path, monkeypatch):
