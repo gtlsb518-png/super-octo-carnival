@@ -8,3 +8,12 @@ bot_stats.json
 bot_running.json
 trade_history.xlsx
 trade_backup_*.csv
+
+# 백테스터 / 황금피보 봇 실행 산출물
+backtest_data/
+backtest_result.csv
+backtest_trades_*.csv
+backtest_월별집계*.xlsx
+backtest_월별집계*.csv
+goldfib_settings.json
+goldfib_trades.csv
