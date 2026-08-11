@@ -26,6 +26,8 @@ class Caption:
     position: str = "default"
     #: 등장 애니메이션 논리 이름. 비우면 스타일에 정해진 기본값을 쓴다
     anim: str = "default"
+    #: 퇴장 애니메이션. 없으면 자막이 뚝 끊기듯 사라진다
+    outro: str = "default"
 
 
 @dataclass
@@ -142,6 +144,14 @@ _SYSTEM = """\
 - sparkle: 반짝인다. 자화자찬, 예쁜 것, 뿌듯한 순간.
 - default: 스타일에 정해진 기본 애니메이션을 쓴다.
 
+# 자막 퇴장 애니메이션 (outro)
+- 등장만 있고 퇴장이 없으면 자막이 뚝 끊기듯 사라져서 어색하다. 되도록 넣어라.
+- fade: 기본. 조용히 사라진다. 웬만하면 이걸로 충분하다.
+- blur / dissolve: 흐려지며 녹아 사라진다. 나레이션, 여운.
+- drop / rise: 아래로 떨어지거나 위로 빠진다. 리듬감이 필요할 때.
+- glitch / signal: 튀면서 사라진다. 사고, 실패, 어이없음.
+- spring / ripple: 통통 튀거나 번진다. 가벼운 리액션.
+
 # 효과음과 줌
 - 효과음은 자막이 뜨는 바로 그 순간에 겹쳐야 산다. 아무 데나 깔지 않는다.
 - 줌은 표정이 결정적으로 변하는 순간에 0.8~2.5초로 짧게. 계속 당겨져 있으면 피곤하다.
@@ -186,8 +196,11 @@ _USER_TEMPLATE = """\
 # 컷 경계 (이 시각에만 전환을 넣을 수 있음)
 {boundary_list}
 
-# 쓸 수 있는 자막 애니메이션
+# 쓸 수 있는 자막 등장 애니메이션
 {anim_list}
+
+# 쓸 수 있는 자막 퇴장 애니메이션
+{outro_list}
 
 # 자막 위치 값
 {position_list}
@@ -205,6 +218,7 @@ def _schema(
     sfx_names: list[str],
     effect_names: list[str],
     anim_names: list[str],
+    outro_names: list[str],
     transition_names: list[str],
     boundaries: list[float],
 ) -> dict[str, Any]:
@@ -221,8 +235,10 @@ def _schema(
             "position": {"type": "string", "enum": positions},
             "anim": {"type": "string", "enum": ["default", *anim_names],
                      "description": "등장 애니메이션. 고민되면 default"},
+            "outro": {"type": "string", "enum": ["default", *outro_names],
+                      "description": "퇴장 애니메이션. 고민되면 default"},
         },
-        "required": ["start", "end", "text", "style", "position", "anim"],
+        "required": ["start", "end", "text", "style", "position", "anim", "outro"],
         "additionalProperties": False,
     }
     sfx = {
@@ -301,7 +317,8 @@ class CuesheetError(RuntimeError):
 #: 섹션별 필드 규격: (필수 필드, 선택 필드와 기본값, 만들 클래스)
 _SECTIONS: dict[str, tuple[dict[str, type], dict[str, Any], Any]] = {
     "captions": ({"start": float, "end": float, "text": str},
-                 {"style": "reaction", "position": "default", "anim": "default"}, Caption),
+                 {"style": "reaction", "position": "default", "anim": "default",
+                  "outro": "default"}, Caption),
     "sfx":      ({"time": float, "name": str}, {}, SfxCue),
     "zooms":    ({"start": float, "end": float, "scale": float}, {}, ZoomCue),
     "effects":  ({"start": float, "end": float, "name": str}, {}, EffectCue),
@@ -454,6 +471,7 @@ def check_names(
     effect_names: Iterable[str],
     positions: Iterable[str] | None = None,
     anim_names: Iterable[str] | None = None,
+    outro_names: Iterable[str] | None = None,
     transition_names: Iterable[str] | None = None,
 ) -> list[str]:
     """이름이 실제로 쓸 수 있는 것인지 본다. 치명적이진 않아 경고로 돌려준다."""
@@ -462,6 +480,7 @@ def check_names(
     effects = set(effect_names)
     places = set(positions or []) | {"default"}
     anims = set(anim_names or []) | {"default"}
+    outros = set(outro_names or []) | {"default"}
     trans = set(transition_names or [])
 
     warnings: list[str] = []
@@ -479,8 +498,13 @@ def check_names(
     for i, cap in enumerate(sheet.captions):
         if anim_names is not None and cap.anim not in anims:
             warnings.append(
-                f"captions[{i}]: 모르는 애니메이션 '{cap.anim}'{_suggest(cap.anim, anims)} "
+                f"captions[{i}]: 모르는 등장 애니메이션 '{cap.anim}'{_suggest(cap.anim, anims)} "
                 f"— 스타일 기본값을 씁니다"
+            )
+        if outro_names is not None and cap.outro not in outros:
+            warnings.append(
+                f"captions[{i}]: 모르는 퇴장 애니메이션 '{cap.outro}'"
+                f"{_suggest(cap.outro, outros)} — 퇴장 없이 사라집니다"
             )
     for i, cue in enumerate(sheet.transitions):
         if transition_names is not None and cue.name not in trans:
@@ -556,6 +580,7 @@ def generate(
     effect_names: list[str],
     *,
     anim_names: list[str] | None = None,
+    outro_names: list[str] | None = None,
     transition_names: list[str] | None = None,
     boundaries: list[float] | None = None,
     style_ref: list[str] | None = None,
@@ -573,10 +598,12 @@ def generate(
 
     client = client or anthropic.Anthropic()
     anim_names = anim_names or []
+    outro_names = outro_names or []
     transition_names = transition_names or []
     boundaries = boundaries or []
     schema = _schema(
-        style_names, sfx_names, effect_names, anim_names, transition_names, boundaries
+        style_names, sfx_names, effect_names, anim_names, outro_names,
+        transition_names, boundaries,
     )
     lines = _script_lines(utterances)
 
@@ -584,6 +611,7 @@ def generate(
     effect_catalog = "\n".join(f"- {n}" for n in effect_names) or "(없음 — 화면효과를 만들지 마라)"
     transition_catalog = "\n".join(f"- {n}" for n in transition_names) or "(없음 — 전환을 만들지 마라)"
     anim_list = "\n".join(f"- {n}" for n in ["default", *anim_names])
+    outro_list = "\n".join(f"- {n}" for n in ["default", *outro_names])
     position_list = "\n".join(
         [f"- default: 스타일 기본 위치"] + [f"- {k}" for k in POSITION_OVERRIDES]
     )
@@ -625,6 +653,7 @@ def generate(
             transition_catalog=transition_catalog,
             boundary_list=boundary_list,
             anim_list=anim_list,
+            outro_list=outro_list,
             position_list=position_list,
             style_ref_block=style_ref_block,
             context_block=context_block,

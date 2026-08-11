@@ -221,19 +221,36 @@ def build(
                     clip_settings=ClipSettings(transform_y=pos_y),
                 )
 
+                span = end - start
                 intro = style_map.caption_anim_type(
                     cap.anim if cap.anim and cap.anim != "default" else None
                 )
                 if intro is None:
                     intro = style_map.intro_type(preset.intro)
-                if intro is not None:
-                    seg.add_animation(intro, _us(preset.intro_ms / 1000.0))
+
+                # 등장·퇴장이 합쳐서 자막 길이를 넘으면 캡컷이 둘 다 뭉갠다.
+                # 그래서 자막이 짧을수록 애니메이션도 같이 줄인다.
+                intro_s = min(preset.intro_ms / 1000.0, span * 0.4)
+                outro_s = min(preset.outro_ms / 1000.0, span * 0.4)
+
+                if intro is not None and intro_s > 0.05:
+                    seg.add_animation(intro, _us(intro_s))
+
+                outro = style_map.caption_outro_type(
+                    cap.outro if cap.outro and cap.outro != "default" else preset.outro
+                )
+                if outro is not None and outro_s > 0.05:
+                    seg.add_animation(outro, _us(outro_s))
+
                 loop = style_map.loop_type(preset.loop)
                 if loop is not None:
                     try:
                         seg.add_animation(loop)
-                    except Exception:
-                        pass  # 등장 애니와 충돌하는 버전이 있어 무시
+                    except Exception as exc:
+                        # 조용히 삼키면 왜 애니메이션이 없는지 알 수 없다
+                        warnings.append(
+                            f"자막 '{cap.text}' 의 반복 애니메이션을 넣지 못했습니다: {exc}"
+                        )
 
                 script.add_segment(seg, name)
                 caption_count += 1

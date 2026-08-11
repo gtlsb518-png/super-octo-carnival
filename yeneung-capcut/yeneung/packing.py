@@ -135,6 +135,18 @@ def cut_boundaries(timeline: TimelineMap) -> list[float]:
     return [timeline.cut_start_of(i) for i in range(1, len(timeline.keeps))]
 
 
+def cut_segments(timeline: TimelineMap) -> list[tuple[float, float]]:
+    """컷 편집 후 타임라인에서 **메인 영상 클립 하나하나**의 (시작, 끝).
+
+    자막과 효과를 여기에 맞춰 나눠 담는다. 대사만 보고 배급하면 어떤 클립엔
+    세 개가 몰리고 어떤 클립은 텅 빈다. 클립이 기준이어야 고르게 들어간다.
+    """
+    n = len(timeline.keeps)
+    starts = [timeline.cut_start_of(i) for i in range(n)]
+    ends = starts[1:] + [timeline.total]
+    return [(s, e) for s, e in zip(starts, ends) if e > s]
+
+
 def _tidy(values: list[float], lo: float, hi: float) -> list[float]:
     """경계값을 정렬·중복제거하고, 너무 촘촘한 것은 합친다."""
     out: list[float] = []

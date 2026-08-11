@@ -93,6 +93,10 @@ class CaptionStyle:
     # 등장 애니메이션 (pycapcut TextIntro 이름). None 이면 없음
     intro: str | None = "弹出"
     intro_ms: int = 400
+    # 퇴장 애니메이션 (styles.CAPTION_OUTRO_CANDIDATES 의 논리 이름).
+    # 없으면 자막이 뚝 끊기듯 사라진다
+    outro: str | None = "fade"
+    outro_ms: int = 300
     # 반복 애니메이션 (pycapcut TextLoopAnim 이름)
     loop: str | None = None
 
@@ -176,27 +180,28 @@ DEFAULT_STYLES: dict[str, CaptionStyle] = {
     # 감탄·리액션. 화면 위쪽에 크게
     "reaction": CaptionStyle(
         size=13.0, color=(1.0, 0.92, 0.23), border_width=65.0,
-        position_y=0.58, intro="弹出", intro_ms=350,
+        position_y=0.58, intro="弹出", intro_ms=350, outro="spring",
     ),
     # 핵심 포인트 강조. 가장 크고 강함
     "emphasis": CaptionStyle(
         size=15.0, color=(1.0, 0.36, 0.24), border_width=70.0,
-        position_y=0.30, intro="放大震动", intro_ms=400, loop="心跳频闪",
+        position_y=0.30, intro="放大震动", intro_ms=400, outro="drop",
+        loop="心跳频闪",
     ),
     # 제작진 시점의 상황 설명
     "narration": CaptionStyle(
         size=9.0, color=(1.0, 1.0, 1.0), border_width=50.0,
-        position_y=0.72, intro="渐显", intro_ms=300, bold=False,
+        position_y=0.72, intro="渐显", intro_ms=300, outro="fade", bold=False,
     ),
     # 속마음·작은 목소리
     "whisper": CaptionStyle(
         size=8.0, color=(0.75, 0.80, 0.90), border_width=45.0,
-        position_y=0.42, intro="向上弹入", intro_ms=300, bold=False,
+        position_y=0.42, intro="向上弹入", intro_ms=300, outro="blur", bold=False,
     ),
     # 상황 자막 CG (장소/시간/설명)
     "situation": CaptionStyle(
         size=10.0, color=(0.40, 0.95, 1.0), border_width=55.0,
-        position_y=0.66, intro="向右滑动", intro_ms=350,
+        position_y=0.66, intro="向右滑动", intro_ms=350, outro="slide_side",
     ),
 }
 

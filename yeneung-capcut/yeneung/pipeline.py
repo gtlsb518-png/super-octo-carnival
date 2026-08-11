@@ -163,7 +163,9 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
 
     effect_names = styles.available_effects() if cfg.effect.enabled else []
     anim_names = styles.available_caption_anims()
+    outro_names = styles.available_caption_outros()
     boundaries = packing.cut_boundaries(timeline)
+    segments = packing.cut_segments(timeline)
     transition_names = (
         styles.available_transitions() if cfg.transition.enabled and boundaries else []
     )
@@ -188,6 +190,7 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             effect_names=effect_names,
             positions=POSITION_OVERRIDES,
             anim_names=anim_names,
+            outro_names=outro_names,
             transition_names=transition_names,
         ):
             log(f"  ! {warning}")
@@ -208,10 +211,13 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             effect_names=effect_names,
             transition_names=transition_names,
             boundaries=boundaries,
+            segments=segments,
         )
         sheet = cuesheet_mod.sanitize(sheet, timeline.total)
         sheet.save(sheet_path)
         log(f"큐시트: {sheet.summary()}")
+        log(f"  메인 클립 {len(segments)}개 기준으로 배치했습니다 "
+            f"(자막 붙은 클립 {len(sheet.captions)}개)")
         log("  규칙 기반이라 맥락은 못 읽습니다. 캡컷에서 지우고 고치시면 됩니다.")
     else:
         log(f"큐시트 생성 중 ({cfg.cuesheet.model}, 밀도 {cfg.cuesheet.density})...")
@@ -227,6 +233,7 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
             sfx_names=library.names()[: cfg.sfx.max_catalog],
             effect_names=effect_names,
             anim_names=anim_names,
+            outro_names=outro_names,
             transition_names=transition_names,
             boundaries=boundaries,
             style_ref=style_examples,
