@@ -390,6 +390,8 @@ def bollinger_signals(df, length=20, mult=2.0, squeeze=125):
 
 
 STRAT_WARMUP = {'base': 60, 'goldfib': 245, 'bollinger': 150}
+# 전략별 권장 매매 시간봉 (황금피보 5/20/60/120/240선은 큰 봉이 적합)
+STRAT_INTERVAL = {'base': '5m', 'goldfib': '1h', 'bollinger': '1h'}
 
 
 # ==================== 시뮬레이션 ====================
@@ -1011,9 +1013,20 @@ def launch_gui():
         '볼린저 (스퀴즈돌파/밴드반전)': 'bollinger',
     }
     strategy_label_var = tk.StringVar(value='기본 (UT+EMA + 스위칭)')
-    ttk.Combobox(left, textvariable=strategy_label_var,
-                 values=list(STRATEGY_OPTS.keys()), width=26,
-                 state='readonly').pack(anchor='w', padx=22, pady=2)
+    strat_combo = ttk.Combobox(left, textvariable=strategy_label_var,
+                               values=list(STRATEGY_OPTS.keys()), width=26,
+                               state='readonly')
+    strat_combo.pack(anchor='w', padx=22, pady=2)
+
+    def _on_strategy_change(_e=None):
+        """전략 바꾸면 권장 시간봉 자동 적용 (원하면 시간봉 칸에서 직접 변경 가능)"""
+        strat = STRATEGY_OPTS.get(strategy_label_var.get(), 'base')
+        rec = STRAT_INTERVAL.get(strat, '5m')
+        if interval_var.get() != rec:
+            interval_var.set(rec)
+            gui_log(f"ℹ️ '{strategy_label_var.get()}' → 매매 시간봉을 {rec}로 자동 설정"
+                    f" (직접 변경 가능)")
+    strat_combo.bind('<<ComboboxSelected>>', _on_strategy_change)
     sform = tk.Frame(left, bg=PANEL)
     sform.pack(padx=10)
     sfields = [('익절 TP % (황금피보/볼린저)', 'fixed_tp_pct'), ('손절 % (0=끔)', 'sl_pct')]
@@ -1431,7 +1444,8 @@ def run_cli():
     ap = argparse.ArgumentParser(description='바이낸스 선물 백테스터 (CLI 모드)')
     ap.add_argument('--symbols', default=','.join(DEFAULT_SYMBOLS))
     ap.add_argument('--days', type=int, default=DEFAULTS['days'])
-    ap.add_argument('--interval', default=DEFAULTS['interval'])
+    ap.add_argument('--interval', default=None,
+                    help='매매 시간봉 (미지정 시 전략 권장값: base=5m, 황금피보/볼린저=1h)')
     ap.add_argument('--adx-interval', default=DEFAULTS['adx_interval'],
                     help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
@@ -1461,13 +1475,14 @@ def run_cli():
     p['days'] = args.days
     p['start_date'] = args.start
     p['end_date'] = args.end
-    p['interval'] = args.interval
     p['adx_interval'] = args.adx_interval
     p['vol_filter'] = args.vol
     p['vol_mult'] = args.vol_mult
     p['tp_mode'] = args.tp_mode
     p['atr_tp_mult'] = args.atr_mult
     p['strategy'] = args.strategy
+    # 시간봉: 지정 없으면 전략 권장값 (황금피보/볼린저 = 1h)
+    p['interval'] = args.interval or STRAT_INTERVAL.get(args.strategy, DEFAULTS['interval'])
     p['sl_pct'] = args.sl
     if p['strategy'] in ('goldfib', 'bollinger') and p['sl_pct'] <= 0:
         p['sl_pct'] = 2.0
