@@ -2255,7 +2255,7 @@ class App:
         for i, coin_info in enumerate(selected_coins, 1):
             coin = {
                 'symbol': coin_info['symbol'],
-                'timeframe': '5m',  # 5분봉
+                'timeframe': '1h',  # 🔥 1시간봉
                 'amount': 50,  # 진입금 50 USDT
                 'leverage': 3,  # 레버리지 3배 (안전)
                 'tp': 0.3,  # 기본 TP (동적 TP 비활성화 시)
@@ -3490,7 +3490,7 @@ class App:
                     state='readonly', font=('Arial', 11)).pack(pady=5)
         
         tk.Label(dialog, text="시간봉:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
-        tf_var = tk.StringVar(value='15m')  # 기본 15분봉
+        tf_var = tk.StringVar(value='1h')  # 🔥 기본 1시간봉
         ttk.Combobox(dialog, textvariable=tf_var, values=['1m', '5m', '15m', '30m', '1h', '4h', '1d'],
                     state='readonly', font=('Arial', 11)).pack(pady=5)
         
