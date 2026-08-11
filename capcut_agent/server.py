@@ -2728,7 +2728,12 @@ def build_sequence_draft(
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # 화면 파일을 새로 덮어썼는데 브라우저가 예전 걸 캐시해서 쓰는 일이 없도록
+    # 항상 새로 받게 한다 (예전 화면이 남아 있으면 없는 항목을 읽어 오류가 난다)
+    return FileResponse(STATIC_DIR / "index.html", headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    })
 
 
 @app.post("/api/process")

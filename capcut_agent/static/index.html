@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CapCut Agent</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2322c55e'/><text x='16' y='23' font-size='20' font-family='monospace' font-weight='700' text-anchor='middle' fill='%23000'>C</text></svg>" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -581,8 +582,29 @@
 </main>
 
 <script>
+  const UI_VERSION = '2026-08-11';   // 화면 버전 (로그에 찍혀서 최신인지 바로 확인 가능)
+
   let videoPath = null;
   let currentDraftName = null;
+
+  // ── 화면 요소 안전하게 읽기 ──────────────────────────────
+  // 예전 화면이 캐시에 남아 있어도 "null 의 checked 를 읽을 수 없다" 로
+  // 통째로 실패하지 않고, 없는 항목은 기본값으로 넘어간다.
+  function chk(id, dflt = false) {
+    const el = document.getElementById(id);
+    return el ? el.checked : dflt;
+  }
+  function val(id, dflt = '') {
+    const el = document.getElementById(id);
+    return el ? el.value : dflt;
+  }
+  function num(id, dflt) {
+    const v = parseFloat(val(id, ''));
+    return Number.isFinite(v) ? v : dflt;
+  }
+  function txt(id) {
+    return String(val(id, '')).trim();
+  }
 
   // ── 경로 입력 ────────────────────────────────────────────
   function onPathInput(val) {
@@ -671,23 +693,22 @@
     document.getElementById('status-text').textContent = '처리 중...';
     setProgress('upload');
 
-    const autoNoise = document.getElementById('auto-noise').checked;
-    const noiseDb = document.getElementById('noise-db').value;
-    const minSil  = document.getElementById('min-silence').value;
-    const useSub  = document.getElementById('use-subtitle').checked ? 'true' : 'false';
-    const ratio   = document.querySelector('input[name="ratio"]:checked').value;
-    const maxChars = document.getElementById('max-sub-chars').value;
+    const autoNoise = chk('auto-noise', true);
+    const noiseDb = val('noise-db', -40);
+    const minSil  = val('min-silence', 0.3);
+    const useSub  = chk('use-subtitle', true) ? 'true' : 'false';
+    const ratioSel = document.querySelector('input[name="ratio"]:checked');
+    const ratio   = ratioSel ? ratioSel.value : '9:16';
+    const maxChars = num('max-sub-chars', 12);
     const encoded = encodeURIComponent(videoPath);
 
     // 컷 여유: 화면은 "여유(+ 면 더 남김)", 서버는 "깎는 양" 이라 부호를 뒤집는다
-    const headTrim = -parseFloat(document.getElementById('head-pad').value || 0);
-    const tailTrim = -parseFloat(document.getElementById('tail-pad').value || 0);
-    const minClip  = document.getElementById('drop-short').checked
-                     ? document.getElementById('min-clip').value : 0;
+    const headTrim = -num('head-pad', 30);
+    const tailTrim = -num('tail-pad', 0);
+    const minClip  = chk('drop-short') ? num('min-clip', 0.7) : 0;
 
     // 같은 말 반복(엔지컷) 정리
-    const ngShort = document.getElementById('ng-on').checked
-                    ? document.getElementById('ng-short').value : 0;
+    const ngShort = chk('ng-on') ? num('ng-short', 1.5) : 0;
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}&ng_short=${ngShort}&auto_noise=${autoNoise}`);
@@ -707,15 +728,15 @@
     xhr.onload  = () => { btn.disabled = false; document.getElementById('status-text').textContent = ''; };
     xhr.onerror = () => { log('연결 오류: server.py가 실행 중인지 확인하세요', 'err'); btn.disabled = false; };
     xhr.timeout = 0;
-    const script = document.getElementById('script-text').value.trim();
-    const imageDur = parseFloat(document.getElementById('image-dur').value) || 2;
-    if (document.getElementById('date-today').checked) syncToday();
-    const title = document.getElementById('title-text').value.trim();
-    const dateTxt = document.getElementById('date-text').value.trim();
-    const effOn = document.getElementById('use-effects').checked;
-    const effDur = effOn ? (parseFloat(document.getElementById('effect-dur').value) || 0.4) : 0;
-    const strokeSize = (parseFloat(document.getElementById('stroke-size').value) || 0) / 100;
-    const unifyPlace = document.getElementById('unify-place').checked;
+    const script = txt('script-text');
+    const imageDur = num('image-dur', 2);
+    if (chk('date-today', true)) syncToday();
+    const title = txt('title-text');
+    const dateTxt = txt('date-text');
+    const effOn = chk('use-effects', true);
+    const effDur = effOn ? num('effect-dur', 0.4) : 0;
+    const strokeSize = num('stroke-size', 15) / 100;
+    const unifyPlace = chk('unify-place', true);
 
     xhr.send(JSON.stringify({
       script, append_files: appendFiles, image_dur: imageDur,
@@ -797,9 +818,9 @@
   }
 
   function syncToday() {
-    const box = document.getElementById('date-today');
     const fld = document.getElementById('date-text');
-    if (box.checked) {
+    if (!fld) return;
+    if (chk('date-today', true)) {
       fld.value = todayMMDD();
       fld.readOnly = true;
       fld.style.opacity = 0.75;
@@ -910,14 +931,15 @@
       log('먼저 "📁 파일 여러 개 선택"으로 자료 파일을 고르세요', 'warn');
       return;
     }
-    const ratio = document.querySelector('input[name="ratio"]:checked').value;
-    const imageDur = parseFloat(document.getElementById('image-dur').value) || 2;
+    const ratioEl = document.querySelector('input[name="ratio"]:checked');
+    const ratio = ratioEl ? ratioEl.value : '9:16';
+    const imageDur = num('image-dur', 2);
     const name = 'CapCut_Sequence_' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'');
     const runBtn = document.getElementById('run-btn');
     const seqBtn = document.getElementById('seq-btn');
     if (runBtn) runBtn.disabled = true;
     if (seqBtn) seqBtn.disabled = true;
-    if (document.getElementById('date-today').checked) syncToday();
+    if (chk('date-today', true)) syncToday();
     log(`선택 파일 ${appendFiles.length}개로 새 프로젝트 생성 중...`, 'info');
     if (bgFiles.size) {
       log(`배경제거 ${bgFiles.size}장 처리 중 — 처음 한 번은 모델(176MB) 내려받느라 몇 분 걸립니다`, 'info');
@@ -928,13 +950,11 @@
         body: JSON.stringify({
           files: appendFiles, ratio, image_dur: imageDur, name,
           bg_files: [...bgFiles],
-          stroke_size: (parseFloat(document.getElementById('stroke-size').value) || 0) / 100,
-          unify_place: document.getElementById('unify-place').checked,
-          effect_dur: document.getElementById('use-effects').checked
-                      ? (parseFloat(document.getElementById('effect-dur').value) || 0.4) : 0,
-          title: document.getElementById('title-text').value.trim(),
-          date: document.getElementById('date-today').checked
-                ? todayMMDD() : document.getElementById('date-text').value.trim()
+          stroke_size: num('stroke-size', 15) / 100,
+          unify_place: chk('unify-place', true),
+          effect_dur: chk('use-effects', true) ? num('effect-dur', 0.4) : 0,
+          title: txt('title-text'),
+          date: chk('date-today', true) ? todayMMDD() : txt('date-text')
         })
       });
       const data = await res.json();
@@ -964,8 +984,10 @@
   }
 
   syncToday();
-  log('CapCut Agent 준비 완료', 'ok');
+  updateRunBtn();
+  log(`CapCut Agent 준비 완료 (화면 ${UI_VERSION})`, 'ok');
   log('영상 파일 경로를 입력하거나 드래그하세요', 'info');
+  log('자료 파일만 넣을 때는 경로를 비워둔 채 📁 파일 여러 개 선택 → 🎬 자료만으로 draft 생성', 'info');
 </script>
 </body>
 </html>
