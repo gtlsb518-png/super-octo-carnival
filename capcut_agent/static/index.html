@@ -416,8 +416,9 @@
   <!-- 추가 파일 (영상·이미지 순서대로 삽입) -->
   <div class="card">
     <div class="card-title">추가 파일 — 영상·이미지 순서대로 삽입</div>
-    <div style="display:flex; gap:8px; align-items:center;">
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
       <button class="btn btn-ghost" onclick="pickAppendFiles()">📁 파일 여러 개 선택</button>
+      <button class="btn btn-primary" id="seq-btn" onclick="buildSequenceOnly()">🎬 자료만으로 draft 생성</button>
       <span id="append-info" style="color:var(--muted); font-size:12px;">선택된 파일 없음</span>
       <div style="flex:1;"></div>
       <label style="font-size:12px; color:var(--muted);">이미지 1장 길이
@@ -444,14 +445,13 @@
       처음 한 번은 배경제거 모델(176MB)을 내려받느라 시간이 걸립니다.
       <br />영상 파일의 배경제거는 캡컷에서 직접 켜주세요.
     </div>
-    <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
-      <button class="btn btn-ghost" onclick="buildSequenceOnly()">🎬 자료 파일만으로 새 프로젝트</button>
-      <span style="font-size:11px; color:var(--muted);">영상 없이 자료만 — 배경제거·효과·제목·날짜 그대로 적용</span>
-    </div>
-    <p style="margin-top:8px; font-size:11px; color:var(--muted);">
-      💡 위에서 <strong style="color:var(--text);">▶ draft 생성</strong>을 누르면 컷편집 영상 <strong style="color:var(--text);">뒤에 이어붙습니다</strong>(통합).<br />
-      영상 없이 <strong style="color:var(--text);">자료 파일만으로</strong> 만들려면 <strong style="color:var(--text);">🎬 자료 파일만으로 새 프로젝트</strong>를 누르세요.
-      영상 파일 경로는 비워둬도 됩니다.<br />
+    <p style="margin-top:12px; font-size:11px; color:var(--muted); line-height:1.7;">
+      💡 <strong style="color:var(--text);">자료만 넣고 싶을 때</strong> — 영상 경로는 비워둔 채
+      <strong style="color:var(--text);">📁 파일 여러 개 선택</strong> → <strong style="color:var(--accent);">🎬 자료만으로 draft 생성</strong>.
+      (아래 <strong style="color:var(--text);">▶ draft 생성</strong>을 눌러도 영상 경로가 비어 있으면 자동으로 자료만 모드로 만듭니다)<br />
+      영상까지 같이 편집할 때는 영상 경로를 넣고 <strong style="color:var(--text);">▶ draft 생성</strong> — 컷편집 영상
+      <strong style="color:var(--text);">뒤에 이어붙습니다</strong>(통합).<br />
+      배경제거 · 효과 · 크기/위치 통일 · 제목 · 날짜는 두 방식 모두 똑같이 적용됩니다.<br />
       배치: 이미지는 크기 79 / Y −892, 영상은 크기 87 / Y −1022 (X는 둘 다 0)
     </p>
   </div>
@@ -498,7 +498,7 @@
   </div>
 
   <div style="display:flex; gap:12px; align-items:center;">
-    <button class="btn btn-primary" id="run-btn" onclick="runProcess()" disabled>
+    <button class="btn btn-primary" id="run-btn" onclick="runProcess()">
       ▶ draft 생성
     </button>
     <button class="btn btn-ghost" onclick="clearLog()">로그 지우기</button>
@@ -590,8 +590,16 @@
     if (!val) return;
     videoPath = val;
     document.getElementById('file-info').textContent = `📎 경로 설정됨: ${val}`;
-    document.getElementById('run-btn').disabled = false;
+    updateRunBtn();
     log(`경로 입력: ${val}`, 'info');
+  }
+
+  // 영상 경로가 없고 자료 파일만 골랐으면 버튼 이름을 바꿔서 헷갈리지 않게 한다
+  function updateRunBtn() {
+    const btn = document.getElementById('run-btn');
+    if (!btn) return;
+    btn.textContent = (!videoPath && appendFiles.length)
+      ? `🎬 자료 ${appendFiles.length}개로 draft 생성` : '▶ draft 생성';
   }
 
   // 탐색기에서 찾아보기 (서버에 파일 다이얼로그 요청)
@@ -647,7 +655,12 @@
 
   // ── 메인 실행 ────────────────────────────────────────────
   function runProcess() {
-    if (!videoPath) return;
+    // 영상 경로가 비어 있으면 = 자료 파일만으로 만드는 모드
+    if (!videoPath) {
+      if (appendFiles.length) { buildSequenceOnly(); return; }
+      log('영상 경로를 넣거나, "📁 파일 여러 개 선택"으로 자료 파일을 고르세요', 'warn');
+      return;
+    }
 
     const btn = document.getElementById('run-btn');
     btn.disabled = true;
@@ -830,6 +843,7 @@
   }
 
   function renderAppendList() {
+    updateRunBtn();
     const info = document.getElementById('append-info');
     const list = document.getElementById('append-list');
     if (!appendFiles.length) {
@@ -892,11 +906,22 @@
   }
 
   async function buildSequenceOnly() {
-    if (!appendFiles.length) { log('먼저 파일을 선택하세요', 'warn'); return; }
+    if (!appendFiles.length) {
+      log('먼저 "📁 파일 여러 개 선택"으로 자료 파일을 고르세요', 'warn');
+      return;
+    }
     const ratio = document.querySelector('input[name="ratio"]:checked').value;
     const imageDur = parseFloat(document.getElementById('image-dur').value) || 2;
     const name = 'CapCut_Sequence_' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'');
+    const runBtn = document.getElementById('run-btn');
+    const seqBtn = document.getElementById('seq-btn');
+    if (runBtn) runBtn.disabled = true;
+    if (seqBtn) seqBtn.disabled = true;
+    if (document.getElementById('date-today').checked) syncToday();
     log(`선택 파일 ${appendFiles.length}개로 새 프로젝트 생성 중...`, 'info');
+    if (bgFiles.size) {
+      log(`배경제거 ${bgFiles.size}장 처리 중 — 처음 한 번은 모델(176MB) 내려받느라 몇 분 걸립니다`, 'info');
+    }
     try {
       const res = await fetch('/api/build-sequence', {
         method: 'POST', headers: {'Content-Type':'application/json'},
@@ -925,6 +950,9 @@
       }
     } catch(e) {
       log('생성 오류: ' + e.message, 'err');
+    } finally {
+      if (runBtn) runBtn.disabled = false;
+      if (seqBtn) seqBtn.disabled = false;
     }
   }
 
