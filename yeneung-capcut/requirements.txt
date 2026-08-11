@@ -1,4 +1,6 @@
-pycapcut>=0.2.0
+# pycapcut 은 아직 0.0.x 라 버전이 올라가면 API 가 통째로 바뀔 수 있다.
+# 실제로 검증한 버전으로 못박아 둔다.
+pycapcut==0.0.3
 faster-whisper>=1.0.0
 numpy>=1.24
 pymediainfo>=6.1
