@@ -5,9 +5,22 @@ API 키, 수수료, 트레이딩 파라미터 등 설정값
 """
 
 # ==================== API 설정 (여기서 수정!) ====================
+# ⚠️ 중요: API 키와 TESTNET 값을 반드시 '짝'으로 맞춰야 합니다!
+#
+#   [테스트넷(모의)로 돌리기]
+#     · https://testnet.binancefuture.com 에서 발급받은 키 입력
+#     · TESTNET = True
+#
+#   [메인넷(실거래)로 돌리기]
+#     · https://www.binance.com 에서 발급받은 키 입력 (선물 거래 권한 필요)
+#     · TESTNET = False        ← 이걸 안 바꾸면 실거래가 안 됩니다!
+#
+#   ※ 키 종류로 자동 판별하지 않습니다. TESTNET 값이 접속 서버를 결정합니다.
+#   ※ 같은 폴더에 settings.json이 있으면 이 파일이 무시되니 삭제하세요.
+
 API_KEY = "GIfUkScBdtzxS9esHcaRe3ybEtyLn2BTslcwR4xhpggaTvhqILpivPefL7fn4Q1v"
 API_SECRET = "iRwvo3i9flRN0QaulpMS7CjkX5ginRsRtKmdL9GeEtLIEmRJUtPbu4TPdLHwXqMt"
-TESTNET = True  # True=테스트넷(데모), False=메인넷(실거래)
+TESTNET = True  # True=테스트넷(모의), False=메인넷(실거래)
 # ==================================================================
 
 # ==================== 수수료율 ====================

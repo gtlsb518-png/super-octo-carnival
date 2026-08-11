@@ -38,16 +38,34 @@ import importlib
 SETTINGS_FILE = 'settings.json'
 
 def load_settings():
+    # 🔥 settings.json이 있으면 그게 우선 → 1_config.py 수정이 반영 안 되는 함정 방지용 경고
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            pass
+                s = json.load(f)
+            print("=" * 60)
+            print(f"⚠️ '{SETTINGS_FILE}' 파일이 있어 이 설정을 사용합니다.")
+            print("   → 1_config.py를 수정해도 반영되지 않습니다!")
+            print(f"   → 1_config.py로 돌리려면 {SETTINGS_FILE} 파일을 삭제하세요.")
+            print(f"   현재 모드: {'테스트넷(모의)' if s.get('testnet', True) else '🔴 메인넷(실거래)'}")
+            print("=" * 60)
+            return s
+        except Exception as e:
+            print(f"⚠️ {SETTINGS_FILE} 읽기 실패({e}) → 1_config.py 사용")
     try:
         _config = importlib.import_module('1_config')
-        return {'api_key': _config.API_KEY, 'api_secret': _config.API_SECRET, 'testnet': _config.TESTNET, 'fee_rate': _config.FEE_RATE}
-    except:
+        mode = '테스트넷(모의)' if _config.TESTNET else '🔴 메인넷(실거래)'
+        key = getattr(_config, 'API_KEY', '')
+        print("=" * 60)
+        print(f"🔑 설정 파일: 1_config.py")
+        print(f"   모드: {mode}   |   API Key: {key[:6]}...{key[-4:] if len(key) > 10 else ''}")
+        if not key or not getattr(_config, 'API_SECRET', ''):
+            print("   ❌ API 키가 비어 있습니다! 1_config.py에 키를 입력하세요.")
+        print("=" * 60)
+        return {'api_key': _config.API_KEY, 'api_secret': _config.API_SECRET,
+                'testnet': _config.TESTNET, 'fee_rate': _config.FEE_RATE}
+    except Exception as e:
+        print(f"❌ 1_config.py 로드 실패: {e}")
         return {'api_key': '', 'api_secret': '', 'testnet': True, 'fee_rate': 0.0004}
 
 def save_settings(s):
