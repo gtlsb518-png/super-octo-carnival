@@ -211,8 +211,8 @@ FPS = 30.0
 FRAME_US = int(round(1_000_000 / FPS))   # 한 프레임 길이(us)
 
 # 자막 한 조각의 목표 글자 수 (기본값, UI에서 조절 가능).
-# 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
-MAX_SUBTITLE_CHARS = 9
+# 어절 경계로 이 길이 안팎에서 끊는다. 사용자 완성본(알테오젠 원고 27줄) 기준.
+MAX_SUBTITLE_CHARS = 12
 
 # 말 사이가 이만큼 벌어지면 자막을 끊는다 (자연스러운 호흡 단위 분할)
 SUB_PAUSE_BREAK_US = 350_000
@@ -2005,7 +2005,7 @@ def _make_matting(remove_bg: bool, stroke: bool, stroke_size: float = 0.15,
 # 이미지로 취급할 확장자 (나머지는 영상으로 간주)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".tif", ".tiff"}
 IMAGE_SOURCE_DUR_US = 10_800_000_000   # 이미지 material의 소스 길이 (3시간, CapCut 관례)
-DEFAULT_IMAGE_DUR_SEC = 3.0            # 이미지 1장 타임라인 기본 노출 시간
+DEFAULT_IMAGE_DUR_SEC = 2.0            # 이미지 1장 타임라인 기본 노출 시간
 
 
 def get_media_info(path: Path) -> tuple[int, int, float | None, bool]:

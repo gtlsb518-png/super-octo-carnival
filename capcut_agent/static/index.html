@@ -322,13 +322,13 @@
       </div>
       <div class="settings-grid">
         <div class="setting-item">
-          <label>클립 앞 여유 <span id="head-val">+10 ms</span></label>
-          <input type="range" id="head-pad" min="-400" max="400" value="10" step="10"
+          <label>클립 앞 여유 <span id="head-val">+30 ms</span></label>
+          <input type="range" id="head-pad" min="-400" max="400" value="30" step="10"
                  oninput="document.getElementById('head-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
         <div class="setting-item">
-          <label>클립 뒤 여유 <span id="tail-val">-10 ms</span></label>
-          <input type="range" id="tail-pad" min="-400" max="400" value="-10" step="10"
+          <label>클립 뒤 여유 <span id="tail-val">0 ms</span></label>
+          <input type="range" id="tail-pad" min="-400" max="400" value="0" step="10"
                  oninput="document.getElementById('tail-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
       </div>
@@ -393,9 +393,9 @@
     <div class="setting-item" style="margin-top:14px; max-width:320px;">
       <label>
         자막 한 줄 글자 수 (어절 단위로 끊음)
-        <span id="chars-val">9 자</span>
+        <span id="chars-val">12 자</span>
       </label>
-      <input type="range" id="max-sub-chars" min="8" max="20" value="9" step="1"
+      <input type="range" id="max-sub-chars" min="8" max="20" value="12" step="1"
              oninput="document.getElementById('chars-val').textContent = this.value + ' 자'" />
     </div>
     <div style="margin-top:14px;">
@@ -421,7 +421,7 @@
       <span id="append-info" style="color:var(--muted); font-size:12px;">선택된 파일 없음</span>
       <div style="flex:1;"></div>
       <label style="font-size:12px; color:var(--muted);">이미지 1장 길이
-        <input type="number" id="image-dur" value="3" min="0.5" max="30" step="0.5"
+        <input type="number" id="image-dur" value="2" min="0.5" max="30" step="0.5"
           style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
                  color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초</label>
     </div>
@@ -490,7 +490,7 @@
       </label>
       <label style="font-size:12px; color:var(--muted);">
         효과 길이
-        <input type="number" id="effect-dur" value="0.5" min="0.1" max="3" step="0.1"
+        <input type="number" id="effect-dur" value="0.4" min="0.1" max="3" step="0.1"
           style="width:56px; background:#000; border:1px solid var(--border); border-radius:var(--radius);
                  color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초</label>
       <span style="font-size:11px; color:var(--muted);">FF 안 · 스워시 · 패들링 · 충돌 · X 진동 · 펄스 줌 · 퀀텀 셰이크 · 락 3</span>
@@ -695,12 +695,12 @@
     xhr.onerror = () => { log('연결 오류: server.py가 실행 중인지 확인하세요', 'err'); btn.disabled = false; };
     xhr.timeout = 0;
     const script = document.getElementById('script-text').value.trim();
-    const imageDur = parseFloat(document.getElementById('image-dur').value) || 3;
+    const imageDur = parseFloat(document.getElementById('image-dur').value) || 2;
     if (document.getElementById('date-today').checked) syncToday();
     const title = document.getElementById('title-text').value.trim();
     const dateTxt = document.getElementById('date-text').value.trim();
     const effOn = document.getElementById('use-effects').checked;
-    const effDur = effOn ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0;
+    const effDur = effOn ? (parseFloat(document.getElementById('effect-dur').value) || 0.4) : 0;
     const strokeSize = (parseFloat(document.getElementById('stroke-size').value) || 0) / 100;
     const unifyPlace = document.getElementById('unify-place').checked;
 
@@ -894,7 +894,7 @@
   async function buildSequenceOnly() {
     if (!appendFiles.length) { log('먼저 파일을 선택하세요', 'warn'); return; }
     const ratio = document.querySelector('input[name="ratio"]:checked').value;
-    const imageDur = parseFloat(document.getElementById('image-dur').value) || 3;
+    const imageDur = parseFloat(document.getElementById('image-dur').value) || 2;
     const name = 'CapCut_Sequence_' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'');
     log(`선택 파일 ${appendFiles.length}개로 새 프로젝트 생성 중...`, 'info');
     try {
@@ -906,7 +906,7 @@
           stroke_size: (parseFloat(document.getElementById('stroke-size').value) || 0) / 100,
           unify_place: document.getElementById('unify-place').checked,
           effect_dur: document.getElementById('use-effects').checked
-                      ? (parseFloat(document.getElementById('effect-dur').value) || 0.5) : 0,
+                      ? (parseFloat(document.getElementById('effect-dur').value) || 0.4) : 0,
           title: document.getElementById('title-text').value.trim(),
           date: document.getElementById('date-today').checked
                 ? todayMMDD() : document.getElementById('date-text').value.trim()
