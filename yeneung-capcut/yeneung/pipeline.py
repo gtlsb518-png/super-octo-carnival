@@ -41,8 +41,31 @@ def _remap(
     return out
 
 
+def _check_api_key() -> None:
+    """큐시트를 만들기 전에 API 키가 있는지 먼저 본다.
+
+    받아쓰기에 몇 분 쓰고 나서 키가 없어 죽으면 그 시간이 통째로 날아간다.
+    """
+    import os
+
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return
+    raise RuntimeError(
+        "Anthropic API 키가 없습니다.\n"
+        "  명령 프롬프트에서 아래를 실행하고, cmd 를 껐다 다시 켜세요:\n"
+        '    setx ANTHROPIC_API_KEY "sk-ant-..."\n'
+        "  키는 https://console.anthropic.com 에서 발급합니다.\n"
+        "  키 없이 돌려보려면 --cuesheet 로 큐시트를 직접 주면 됩니다."
+    )
+
+
 def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
     opts.work_dir.mkdir(parents=True, exist_ok=True)
+
+    # 큐시트를 새로 만들어야 하는 상황이면 API 키부터 확인한다
+    sheet_cached = (opts.work_dir / "cuesheet.json").exists() and not opts.refresh_cuesheet
+    if not opts.cuesheet and not sheet_cached:
+        _check_api_key()
 
     # 1. 영상 정보 --------------------------------------------------------
     info = media.probe(opts.video)
@@ -66,18 +89,37 @@ def run(opts: RunOptions, cfg: Config, log: Log = print) -> draft.BuildReport:
     )
 
     # 3. 받아쓰기 ---------------------------------------------------------
+    # 큐시트를 직접 줬고 대사 자막도 끄면 받아쓸 이유가 없다. 몇 분이 걸리는
+    # 작업이라 필요할 때만 돌린다.
+    needs_for_cuesheet = not (opts.cuesheet or sheet_cached)
+    need_transcript = info.has_audio and (cfg.subtitle.enabled or needs_for_cuesheet)
+
     transcript_path = opts.work_dir / "transcript.json"
-    if info.has_audio:
-        if transcript_path.exists() and not opts.refresh_transcript:
-            utterances = transcribe.load(transcript_path)
-            log(f"받아쓰기: 캐시 사용 ({len(utterances)}줄) — {transcript_path.name}")
-        else:
-            log(f"받아쓰기 중 (whisper {cfg.transcribe.model})... 처음이면 모델을 내려받습니다")
+    utterances: list[transcribe.Utterance] = []
+
+    if not need_transcript:
+        if info.has_audio:
+            log("받아쓰기: 필요 없어 건너뜁니다")
+    elif transcript_path.exists() and not opts.refresh_transcript:
+        utterances = transcribe.load(transcript_path)
+        log(f"받아쓰기: 캐시 사용 ({len(utterances)}줄) — {transcript_path.name}")
+    else:
+        log(f"받아쓰기 중 (whisper {cfg.transcribe.model})...")
+        if cfg.transcribe.model.startswith("large"):
+            log("  처음이면 모델 약 3GB 를 내려받습니다. 시간이 걸립니다.")
+            if info.duration >= 60:
+                log(f"  CPU 로 돌리면 영상 길이의 1~3배쯤 걸립니다 "
+                    f"(영상 {info.duration / 60:.0f}분 → 대략 "
+                    f"{info.duration / 60:.0f}~{info.duration / 20:.0f}분)")
+            log("  빨리 확인만 하려면 --whisper-model small 을 쓰세요")
+        try:
             utterances = transcribe.transcribe(opts.video, cfg.transcribe)
             transcribe.save(utterances, transcript_path)
             log(f"받아쓰기: {len(utterances)}줄")
-    else:
-        utterances = []
+        except Exception as exc:
+            if needs_for_cuesheet:
+                raise  # 큐시트를 만들려면 대사가 꼭 필요하다
+            log(f"  ! 받아쓰기 실패 — 대사 자막 없이 진행합니다: {exc}")
 
     cut_utterances = _remap(utterances, timeline)
     srt_path = opts.work_dir / "dialogue.srt"
