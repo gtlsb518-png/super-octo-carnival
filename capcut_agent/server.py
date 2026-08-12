@@ -270,6 +270,17 @@ def get_whisper_model():
 # 인식용 오디오 샘플레이트 (Whisper 고정값)
 WHISPER_SR = 16000
 
+# ── 짧은 클립 묶어서 인식 (빠른 자막) ──────────────────────
+# Whisper 는 클립이 2초든 30초든 '항상 30초짜리'로 계산한다.
+# 컷편집한 클립은 대개 2~4초라서 계산의 대부분이 빈 공간에 버려진다.
+# 그래서 짧은 클립을 30초 한 판에 몰아 넣고 한 번에 인식한다.
+# 클립 사이에는 무음을 넣고, 인식된 단어의 시각으로 어느 클립 말인지 되돌린다.
+ASR_BATCH_SEC = 27.0        # 한 묶음 최대 길이 (Whisper 한 판 = 30초)
+ASR_BATCH_GAP = 0.6         # 묶음 안에서 클립 사이에 끼우는 무음
+ASR_BATCH_MAX_CLIP = 8.0    # 이보다 긴 클립은 묶지 않고 혼자 인식
+ASR_RETRY_RMS = 0.012       # 묶어서 아무것도 못 알아들었는데 소리는 있는 클립 →
+                            # 그 클립만 따로 다시 인식 (놓치지 않게)
+
 
 def load_audio_16k(video_path: Path):
     """
@@ -684,6 +695,100 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
             pass
 
 
+def group_ranges_for_batch(keep_ranges: list) -> list[list[int]]:
+    """
+    이어지는 짧은 클립들을 한 판(약 27초)씩 묶는다. 반환은 클립 번호 묶음.
+    긴 클립(ASR_BATCH_MAX_CLIP 초 초과)은 혼자 한 묶음이 된다.
+    """
+    groups: list[list[int]] = []
+    cur: list[int] = []
+    used = 0.0
+    for i, r in enumerate(keep_ranges):
+        dur = r[1] - r[0]
+        if dur > ASR_BATCH_MAX_CLIP:
+            if cur:
+                groups.append(cur); cur = []; used = 0.0
+            groups.append([i])
+            continue
+        need = dur + ASR_BATCH_GAP
+        if cur and used + need > ASR_BATCH_SEC:
+            groups.append(cur); cur = []; used = 0.0
+        cur.append(i)
+        used += need
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def transcribe_group_words(audio, keep_ranges: list, idxs: list[int],
+                           initial_prompt: str = "") -> dict[int, list[dict]]:
+    """
+    클립 여러 개를 하나로 이어 붙여 한 번에 인식하고,
+    단어의 시각을 보고 원래 어느 클립 말이었는지 되돌려 준다.
+    반환: {클립번호: [{"start": 원본초, "end": 원본초, "word": str}, ...]}
+    """
+    import numpy as np
+    model = get_whisper_model()
+    gap = np.zeros(int(ASR_BATCH_GAP * WHISPER_SR), dtype=np.float32)
+
+    parts, slots = [], []          # slots: (클립번호, 묶음 안 시작초, 길이초, 원본 시작초)
+    pos = 0.0
+    for i in idxs:
+        ks, ke = keep_ranges[i][0], keep_ranges[i][1]
+        off = max(ks - 0.05, 0)
+        a0, a1 = int(off * WHISPER_SR), min(int((ke + 0.05) * WHISPER_SR), len(audio))
+        if a1 - a0 < 800:
+            continue
+        seg = audio[a0:a1]
+        parts.append(seg)
+        slots.append((i, pos, len(seg) / WHISPER_SR, off))
+        pos += len(seg) / WHISPER_SR + ASR_BATCH_GAP
+        parts.append(gap)
+    if not slots:
+        return {}
+
+    merged = np.concatenate(parts)
+    kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
+    try:
+        segs, _ = model.transcribe(
+            merged, language="ko", beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,
+            no_repeat_ngram_size=3,
+            word_timestamps=True,
+            **kwargs,
+        )
+    except Exception:
+        return {}
+
+    out: dict[int, list[dict]] = {i: [] for i, _s, _d, _o in slots}
+    for s in segs:
+        if getattr(s, "no_speech_prob", 0.0) > 0.8:
+            continue
+        if getattr(s, "avg_logprob", 0.0) < -1.5:
+            continue
+        for w in (s.words or []):
+            wt = (w.word or "").strip()
+            if not wt:
+                continue
+            mid = (w.start + w.end) / 2
+            # 이 단어가 어느 클립 자리에 들어있는지 (무음에 걸치면 가장 가까운 클립)
+            best, best_d = None, None
+            for (i, p0, dur, off) in slots:
+                if p0 <= mid < p0 + dur:
+                    best, best_d = (i, p0, off), 0.0
+                    break
+                d = p0 - mid if mid < p0 else mid - (p0 + dur)
+                if best_d is None or d < best_d:
+                    best, best_d = (i, p0, off), d
+            if best is None or (best_d or 0) > ASR_BATCH_GAP:
+                continue                     # 어디에도 안 붙는 말은 버린다
+            i, p0, off = best
+            out[i].append({"start": off + (w.start - p0),
+                           "end": off + (w.end - p0), "word": wt})
+    return out
+
+
 MAX_CHARS_PER_SEC = 14.0    # 한국어 빠른 말이 초당 6~7자. 그 두 배를 넘으면 환각으로 본다
 
 # Whisper가 조용한 구간에 습관적으로 넣는 유튜브 상투 문구 (실제로 말한 적 없음)
@@ -843,7 +948,8 @@ def cap_by_speech_rate(words: list[dict], clip_sec: float) -> list[dict]:
 def transcribe_all_clips(video_path: Path,
                          keep_ranges: list[tuple[float, float, int, int]],
                          script_text: str = "",
-                         progress: dict | None = None) -> list[dict]:
+                         progress: dict | None = None,
+                         fast: bool = True) -> list[dict]:
     """
     ★ 영상 클립을 하나씩 개별 인식한다 (전체 한 번에 인식하지 않음).
     전체 인식은 짧은 엔지컷을 통째로 놓치기 때문에, 클립마다 따로 물어봐서
@@ -865,11 +971,20 @@ def transcribe_all_clips(video_path: Path,
     counter = {"done": 0, "halluc": 0}
     lock = threading.Lock()
 
-    def one_clip(item: tuple[int, tuple]) -> tuple[int, dict]:
-        i, (ks, ke, _tl_s, _tl_e) = item
+    def clip_rms(ks: float, ke: float) -> float:
+        """그 구간에 소리가 얼마나 있는지 (묶음 인식이 놓쳤는지 판단용)."""
+        if audio is None:
+            return 0.0
+        import numpy as np
+        a0, a1 = int(max(ks, 0) * WHISPER_SR), min(int(ke * WHISPER_SR), len(audio))
+        if a1 - a0 < 800:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(audio[a0:a1]))))
+
+    def finish(i: int, ks: float, ke: float, raw_words: list[dict]) -> tuple[int, dict]:
+        """인식된 단어를 정제해서 클립 하나의 결과로 만든다 (묶음/개별 공용)."""
         words = []
-        if ke - ks >= 0.15:
-            raw_words = transcribe_clip_words(video_path, ks, ke, script_text, audio)
+        if raw_words:
             for w in raw_words:
                 # 효과음 태그·영어 환각·이모지/특수문자 제거 (단어 단위로 적용)
                 cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
@@ -898,14 +1013,47 @@ def transcribe_all_clips(video_path: Path,
                 progress["halluc"] = counter["halluc"]
         return i, {"start": ks, "end": ke, "text": text, "words": words}
 
-    # ★ 클립 ASR_WORKERS 개를 동시에 인식한다. 클립끼리는 서로 영향을 주지 않아
-    #   (condition_on_previous_text=False) 결과는 하나씩 돌린 것과 완전히 같고,
-    #   결과는 아래에서 원래 순서대로 다시 정렬한다.
-    if total > 1 and ASR_WORKERS > 1:
+    def one_clip(item: tuple[int, tuple]) -> tuple[int, dict]:
+        """클립 하나만 따로 인식 (예전 방식)."""
+        i, (ks, ke, _tl_s, _tl_e) = item
+        raw = transcribe_clip_words(video_path, ks, ke, script_text, audio) \
+            if ke - ks >= 0.15 else []
+        return finish(i, ks, ke, raw)
+
+    def one_group(idxs: list[int]) -> list[tuple[int, dict]]:
+        """짧은 클립 묶음을 한 번에 인식하고, 놓친 클립만 따로 다시 인식한다."""
+        got = transcribe_group_words(audio, keep_ranges, idxs, script_text)
+        res = []
+        for i in idxs:
+            ks, ke = keep_ranges[i][0], keep_ranges[i][1]
+            raw = got.get(i) or []
+            # 소리는 분명히 있는데 한 마디도 못 건졌으면 그 클립만 다시 (놓침 방지)
+            if not raw and ke - ks >= 0.15 and clip_rms(ks, ke) >= ASR_RETRY_RMS:
+                raw = transcribe_clip_words(video_path, ks, ke, script_text, audio)
+                with lock:
+                    counter["retry"] = counter.get("retry", 0) + 1
+            res.append(finish(i, ks, ke, raw))
+        return res
+
+    # ★ 인식은 ASR_WORKERS 개를 동시에 돌린다. 클립끼리 문맥을 공유하지 않아
+    #   (condition_on_previous_text=False) 순서대로 돌린 것과 결과가 같고,
+    #   아래에서 원래 순서대로 다시 정렬한다.
+    if fast and audio is not None:
+        groups = group_ranges_for_batch(keep_ranges)
+        if progress is not None:
+            progress["groups"] = len(groups)
+        if len(groups) > 1 and ASR_WORKERS > 1:
+            with ThreadPoolExecutor(max_workers=ASR_WORKERS) as pool:
+                done = [x for part in pool.map(one_group, groups) for x in part]
+        else:
+            done = [x for g in groups for x in one_group(g)]
+    elif total > 1 and ASR_WORKERS > 1:
         with ThreadPoolExecutor(max_workers=ASR_WORKERS) as pool:
             done = list(pool.map(one_clip, enumerate(keep_ranges)))
     else:
         done = [one_clip(item) for item in enumerate(keep_ranges)]
+    if progress is not None:
+        progress["retry"] = counter.get("retry", 0)
     return [seg for _i, seg in sorted(done, key=lambda x: x[0])]
 
 
@@ -2868,6 +3016,7 @@ async def process_video(
     min_clip: float = 0.0,       # 이보다 짧은 클립은 버림 (초, 0이면 끄기)
     ng_short: float = 0.0,       # 같은 말 반복 중 이보다 짧은 테이크 삭제 (초, 0이면 끄기)
     auto_noise: bool = True,     # 무음 기준(dB)을 영상에 맞춰 자동으로 고름
+    fast_asr: bool = True,       # 짧은 클립을 묶어서 한 번에 인식 (5~8배 빠름)
     use_subtitle: bool = False,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
@@ -2981,13 +3130,15 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {ASR_WORKERS}개씩 동시에 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                mode_txt = ('짧은 클립을 묶어서' if fast_asr else '한 클립씩')
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {mode_txt} {ASR_WORKERS}개씩 동시에 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
                 t_asr = time.time()
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
                     task = loop.run_in_executor(
-                        None, transcribe_all_clips, video, keep_ranges, script_text, prog)
+                        None, transcribe_all_clips, video, keep_ranges, script_text,
+                        prog, fast_asr)
                     last = -1
                     n_total = len(keep_ranges)
                     while not task.done():
@@ -2999,7 +3150,13 @@ async def process_video(
                     raw_subs = await task
                 asr_sec = time.time() - t_asr
                 dev = WHISPER_DEVICE or "?"
-                msg_done = (f"클립별 인식 완료 ({len(raw_subs)}개) · {asr_sec/60:.1f}분 · {dev}")
+                extra_i = ""
+                if prog.get("groups"):
+                    extra_i = f" · {prog['groups']}판으로 묶음"
+                    if prog.get("retry"):
+                        extra_i += f" (놓친 {prog['retry']}개는 따로 재인식)"
+                msg_done = (f"클립별 인식 완료 ({len(raw_subs)}개) · {asr_sec/60:.1f}분"
+                            f" · {dev}{extra_i}")
                 yield f"data: {json.dumps({'step': 'asr', 'msg': msg_done})}\n\n"
                 if "CPU" in dev:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': '💡 NVIDIA 그래픽카드가 있으면 자막이 훨씬 빨라집니다 (지금은 CPU로 인식 중)'})}\n\n"
