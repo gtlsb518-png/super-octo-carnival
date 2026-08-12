@@ -220,10 +220,9 @@ def build_cutouts(files: list[Path], out_dir: Path, stroke: bool, stroke_frac: f
 
 WHISPER_DEVICE = ""          # 실제로 무엇으로 돌고 있는지 (로그에 표시)
 
-# 클립 몇 개를 동시에 인식할지. 클립 하나하나가 짧아서 혼자서는 CPU/GPU 를
-# 다 못 채우기 때문에, 2개를 나란히 돌리면 같은 결과를 더 빨리 얻는다.
-# (인식 자체는 클립별로 완전히 독립이라 결과는 순서대로 돌린 것과 똑같다)
-ASR_WORKERS = 2
+# 클립 몇 개를 동시에 인식할지. 2로 올리면 나란히 돌지만, 코어를 나눠 쓰게 되어
+# 컴퓨터에 따라 오히려 느려진다. 예전에 잘 돌던 설정인 1을 기본으로 둔다.
+ASR_WORKERS = 1
 
 
 def _add_cuda_dll_dirs() -> None:
@@ -245,26 +244,39 @@ def _add_cuda_dll_dirs() -> None:
                 pass
 
 
+# 자막 인식을 GPU 로 돌릴지. 예전에 잘 돌던 설정은 CPU 라서 기본은 꺼둔다.
+# (그래픽카드가 좋으면 화면에서 켜보고 로그의 걸린 시간을 비교하세요)
+USE_GPU_ASR = False
+
+
 def get_whisper_model():
+    """
+    ★ 예전에 잘 돌던 설정 그대로: large-v3 / 스레드·동시 실행 옵션을 건드리지 않는다.
+    (스레드를 나누거나 GPU 를 강제하면 오히려 느려지는 컴퓨터가 있다)
+    """
     global _whisper_model, WHISPER_DEVICE
     if _whisper_model is None:
         from faster_whisper import WhisperModel
-        _add_cuda_dll_dirs()
-        try:
-            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16",
-                                          num_workers=ASR_WORKERS)
-            WHISPER_DEVICE = f"GPU (CUDA float16) · {ASR_WORKERS}개 동시"
-            print("[Whisper] GPU 로드 완료")
-        except Exception as e:
-            # CPU 로 떨어질 때는 코어를 전부 쓴다 (기본값 4개만 쓰느라 느렸다).
-            # 클립 2개를 동시에 돌리므로 코어를 반씩 나눠 준다.
-            cores = max(1, os.cpu_count() or 4)
-            threads = max(2, cores // ASR_WORKERS)
-            WHISPER_DEVICE = f"CPU int8 · {threads}스레드 × {ASR_WORKERS}개 동시"
-            print(f"[Whisper] GPU 실패({type(e).__name__}) → CPU int8 {threads}스레드")
-            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8",
-                                          cpu_threads=threads, num_workers=ASR_WORKERS)
+        if USE_GPU_ASR:
+            _add_cuda_dll_dirs()
+            try:
+                _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+                WHISPER_DEVICE = "GPU (CUDA float16)"
+                print("[Whisper] GPU 로드 완료")
+                return _whisper_model
+            except Exception as e:
+                print(f"[Whisper] GPU 실패({type(e).__name__}) → CPU")
+        WHISPER_DEVICE = "CPU int8"
+        _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
     return _whisper_model
+
+
+def reset_whisper_model(use_gpu: bool) -> None:
+    """GPU 사용 여부가 바뀌면 모델을 다시 올린다."""
+    global _whisper_model, USE_GPU_ASR
+    if bool(use_gpu) != USE_GPU_ASR:
+        USE_GPU_ASR = bool(use_gpu)
+        _whisper_model = None
 
 
 # 인식용 오디오 샘플레이트 (Whisper 고정값)
@@ -3016,7 +3028,8 @@ async def process_video(
     min_clip: float = 0.0,       # 이보다 짧은 클립은 버림 (초, 0이면 끄기)
     ng_short: float = 0.0,       # 같은 말 반복 중 이보다 짧은 테이크 삭제 (초, 0이면 끄기)
     auto_noise: bool = True,     # 무음 기준(dB)을 영상에 맞춰 자동으로 고름
-    fast_asr: bool = True,       # 짧은 클립을 묶어서 한 번에 인식 (5~8배 빠름)
+    fast_asr: bool = True,       # 짧은 클립을 묶어서 한 번에 인식 (실측 2.8배 빠름)
+    gpu_asr: bool = False,       # 자막 인식을 GPU 로 (그래픽카드에 따라 더 느릴 수 있음)
     use_subtitle: bool = False,
     ratio: str = "9:16",
     max_sub_chars: int = MAX_SUBTITLE_CHARS,
@@ -3130,9 +3143,18 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
+                avg_clip = sum(r[1] - r[0] for r in keep_ranges) / max(len(keep_ranges), 1)
+                if len(keep_ranges) >= 80 and avg_clip < 2.5:
+                    tip = (f"⚠ 클립이 {len(keep_ranges)}개(평균 {avg_clip:.1f}초)로 잘게 쪼개져 있습니다. "
+                           f"클립이 짧을수록 인식이 느리고 앞뒤 문맥이 없어 부정확해집니다. "
+                           f"'최소 무음 길이'를 0.5~0.7초로 올리면 클립이 줄어 더 빠르고 정확해집니다.")
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': tip})}\n\n"
                 mode_txt = ('짧은 클립을 묶어서' if fast_asr else '한 클립씩')
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {mode_txt} {ASR_WORKERS}개씩 동시에 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                if ASR_WORKERS > 1:
+                    mode_txt += f' {ASR_WORKERS}개씩 동시에'
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {mode_txt} 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
                 t_asr = time.time()
+                reset_whisper_model(gpu_asr)
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
