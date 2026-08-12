@@ -920,6 +920,24 @@ def drop_rare_latin(segments: list[dict], script_tokens: set[str] | None = None)
     return n_drop
 
 
+def merge_number_tokens(words: list[dict]) -> list[dict]:
+    """
+    Whisper가 "4,300억" 같은 숫자를 "4," + "300억" 두 어절로 쪼개는 일이 잦다.
+    그대로 두면 자막이 "4, 300억" 처럼 숫자 사이가 벌어진다. 다시 붙인다.
+      "4," + "300억이"  → "4,300억이"
+      "8," + "000억을"  → "8,000억을"
+    """
+    out: list[dict] = []
+    for w in words:
+        if out and re.fullmatch(r"\d{1,3},", out[-1]["word"]) and re.match(r"^\d", w["word"]):
+            end_key = "tl_end" if "tl_end" in w else "end"
+            out[-1] = {**out[-1], "word": out[-1]["word"] + w["word"],
+                       end_key: w.get(end_key, out[-1].get(end_key))}
+        else:
+            out.append(w)
+    return out
+
+
 def collapse_repeats(words: list[dict]) -> list[dict]:
     """같은 어절이 3번 이상 이어지면 한 번만 남긴다 ("오늘 오늘 오늘" → "오늘")."""
     out: list[dict] = []
@@ -1008,7 +1026,8 @@ def transcribe_all_clips(video_path: Path,
                         "end": min(max(w["end"], ks), ke),
                         "word": piece,
                     })
-        words = cap_by_speech_rate(collapse_repeats(split_inner_commas(words)), ke - ks)
+        words = cap_by_speech_rate(
+            collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
         if _is_syllable_soup(words):
             words = []                  # "멘 탈 흔" → 말로 치지 않음
         halluc = 0
