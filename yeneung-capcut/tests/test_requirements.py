@@ -50,3 +50,11 @@ def test_api_extra_is_separate():
     names = {r.name for r in _requirements("requirements.txt")}
     assert "anthropic" not in names
     assert "anthropic" in {r.name for r in _requirements("requirements-api.txt")}
+
+
+def test_version_file_matches_package():
+    """실행.bat 이 보여주는 버전과 패키지 버전이 어긋나면 안 된다."""
+    import yeneung
+
+    stamped = (ROOT / "VERSION.txt").read_text(encoding="utf-8").strip()
+    assert stamped == yeneung.__version__

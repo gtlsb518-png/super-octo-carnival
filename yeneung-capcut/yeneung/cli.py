@@ -126,8 +126,12 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
 
 
 def _cmd_doctor(cfg: Config) -> int:
+    from . import __version__
+
     ok = True
     print("== 환경 점검 ==\n")
+    print(f"  yeneung {__version__}  —  {Path(__file__).resolve().parent.parent}")
+    print("  (버전이 안 맞으면 옛날 폴더를 돌리고 있는 것입니다)\n")
 
     for module, package, label, required in [
         ("pycapcut", "pycapcut", "캡컷 초안 생성", True),

@@ -5,6 +5,13 @@ title yeneung
 set "PY=%~dp0.venv\Scripts\python.exe"
 set "STAMP=%~dp0.venv\.installed.txt"
 
+rem 어느 복사본을 돌리고 있는지 늘 보이게 한다.
+rem 옛 폴더를 실행하고 있으면 여기서 바로 드러난다.
+set "VER=?"
+if exist "%~dp0VERSION.txt" set /p VER=<"%~dp0VERSION.txt"
+echo [yeneung %VER%]  %~dp0
+echo.
+
 if exist "%PY%" goto ready
 
 rem ============================================================ 첫 실행 준비
@@ -70,8 +77,19 @@ goto run
 
 :installfail
 echo.
-echo [오류] 설치에 실패했습니다. 위 메시지를 그대로 알려주시면 고쳐드립니다.
-echo        인터넷 연결이나 회사 방화벽 때문일 수도 있습니다.
+echo [오류] 설치에 실패했습니다.
+echo.
+echo 이 폴더가 요구하는 것 ^(%~dp0requirements.txt^):
+echo ----------------------------------------
+type "%~dp0requirements.txt"
+echo ----------------------------------------
+echo.
+echo 여기에 pycapcut^>=0.2.0 이라고 적혀 있으면 **옛날 폴더**입니다.
+echo 새로 받은 압축을 이 폴더에 덮어쓰고 다시 실행하세요.
+echo 맞는 버전은 pycapcut==0.0.3 입니다.
+echo.
+echo 그게 아니면 위 메시지를 그대로 알려주시면 고쳐드립니다.
+echo ^(인터넷 연결이나 회사 방화벽 때문일 수도 있습니다^)
 pause
 exit /b 1
 
