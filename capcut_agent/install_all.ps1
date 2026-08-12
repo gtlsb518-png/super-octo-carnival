@@ -1,5 +1,5 @@
 # CapCut Agent - installs the optional parts in one go.
-#   subtitles (faster-whisper) + GPU support (NVIDIA) + background removal (rembg)
+#   subtitles (faster-whisper) + background removal (rembg) + models
 #   and pre-downloads the models so the first real run is not stuck waiting.
 # Safe to re-run: everything already present is skipped.
 
@@ -21,7 +21,7 @@ function Pip([string[]]$pkgs) {
 
 # ---------- 1) subtitles ----------
 Write-Host ""
-Write-Host "[1/4] subtitles (faster-whisper) ..."
+Write-Host "[1/3] subtitles (faster-whisper) ..."
 & $py -c "import faster_whisper" 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "      already installed - skip"
@@ -30,32 +30,14 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
-# ---------- 2) GPU support (only when an NVIDIA card is present) ----------
-Write-Host ""
-Write-Host "[2/4] GPU support ..."
-$hasGpu = $false
-try {
-    $null = & nvidia-smi -L 2>$null
-    $hasGpu = ($LASTEXITCODE -eq 0)
-} catch { $hasGpu = $false }
-
-if ($hasGpu) {
-    & $py -c "import nvidia.cudnn" 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "      NVIDIA GPU ready - skip"
-    } else {
-        Write-Host "      NVIDIA GPU found - installing CUDA libraries (subtitles 5-10x faster)"
-        if (-not (Pip @("nvidia-cublas-cu12", "nvidia-cudnn-cu12"))) {
-            Write-Host "      [WARN] CUDA libraries failed - subtitles will run on CPU."
-        }
-    }
-} else {
-    Write-Host "      no NVIDIA GPU - subtitles will run on CPU."
-}
+# ---------- 2) (GPU support removed on purpose) ----------
+# Older graphics cards made subtitles SLOWER than CPU, so CUDA libraries are no
+# longer installed. Recognition always runs on CPU, same as the version that
+# worked well.
 
 # ---------- 3) background removal ----------
 Write-Host ""
-Write-Host "[3/4] background removal (rembg) ..."
+Write-Host "[2/3] background removal (rembg) ..."
 & $py -c "import rembg, PIL" 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "      already installed - skip"
@@ -65,7 +47,7 @@ if ($LASTEXITCODE -eq 0) {
 
 # ---------- 4) models (so the first real run does not stall) ----------
 Write-Host ""
-Write-Host "[4/4] downloading models (speech ~3GB, cutout ~176MB) ..."
+Write-Host "[3/3] downloading models (speech ~3GB, cutout ~176MB) ..."
 Write-Host "      this is the long part - please leave it running."
 & $py -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu', compute_type='int8'); print('      speech model ready')"
 if ($LASTEXITCODE -ne 0) { Write-Host "      [WARN] speech model download failed - it will retry on first use." }

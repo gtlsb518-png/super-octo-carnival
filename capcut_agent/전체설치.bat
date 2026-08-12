@@ -10,8 +10,7 @@ echo.
 echo  Installs all of it in one go:
 echo    1) core        : portable python + ffmpeg + server
 echo    2) subtitles   : faster-whisper + speech model (about 3 GB)
-echo    3) GPU support : NVIDIA only - subtitles 5-10x faster
-echo    4) cutout      : rembg + model (about 176 MB)
+echo    3) cutout      : rembg + model (about 176 MB)
 echo.
 echo  Needs internet. The model downloads take a while.
 echo  Safe to run again - anything already installed is skipped.

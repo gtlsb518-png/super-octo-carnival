@@ -1,6 +1,6 @@
 @echo off
 rem Kept for the old name. Everything is installed by install_all.ps1 now:
-rem subtitles + GPU support + background removal + model downloads.
+rem subtitles + background removal + model downloads.
 title CapCut Agent - install everything
 cd /d "%~dp0"
 
