@@ -330,16 +330,48 @@ def _transcribe_array(audio, time_offset: float = 0.0, initial_prompt: str = "",
     return words
 
 
-def transcribe_full_words(audio, initial_prompt: str = "") -> list[dict]:
+def transcribe_full_words(audio, initial_prompt: str = "",
+                          on_progress=None) -> list[dict]:
     """
     ★ 영상 오디오 전체를 '한 번에' 인식한다 (클립마다 따로 돌리지 않음).
     Whisper 는 클립이 2초든 30초든 인코더를 30초 단위로 돌려서, 짧은 클립을
     하나씩 인식하면 낭비가 크다(2초 클립도 30초짜리 비용). 전체를 한 번에
-    인식하면 인코더가 영상 길이만큼만(30초 창 몇 개) 돌아서 훨씬 빠르고,
-    자연스러운 문맥으로 들어서 인식도 정확하다.
+    인식하면 인코더가 영상 길이만큼만 돌아서 훨씬 빠르다.
+    ★ vad_filter=True 로 무음 구간은 건너뛴다 — 안 그러면 잘라낸 무음까지
+    전부 인식하느라 오히려 느리다 (사용자 '0에서 멈춤' 원인).
+    on_progress(fraction): 인식이 진행되는 동안 0~1 진행률을 알려준다.
     반환: [{"start": 원본초, "end": 원본초, "word": str}, ...]  (원본 영상 시각)
     """
-    return _transcribe_array(audio, 0.0, initial_prompt)
+    model = get_whisper_model()
+    kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
+    try:
+        segs, info = model.transcribe(
+            audio, language="ko", beam_size=1,
+            vad_filter=True,                    # 무음은 건너뛴다 (속도 핵심)
+            vad_parameters={"min_silence_duration_ms": 300},
+            condition_on_previous_text=False,
+            no_repeat_ngram_size=3,
+            word_timestamps=True,
+            **kwargs,
+        )
+    except Exception:
+        return []
+    dur = max(getattr(info, "duration", 0.0) or (len(audio) / WHISPER_SR), 0.001)
+    words = []
+    for s in segs:                              # 세그먼트가 하나씩 흘러나온다(지연 계산)
+        if on_progress:
+            on_progress(min(getattr(s, "end", 0.0) / dur, 0.999))
+        if getattr(s, "no_speech_prob", 0.0) > 0.85:
+            continue
+        if getattr(s, "avg_logprob", 0.0) < -1.6:
+            continue
+        for w in (s.words or []):
+            wt = (w.word or "").strip()
+            if wt:
+                words.append({"start": w.start, "end": w.end, "word": wt})
+    if on_progress:
+        on_progress(1.0)
+    return words
 
 
 AUTO_DB_CANDIDATES = [-45.0, -40.0, -35.0, -32.0, -30.0, -27.0, -25.0, -22.0]
@@ -861,9 +893,12 @@ def transcribe_all_clips(video_path: Path,
                 progress.update(done=i + 1, total=total, halluc=counter["halluc"])
         return segs
 
-    full_words = transcribe_full_words(audio, script_text)
-    if progress is not None:
-        progress.update(done=total // 2, total=total)   # 큰 걸음(전체 인식) 표시
+    def _on_prog(frac: float) -> None:
+        if progress is not None:
+            # 인식 진행률(0~1)을 클립 개수에 얹어 화면 숫자가 계속 움직이게 한다
+            progress.update(done=int(frac * total), total=total)
+
+    full_words = transcribe_full_words(audio, script_text, _on_prog)
 
     # ── 2) 단어를 시각으로 각 클립에 나눠 담는다 ──
     #    클립은 시작 시각 순이라 이진탐색 대신 앞에서부터 훑어도 충분하다.
