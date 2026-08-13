@@ -275,6 +275,73 @@ def extract_audio_wav(video_path: Path) -> Path | None:
     return out if out.exists() and out.stat().st_size > 1000 else None
 
 
+WHISPER_SR = 16000        # 인식용 오디오 샘플레이트 (Whisper 고정값)
+
+
+def load_audio_16k(video_path: Path):
+    """영상 오디오를 한 번만 16kHz 모노 numpy 배열로 뽑는다 (전체 인식용)."""
+    import wave
+    import numpy as np
+    wav = extract_audio_wav(video_path)
+    if not wav:
+        return None
+    try:
+        with wave.open(str(wav), "rb") as f:
+            if f.getsampwidth() != 2 or f.getframerate() != WHISPER_SR:
+                return None
+            raw = f.readframes(f.getnframes())
+        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        return None
+    finally:
+        try:
+            wav.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _transcribe_array(audio, time_offset: float = 0.0, initial_prompt: str = "",
+                      ns_thresh: float = 0.85, lp_thresh: float = -1.6) -> list[dict]:
+    """numpy 오디오 배열을 인식해서 단어 목록(원본 시각 = time_offset 기준)을 반환."""
+    model = get_whisper_model()
+    kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
+    try:
+        segs, _ = model.transcribe(
+            audio, language="ko", beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,   # 환각이 뒤로 번지지 않게
+            no_repeat_ngram_size=3,
+            word_timestamps=True,
+            **kwargs,
+        )
+    except Exception:
+        return []
+    words = []
+    for s in segs:
+        if getattr(s, "no_speech_prob", 0.0) > ns_thresh:
+            continue
+        if getattr(s, "avg_logprob", 0.0) < lp_thresh:
+            continue
+        for w in (s.words or []):
+            wt = (w.word or "").strip()
+            if wt:
+                words.append({"start": time_offset + w.start,
+                              "end": time_offset + w.end, "word": wt})
+    return words
+
+
+def transcribe_full_words(audio, initial_prompt: str = "") -> list[dict]:
+    """
+    ★ 영상 오디오 전체를 '한 번에' 인식한다 (클립마다 따로 돌리지 않음).
+    Whisper 는 클립이 2초든 30초든 인코더를 30초 단위로 돌려서, 짧은 클립을
+    하나씩 인식하면 낭비가 크다(2초 클립도 30초짜리 비용). 전체를 한 번에
+    인식하면 인코더가 영상 길이만큼만(30초 창 몇 개) 돌아서 훨씬 빠르고,
+    자연스러운 문맥으로 들어서 인식도 정확하다.
+    반환: [{"start": 원본초, "end": 원본초, "word": str}, ...]  (원본 영상 시각)
+    """
+    return _transcribe_array(audio, 0.0, initial_prompt)
+
+
 AUTO_DB_CANDIDATES = [-45.0, -40.0, -35.0, -32.0, -30.0, -27.0, -25.0, -22.0]
 
 
@@ -756,39 +823,85 @@ def transcribe_all_clips(video_path: Path,
     영상과 밀리지 않는다.
     (자막이 잘 됐던 버전과 똑같이 한 클립씩 순서대로 인식한다.)
     """
-    segs = []
+    import numpy as np
     total = len(keep_ranges)
-    n_halluc = 0
+    counter = {"halluc": 0}
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
-    for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+
+    def refine(ks: float, ke: float, raw_words: list[dict]) -> dict:
+        """인식 단어 → 정제해서 클립 하나의 결과로 (전체/개별 공용)."""
         words = []
-        if ke - ks >= 0.15:
-            raw_words = transcribe_clip_words(video_path, ks, ke, script_text)
-            for w in raw_words:
-                # 효과음 태그·영어 환각·이모지/특수문자 제거 (단어 단위로 적용)
-                cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
-                if not cleaned:
-                    continue
-                for piece in cleaned.split():   # 정제 후 한 단어가 여러 조각이 될 수도 있음
-                    words.append({
-                        "start": min(max(w["start"], ks), ke),
-                        "end": min(max(w["end"], ks), ke),
-                        "word": piece,
-                    })
+        for w in raw_words:
+            cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
+            if not cleaned:
+                continue
+            for piece in cleaned.split():
+                words.append({"start": min(max(w["start"], ks), ke),
+                              "end": min(max(w["end"], ks), ke), "word": piece})
         words = cap_by_speech_rate(
             collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
         if _is_syllable_soup(words):
-            words = []                  # "멘 탈 흔" → 말로 치지 않음
+            words = []
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
-            words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
-            n_halluc += 1
+            words = []
+            counter["halluc"] += 1
         text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
-        segs.append({"start": ks, "end": ke, "text": text, "words": words})
+        return {"start": ks, "end": ke, "text": text, "words": words}
+
+    # ── 1) 영상 전체를 한 번에 인식 (짧은 클립을 하나씩 돌리는 것보다 훨씬 빠름) ──
+    audio = load_audio_16k(video_path)
+    if audio is None:
+        # 오디오를 못 뽑으면 예전처럼 클립마다 인식 (안전망)
+        segs = []
+        for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+            raw = transcribe_clip_words(video_path, ks, ke, script_text) if ke - ks >= 0.15 else []
+            segs.append(refine(ks, ke, raw))
+            if progress is not None:
+                progress.update(done=i + 1, total=total, halluc=counter["halluc"])
+        return segs
+
+    full_words = transcribe_full_words(audio, script_text)
+    if progress is not None:
+        progress.update(done=total // 2, total=total)   # 큰 걸음(전체 인식) 표시
+
+    # ── 2) 단어를 시각으로 각 클립에 나눠 담는다 ──
+    #    클립은 시작 시각 순이라 이진탐색 대신 앞에서부터 훑어도 충분하다.
+    buckets: list[list[dict]] = [[] for _ in keep_ranges]
+    starts = [r[0] for r in keep_ranges]
+    j = 0
+    for w in full_words:
+        mid = (w["start"] + w["end"]) / 2
+        # mid 가 들어가는 클립 찾기 (겹치지 않는 오름차순 구간)
+        while j + 1 < total and mid >= keep_ranges[j][1]:
+            j += 1
+        ks, ke = keep_ranges[j][0], keep_ranges[j][1]
+        if ks <= mid < ke or (j == total - 1 and mid >= ks):
+            buckets[j].append(w)
+        elif mid < ks and j > 0 and keep_ranges[j - 1][0] <= mid < keep_ranges[j - 1][1]:
+            buckets[j - 1].append(w)
+
+    # ── 3) 소리는 있는데 한 단어도 안 담긴 클립은 그 클립만 따로 인식 (놓침 방지) ──
+    def clip_rms(ks: float, ke: float) -> float:
+        a0, a1 = int(max(ks, 0) * WHISPER_SR), min(int(ke * WHISPER_SR), len(audio))
+        if a1 - a0 < 800:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(audio[a0:a1]))))
+
+    segs = []
+    n_retry = 0
+    for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+        raw = buckets[i]
+        if not raw and ke - ks >= 0.4 and clip_rms(ks, ke) >= 0.012:
+            # 소리는 있는데 전체 인식이 놓친 클립 → 그 구간만 메모리에서 잘라 다시 (ffmpeg 없이)
+            off = max(ks - 0.05, 0)
+            a0, a1 = int(off * WHISPER_SR), min(int((ke + 0.05) * WHISPER_SR), len(audio))
+            if a1 - a0 >= 800:
+                raw = _transcribe_array(audio[a0:a1], off, script_text)
+                n_retry += 1
+        segs.append(refine(ks, ke, raw))
         if progress is not None:
-            progress["done"] = i + 1
-            progress["total"] = total
-            progress["halluc"] = n_halluc
+            progress.update(done=i + 1, total=total, halluc=counter["halluc"], retry=n_retry)
     return segs
 
 
@@ -2870,7 +2983,7 @@ async def process_video(
                            f"클립이 짧을수록 인식이 느리고 앞뒤 문맥이 없어 부정확해집니다. "
                            f"'최소 무음 길이'를 0.5~0.7초로 올리면 클립이 줄어 더 빠르고 정확해집니다.")
                     yield f"data: {json.dumps({'step': 'asr', 'msg': tip})}\n\n"
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 하나씩 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'영상 전체를 한 번에 인식합니다 (클립 {len(keep_ranges)}개). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
                 t_asr = time.time()
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
@@ -2887,7 +3000,9 @@ async def process_video(
                             yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
                     raw_subs = await task
                 asr_sec = time.time() - t_asr
-                msg_done = f"클립별 인식 완료 ({len(raw_subs)}개) · {asr_sec/60:.1f}분"
+                _rt = prog.get('retry', 0)
+                _rtxt = f" · 놓친 {_rt}개 따로 재인식" if _rt else ""
+                msg_done = f"자막 인식 완료 ({len(raw_subs)}개 클립) · {asr_sec/60:.1f}분{_rtxt}"
                 yield f"data: {json.dumps({'step': 'asr', 'msg': msg_done})}\n\n"
                 n_halluc = prog.get("halluc", 0)
                 if n_halluc:
