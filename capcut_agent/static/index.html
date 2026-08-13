@@ -391,13 +391,6 @@
       </label>
       <span style="font-size:11px; color:var(--muted);">GPU large-v3 · 처음 켜면 자동 설치 + 모델 다운로드 (~3GB, 시간 걸림)</span>
     </div>
-    <div style="margin-top:10px; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius);">
-      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-        <input type="checkbox" id="fast-asr" checked style="width:16px; height:16px; accent-color:var(--accent);" />
-        <span style="font-size:12px;">빠른 자막 (짧은 클립 묶어서 인식)</span>
-        <span style="font-size:11px; color:var(--dim);">— 훨씬 빠릅니다. 인식 내용이 이상하면 이 체크만 끄세요</span>
-      </label>
-    </div>
     <div class="setting-item" style="margin-top:14px; max-width:320px;">
       <label>
         자막 한 줄 글자 수 (어절 단위로 끊음)
@@ -707,7 +700,6 @@
     const ratioSel = document.querySelector('input[name="ratio"]:checked');
     const ratio   = ratioSel ? ratioSel.value : '9:16';
     const maxChars = num('max-sub-chars', 12);
-    const fastAsr = chk('fast-asr', true);
     const encoded = encodeURIComponent(videoPath);
 
     // 컷 여유: 화면은 "여유(+ 면 더 남김)", 서버는 "깎는 양" 이라 부호를 뒤집는다
@@ -719,7 +711,7 @@
     const ngShort = chk('ng-on') ? num('ng-short', 1.5) : 0;
 
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}&ng_short=${ngShort}&auto_noise=${autoNoise}&fast_asr=${fastAsr}`);
+    xhr.open('POST', `/api/process?video_path=${encoded}&noise_db=${noiseDb}&min_silence=${minSil}&use_subtitle=${useSub}&ratio=${encodeURIComponent(ratio)}&max_sub_chars=${maxChars}&head_trim=${headTrim}&tail_trim=${tailTrim}&min_clip=${minClip}&ng_short=${ngShort}&auto_noise=${autoNoise}`);
 
     xhr.setRequestHeader('Content-Type', 'application/json');
 
