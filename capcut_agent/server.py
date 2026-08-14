@@ -500,9 +500,56 @@ def _clean_latin_run(seg: str, script_tokens: set[str]) -> str:
     return ""                # 나머지는 전부 환각으로 간주해 제거
 
 
+_CORRECTION_MAP: dict[str, str] | None = None
+_CORRECTION_MTIME: float | None = None
+
+
+def get_correction_map() -> dict[str, str]:
+    """
+    사용자가 직접 만드는 자막 교정 목록(자막교정.txt)을 읽어온다.
+    한 줄에 "틀린말=바른말" 하나. #으로 시작하면 주석.
+    Whisper가 자주 틀리는 종목명·고유명사를 여기 적으면 자동으로 바로잡힌다.
+      예)  공급방=공급망
+           가덱도=가덕도
+    파일을 고치면 다시 실행할 때 바로 반영된다 (수정 시각으로 감지).
+    """
+    global _CORRECTION_MAP, _CORRECTION_MTIME
+    path = BASE_DIR / "자막교정.txt"
+    try:
+        mt = path.stat().st_mtime
+    except OSError:
+        _CORRECTION_MAP = {}
+        return _CORRECTION_MAP
+    if _CORRECTION_MAP is None or mt != _CORRECTION_MTIME:
+        m: dict[str, str] = {}
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                wrong, right = (p.strip() for p in line.split("=", 1))
+                if wrong and wrong != right:
+                    m[wrong] = right
+        except Exception:
+            m = {}
+        # 긴 말부터 바꿔야 부분 겹침 사고가 없다
+        _CORRECTION_MAP = dict(sorted(m.items(), key=lambda kv: -len(kv[0])))
+        _CORRECTION_MTIME = mt
+    return _CORRECTION_MAP
+
+
+def apply_corrections(text: str) -> str:
+    """교정 목록에 있는 틀린 말을 바른 말로 바꾼다 (부분 문자열 치환)."""
+    for wrong, right in get_correction_map().items():
+        if wrong in text:
+            text = text.replace(wrong, right)
+    return text
+
+
 def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> str:
     """
     Whisper 환각/효과음 태그를 걸러낸다. 한국어 영상이라는 전제.
+    - 사용자 교정 목록(자막교정.txt)을 먼저 적용 (자주 틀리는 종목명 등)
     - [grunting], (laughs) 같은 괄호 태그는 통째로 제거
     - 나머지 텍스트 안의 영문 알파벳 덩어리는 전부 _clean_latin_run으로 검사
       → 한글에 그대로 들러붙은 경우("disadvant짠", "wszyst그럼")도
@@ -510,6 +557,7 @@ def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> s
     - 영문이 지워지고 남는 게 문장부호뿐인 조각은 통째로 버린다
     """
     script_tokens = script_tokens or set()
+    text = apply_corrections(text)
     text = _BRACKET_TAG_RE.sub(" ", text)
     text = re.sub(r"[A-Za-z]+", lambda m: _clean_latin_run(m.group(0), script_tokens), text)
     out = [tok for tok in text.split() if re.search(r"[가-힣0-9A-Za-z]", tok)]
