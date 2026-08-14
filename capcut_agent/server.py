@@ -3237,6 +3237,16 @@ if __name__ == "__main__":
     # 포터블(embeddable) Python은 격리 모드라 스크립트 폴더가 sys.path에 없다.
     # 앱 객체를 직접 넘기고(문자열 "server:app" 금지), 경로도 넣어 둔다.
     sys.path.insert(0, str(BASE_DIR))
+
+    # ★ 콘솔이 '그냥 꺼지는' 네이티브 크래시(음성인식 엔진 등)의 흔적을 남긴다.
+    #   Python try/except 로는 못 잡는 크래시도 crash_log.txt 에 스택이 찍힌다.
+    try:
+        import faulthandler
+        _crash_fp = open(BASE_DIR / "crash_log.txt", "w", encoding="utf-8")
+        faulthandler.enable(_crash_fp)
+    except Exception:
+        pass
+
     try:
         host = "127.0.0.1"
         port = _find_free_port(host, 8765)
