@@ -177,20 +177,20 @@ def build_cutouts(files: list[Path], out_dir: Path, stroke: bool, stroke_frac: f
     return made
 
 
-WHISPER_DEVICE = ""          # 실제로 무엇으로 돌고 있는지 (로그에 표시)
-
-
 def get_whisper_model():
-    """
-    ★ 자막이 잘 됐던 버전과 똑같이: large-v3 를 CPU(int8)로 돌린다.
-    GPU(CUDA)는 카드에 따라 오히려 더 느려서(사용자 확인) 쓰지 않는다.
-    스레드·동시 실행 옵션도 건드리지 않는다 — 건드리면 느려지는 PC가 있다.
-    """
-    global _whisper_model, WHISPER_DEVICE
+    global _whisper_model
     if _whisper_model is None:
         from faster_whisper import WhisperModel
-        WHISPER_DEVICE = "CPU int8"
-        _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+        try:
+            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+            print("[Whisper] GPU 로드 완료")
+        except Exception:
+            # ★ CPU 는 compute_type="auto" — CPU 성능에 맞는 형식을 골라준다.
+            #   "int8"을 강제하면 그 명령을 지원 안 하는 CPU에서 프로그램이
+            #   통째로 꺼진다(Illegal instruction). "auto"는 그런 CPU에서
+            #   자동으로 float32 등으로 내려가 안 꺼진다.
+            print("[Whisper] GPU 실패 → CPU(auto) fallback")
+            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="auto")
     return _whisper_model
 
 
@@ -215,8 +215,8 @@ FPS = 30.0
 FRAME_US = int(round(1_000_000 / FPS))   # 한 프레임 길이(us)
 
 # 자막 한 조각의 목표 글자 수 (기본값, UI에서 조절 가능).
-# 어절 경계로 이 길이 안팎에서 끊는다. 사용자 완성본(알테오젠 원고 27줄) 기준.
-MAX_SUBTITLE_CHARS = 12
+# 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
+MAX_SUBTITLE_CHARS = 9
 
 # 말 사이가 이만큼 벌어지면 자막을 끊는다 (자연스러운 호흡 단위 분할)
 SUB_PAUSE_BREAK_US = 350_000
@@ -491,55 +491,45 @@ def _clean_latin_run(seg: str, script_tokens: set[str]) -> str:
     low = seg.lower()
     if low in _SOUND_TAG_WORDS:
         return ""
-    if len(seg) == 1:
-        return ""            # "I", "E", "U" — 잡음 구간에서 나오는 한 글자는 전부 환각
     if low in _LATIN_KEEP or low in script_tokens:
         return seg
+    if len(seg) == 1:
+        return ""            # "I", "E", "U" — 잡음 구간의 한 글자는 전부 환각
     if seg.isupper() and 2 <= len(seg) <= 6:
         return seg           # ETF, GS, AI 같은 대문자 약어 (한 글자는 제외)
     return ""                # 나머지는 전부 환각으로 간주해 제거
 
 
-_CORRECTION_MAP: dict[str, str] | None = None
-_CORRECTION_MTIME: float | None = None
+_CORRECTION_MAP: dict | None = None
+_CORRECTION_MTIME = None
 
 
-def get_correction_map() -> dict[str, str]:
-    """
-    사용자가 직접 만드는 자막 교정 목록(자막교정.txt)을 읽어온다.
-    한 줄에 "틀린말=바른말" 하나. #으로 시작하면 주석.
-    Whisper가 자주 틀리는 종목명·고유명사를 여기 적으면 자동으로 바로잡힌다.
-      예)  공급방=공급망
-           가덱도=가덕도
-    파일을 고치면 다시 실행할 때 바로 반영된다 (수정 시각으로 감지).
-    """
+def get_correction_map() -> dict:
+    """사용자 교정 목록(자막교정.txt): 한 줄에 "틀린말=바른말", #은 주석."""
     global _CORRECTION_MAP, _CORRECTION_MTIME
     path = BASE_DIR / "자막교정.txt"
     try:
         mt = path.stat().st_mtime
     except OSError:
-        _CORRECTION_MAP = {}
-        return _CORRECTION_MAP
+        _CORRECTION_MAP = {}; return _CORRECTION_MAP
     if _CORRECTION_MAP is None or mt != _CORRECTION_MTIME:
-        m: dict[str, str] = {}
+        m = {}
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
-                wrong, right = (p.strip() for p in line.split("=", 1))
+                wrong, right = (x.strip() for x in line.split("=", 1))
                 if wrong and wrong != right:
                     m[wrong] = right
         except Exception:
             m = {}
-        # 긴 말부터 바꿔야 부분 겹침 사고가 없다
         _CORRECTION_MAP = dict(sorted(m.items(), key=lambda kv: -len(kv[0])))
         _CORRECTION_MTIME = mt
     return _CORRECTION_MAP
 
 
 def apply_corrections(text: str) -> str:
-    """교정 목록에 있는 틀린 말을 바른 말로 바꾼다 (부분 문자열 치환)."""
     for wrong, right in get_correction_map().items():
         if wrong in text:
             text = text.replace(wrong, right)
@@ -549,7 +539,6 @@ def apply_corrections(text: str) -> str:
 def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> str:
     """
     Whisper 환각/효과음 태그를 걸러낸다. 한국어 영상이라는 전제.
-    - 사용자 교정 목록(자막교정.txt)을 먼저 적용 (자주 틀리는 종목명 등)
     - [grunting], (laughs) 같은 괄호 태그는 통째로 제거
     - 나머지 텍스트 안의 영문 알파벳 덩어리는 전부 _clean_latin_run으로 검사
       → 한글에 그대로 들러붙은 경우("disadvant짠", "wszyst그럼")도
@@ -663,33 +652,6 @@ def is_hallucinated_line(text: str, clip_sec: float) -> bool:
     return clip_sec < 1.0 and n in _SHORT_ONLY_LINES
 
 
-_INNER_COMMA_RE = re.compile(r"(?<=[가-힣0-9A-Za-z]),(?=[가-힣A-Za-z])")
-
-
-def split_inner_commas(words: list[dict]) -> list[dict]:
-    """
-    "주주들,그동안" 처럼 쉼표 뒤가 붙어 한 어절이 된 것을 둘로 나눈다.
-    (붙어 있으면 그 자리에서 자막을 끊을 수가 없다)
-    """
-    out: list[dict] = []
-    for w in words:
-        parts = _INNER_COMMA_RE.sub(",\u0000", w["word"]).split("\u0000")
-        if len(parts) == 1:
-            out.append(w)
-            continue
-        keys = ("tl_start", "tl_end") if "tl_start" in w else ("start", "end")
-        st = w.get(keys[0], 0)
-        en = w.get(keys[1], st)
-        span = (en - st) / len(parts) if en > st else 0
-        for i, pt in enumerate(parts):
-            piece = {**w, "word": pt}
-            if span:
-                piece[keys[0]] = type(st)(st + span * i)
-                piece[keys[1]] = type(st)(st + span * (i + 1))
-            out.append(piece)
-    return out
-
-
 def _is_syllable_soup(words: list[dict]) -> bool:
     """
     "멘 탈 흔" 처럼 한 글자씩 흩어져 나온 인식인지.
@@ -736,19 +698,36 @@ def drop_rare_latin(segments: list[dict], script_tokens: set[str] | None = None)
     return n_drop
 
 
+_INNER_COMMA_RE = re.compile(r"(?<=[가-힣0-9A-Za-z]),(?=[가-힣A-Za-z])")
+
+
+def split_inner_commas(words: list[dict]) -> list[dict]:
+    """"주주들,그동안" 처럼 쉼표 뒤가 붙은 한 어절을 둘로 나눈다."""
+    out: list[dict] = []
+    for w in words:
+        parts = _INNER_COMMA_RE.sub(",\u0000", w["word"]).split("\u0000")
+        if len(parts) == 1:
+            out.append(w); continue
+        keys = ("tl_start", "tl_end") if "tl_start" in w else ("start", "end")
+        st = w.get(keys[0], 0); en = w.get(keys[1], st)
+        span = (en - st) / len(parts) if en > st else 0
+        for i, pt in enumerate(parts):
+            piece = {**w, "word": pt}
+            if span:
+                piece[keys[0]] = type(st)(st + span * i)
+                piece[keys[1]] = type(st)(st + span * (i + 1))
+            out.append(piece)
+    return out
+
+
 def merge_number_tokens(words: list[dict]) -> list[dict]:
-    """
-    Whisper가 "4,300억" 같은 숫자를 "4," + "300억" 두 어절로 쪼개는 일이 잦다.
-    그대로 두면 자막이 "4, 300억" 처럼 숫자 사이가 벌어진다. 다시 붙인다.
-      "4," + "300억이"  → "4,300억이"
-      "8," + "000억을"  → "8,000억을"
-    """
+    """Whisper가 "4,300억"을 "4," + "300억"으로 쪼갠 것을 다시 붙인다."""
     out: list[dict] = []
     for w in words:
         if out and re.fullmatch(r"\d{1,3},", out[-1]["word"]) and re.match(r"^\d", w["word"]):
-            end_key = "tl_end" if "tl_end" in w else "end"
+            ek = "tl_end" if "tl_end" in w else "end"
             out[-1] = {**out[-1], "word": out[-1]["word"] + w["word"],
-                       end_key: w.get(end_key, out[-1].get(end_key))}
+                       ek: w.get(ek, out[-1].get(ek))}
         else:
             out.append(w)
     return out
@@ -802,7 +781,6 @@ def transcribe_all_clips(video_path: Path,
     인식이 안 되는 클립도 자막 클립 자체는 만든다(내용은 "...").
     각 단어는 클립 안에서의 실제 발화 시각을 그대로 갖고 있어 자막이
     영상과 밀리지 않는다.
-    (자막이 잘 됐던 버전과 똑같이 한 클립씩 순서대로 인식한다.)
     """
     segs = []
     total = len(keep_ranges)
@@ -824,14 +802,16 @@ def transcribe_all_clips(video_path: Path,
                         "end": min(max(w["end"], ks), ke),
                         "word": piece,
                     })
-        words = cap_by_speech_rate(
-            collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
+        words = cap_by_speech_rate(collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
         if _is_syllable_soup(words):
             words = []                  # "멘 탈 흔" → 말로 치지 않음
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
             words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
             n_halluc += 1
-        text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
+        if words:
+            text = " ".join(w["word"] for w in words)
+        else:
+            text = NO_SPEECH_PLACEHOLDER
         segs.append({"start": ks, "end": ke, "text": text, "words": words})
         if progress is not None:
             progress["done"] = i + 1
@@ -2057,7 +2037,7 @@ def _make_matting(remove_bg: bool, stroke: bool, stroke_size: float = 0.15,
 # 이미지로 취급할 확장자 (나머지는 영상으로 간주)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".tif", ".tiff"}
 IMAGE_SOURCE_DUR_US = 10_800_000_000   # 이미지 material의 소스 길이 (3시간, CapCut 관례)
-DEFAULT_IMAGE_DUR_SEC = 2.0            # 이미지 1장 타임라인 기본 노출 시간
+DEFAULT_IMAGE_DUR_SEC = 3.0            # 이미지 1장 타임라인 기본 노출 시간
 
 
 def get_media_info(path: Path) -> tuple[int, int, float | None, bool]:
@@ -2780,12 +2760,7 @@ def build_sequence_draft(
 
 @app.get("/")
 async def index():
-    # 화면 파일을 새로 덮어썼는데 브라우저가 예전 걸 캐시해서 쓰는 일이 없도록
-    # 항상 새로 받게 한다 (예전 화면이 남아 있으면 없는 항목을 읽어 오류가 난다)
-    return FileResponse(STATIC_DIR / "index.html", headers={
-        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-        "Pragma": "no-cache",
-    })
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.post("/api/process")
@@ -2912,14 +2887,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                avg_clip = sum(r[1] - r[0] for r in keep_ranges) / max(len(keep_ranges), 1)
-                if len(keep_ranges) >= 80 and avg_clip < 2.5:
-                    tip = (f"⚠ 클립이 {len(keep_ranges)}개(평균 {avg_clip:.1f}초)로 잘게 쪼개져 있습니다. "
-                           f"클립이 짧을수록 인식이 느리고 앞뒤 문맥이 없어 부정확해집니다. "
-                           f"'최소 무음 길이'를 0.5~0.7초로 올리면 클립이 줄어 더 빠르고 정확해집니다.")
-                    yield f"data: {json.dumps({'step': 'asr', 'msg': tip})}\n\n"
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 하나씩 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
-                t_asr = time.time()
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
@@ -2934,9 +2902,7 @@ async def process_video(
                             last = d
                             yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
                     raw_subs = await task
-                asr_sec = time.time() - t_asr
-                msg_done = f"클립별 인식 완료 ({len(raw_subs)}개) · {asr_sec/60:.1f}분"
-                yield f"data: {json.dumps({'step': 'asr', 'msg': msg_done})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립별 인식 완료 ({len(raw_subs)}개)'})}\n\n"
                 n_halluc = prog.get("halluc", 0)
                 if n_halluc:
                     msg_h = f"상투 문구 환각 제거 {n_halluc}개 (시청해주셔서 감사합니다 등)"
@@ -3234,19 +3200,14 @@ def _find_free_port(host: str, start: int, tries: int = 20) -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import faulthandler
+        faulthandler.enable(open(Path(__file__).parent / "crash_log.txt", "w", encoding="utf-8"))
+    except Exception:
+        pass
     # 포터블(embeddable) Python은 격리 모드라 스크립트 폴더가 sys.path에 없다.
     # 앱 객체를 직접 넘기고(문자열 "server:app" 금지), 경로도 넣어 둔다.
     sys.path.insert(0, str(BASE_DIR))
-
-    # ★ 콘솔이 '그냥 꺼지는' 네이티브 크래시(음성인식 엔진 등)의 흔적을 남긴다.
-    #   Python try/except 로는 못 잡는 크래시도 crash_log.txt 에 스택이 찍힌다.
-    try:
-        import faulthandler
-        _crash_fp = open(BASE_DIR / "crash_log.txt", "w", encoding="utf-8")
-        faulthandler.enable(_crash_fp)
-    except Exception:
-        pass
-
     try:
         host = "127.0.0.1"
         port = _find_free_port(host, 8765)
