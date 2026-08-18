@@ -39,6 +39,16 @@ _asr_lock = asyncio.Lock()
 # Whisper 모델 lazy init
 _whisper_model = None
 
+# ══════════════════════════════════════════════════════════
+#  ★ 자막 인식 속도 설정  (이 한 줄만 바꾸면 됩니다)
+#      "large-v3" = 제일 정확  (기본)
+#      "medium"   = 2~3배 빠름  (종목명 등 정확도 약간 낮아짐)
+#      "small"    = 더 빠름     (정확도 더 낮아짐)
+#   바꾸고 저장 → 다시 실행하면, 그 모델을 처음 한 번 자동으로 내려받습니다.
+#   (자막교정.txt 나 대본으로 종목명은 따로 바로잡을 수 있습니다)
+# ══════════════════════════════════════════════════════════
+ASR_MODEL = "large-v3"
+
 
 def ensure_faster_whisper() -> tuple[bool, str]:
     """
@@ -182,15 +192,15 @@ def get_whisper_model():
     if _whisper_model is None:
         from faster_whisper import WhisperModel
         try:
-            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-            print("[Whisper] GPU 로드 완료")
+            _whisper_model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
+            print(f"[Whisper] GPU 로드 완료 ({ASR_MODEL})")
         except Exception:
             # ★ CPU 는 compute_type="auto" — CPU 성능에 맞는 형식을 골라준다.
             #   "int8"을 강제하면 그 명령을 지원 안 하는 CPU에서 프로그램이
             #   통째로 꺼진다(Illegal instruction). "auto"는 그런 CPU에서
             #   자동으로 float32 등으로 내려가 안 꺼진다.
-            print("[Whisper] GPU 실패 → CPU(auto) fallback")
-            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="auto")
+            print(f"[Whisper] GPU 실패 → CPU(auto) fallback ({ASR_MODEL})")
+            _whisper_model = WhisperModel(ASR_MODEL, device="cpu", compute_type="auto")
     return _whisper_model
 
 
