@@ -1479,51 +1479,6 @@ def merge_adjacent_duplicate_subs(chunks: list[dict]) -> list[dict]:
     return out
 
 
-# 이 글자 수 이하(문장부호 제외)면 감탄사/추임새로 보고 옆 자막에 붙인다
-INTERJECTION_MAX_CHARS = 2
-INTERJECTION_MAX_DUR_US = 1_200_000     # 이보다 짧을 때만 (길게 끈 말은 제외)
-
-
-def merge_short_interjections(chunks: list[dict]) -> list[dict]:
-    """
-    '놉', '어!', '빵!' 처럼 아주 짧은 한두 글자 자막이 혼자 한 줄로 번쩍이지
-    않도록, 시간이 맞닿은 앞 자막에 붙여 한 줄로 만든다. (앞이 없으면 뒤에 붙임)
-
-    - 앞 자막에 이미 그 글자가 들어있으면(끝음절이 잘려 다시 인식된 경우)
-      글자는 안 붙이고 시간만 흡수 → "답답했지 지!" 같은 중복 방지.
-    - 겹침 총합이 보존되므로 '자막 길이 = 클립 길이' 커버리지는 그대로 100%.
-    """
-    if len(chunks) < 2:
-        return chunks
-
-    def is_interjection(c: dict) -> bool:
-        n = _sub_norm(c["text"])
-        return 0 < len(n) <= INTERJECTION_MAX_CHARS and \
-            (c["end_us"] - c["start_us"]) <= INTERJECTION_MAX_DUR_US
-
-    out: list[dict] = []
-    for cur in chunks:
-        if (is_interjection(cur) and out
-                and 0 <= cur["start_us"] - out[-1]["end_us"] <= FRAME_US
-                and _sub_norm(out[-1]["text"])):          # 앞이 빈 자막("...")이면 안 붙임
-            prev = out[-1]
-            if _sub_norm(cur["text"]) not in _sub_norm(prev["text"]):
-                prev["text"] = (prev["text"] + " " + cur["text"]).strip()
-            prev["end_us"] = cur["end_us"]                 # 시간은 항상 흡수
-            continue
-        out.append(dict(cur))
-
-    # 맨 앞이 감탄사여서 앞에 붙일 데가 없었던 경우 → 뒤 자막 앞에 붙인다
-    if len(out) >= 2 and is_interjection(out[0]) \
-            and 0 <= out[1]["start_us"] - out[0]["end_us"] <= FRAME_US \
-            and _sub_norm(out[1]["text"]):
-        first = out.pop(0)
-        if _sub_norm(first["text"]) not in _sub_norm(out[0]["text"]):
-            out[0]["text"] = (first["text"] + " " + out[0]["text"]).strip()
-        out[0]["start_us"] = first["start_us"]
-    return out
-
-
 def subtitle_chunks_for_timeline(segments: list[dict],
                                  keep_ranges: list[tuple[float, float, int, int]],
                                  max_chars: int = MAX_SUBTITLE_CHARS,
@@ -1637,11 +1592,9 @@ def subtitle_chunks_for_timeline(segments: list[dict],
 
     if stats is not None:
         stats["corrected"] = total_fixed
-    # 붙어있는 완전 중복 자막(클립 경계에서 겹쳐 인식된 것)을 하나로 합치고,
-    # 짧은 감탄사('놉','어!','빵!')는 옆 자막에 붙여 한 줄로 만든다
-    out = merge_adjacent_duplicate_subs(out)
-    out = merge_short_interjections(out)
-    return out
+    # 붙어있는 완전 중복 자막(클립 경계에서 겹쳐 인식된 것)만 하나로 합친다.
+    # (짧은 감탄사 '놉','빵' 등은 각각 독립된 자막 클립으로 그대로 둔다)
+    return merge_adjacent_duplicate_subs(out)
 
 
 def subtitle_coverage_report(chunks: list[dict],
