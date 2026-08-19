@@ -1785,11 +1785,22 @@ def get_video_resolution(video_path: Path) -> tuple[int, int]:
         return 1920, 1080
 
 
-# 캔버스 비율 프리셋: (width, height, 자막 y 위치)
+# 캔버스 비율 프리셋: (width, height, 자막 y 위치, 자막 권장 글자 수)
+#   sub_chars = 그 비율에서 자막 한 줄이 화면을 안 넘고 읽기 좋은 글자 수.
+#   세로(숏츠)는 폭이 좁아 짧게, 가로(롱폼)는 폭이 넓어 길게 잡는다.
+#   (max_sub_chars 를 0 이하로 주면 이 값을 자동으로 쓴다)
 CANVAS_PRESETS = {
-    "9:16":  {"width": 1080, "height": 1920, "subtitle_y": -0.35},   # 숏츠 (기본)
-    "16:9":  {"width": 1920, "height": 1080, "subtitle_y": -0.6907},  # 가로
+    "9:16":  {"width": 1080, "height": 1920, "subtitle_y": -0.35,   "sub_chars": 12},  # 숏츠 (기본)
+    "16:9":  {"width": 1920, "height": 1080, "subtitle_y": -0.6907, "sub_chars": 20},  # 가로
 }
+
+
+def resolve_sub_chars(max_sub_chars: int, ratio: str) -> int:
+    """max_sub_chars 가 0 이하면 '자동' → 화면 비율에 맞는 권장 글자 수를 돌려준다."""
+    if max_sub_chars and max_sub_chars > 0:
+        return max_sub_chars
+    preset = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
+    return preset.get("sub_chars", MAX_SUBTITLE_CHARS)
 
 # ══════════════════════════════════════════════════════════
 # 템플릿(0731 프로젝트)에서 추출한 상단 제목 / 하단 날짜 스타일
@@ -2341,6 +2352,7 @@ def build_draft(
     """
     bg_files = bg_files or set()
     canvas = CANVAS_PRESETS.get(ratio, CANVAS_PRESETS["9:16"])
+    max_sub_chars = resolve_sub_chars(max_sub_chars, ratio)   # 0 이하면 비율에 맞춰 자동
     src_width, src_height = get_video_resolution(video_path)
 
     video_str   = str(video_path).replace("\\", "/")
@@ -2850,12 +2862,19 @@ async def process_video(
     except Exception:
         script_text = ""
 
+    # 자막 글자 수: 0 이하면 '자동' → 화면 비율(숏츠/롱폼)에 맞는 권장값
+    auto_chars = not (max_sub_chars and max_sub_chars > 0)
+    sub_chars = resolve_sub_chars(max_sub_chars, ratio)
+
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             video = Path(video_path)
             if not video.exists():
                 yield f"data: {json.dumps({'step': 'error', 'msg': f'파일을 찾을 수 없습니다: {video_path}'})}\n\n"
                 return
+            if auto_chars:
+                _rname = '숏츠(세로)' if ratio == '9:16' else '롱폼(가로)'
+                yield f"data: {json.dumps({'step': 'probe', 'msg': f'자막 글자 수 자동: {_rname} → 한 줄 {sub_chars}자'})}\n\n"
 
             yield f"data: {json.dumps({'step': 'upload', 'msg': f'파일 확인: {video.name}'})}\n\n"
 
@@ -2986,7 +3005,7 @@ async def process_video(
                 else:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': '대본 없음 → Whisper 인식 그대로 사용'})}\n\n"
                 _stats: dict = {}
-                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, max_sub_chars,
+                sub_chunks = subtitle_chunks_for_timeline(raw_subs, keep_ranges, sub_chars,
                                                           script_text, _stats)
                 if script_text:
                     n_fixed = _stats.get("corrected", 0)
@@ -3064,7 +3083,7 @@ async def process_video(
             yield f"data: {json.dumps({'step': 'draft', 'msg': f'CapCut draft 생성 중... ({ratio})'})}\n\n"
             name = video.stem
             draft_dir = build_draft(video, silences, duration, OUTPUT_DIR, name, raw_subs, ratio,
-                                    max_sub_chars, script_text, valid_appends, image_dur,
+                                    sub_chars, script_text, valid_appends, image_dur,
                                     title_text, date_text, effect_dur, bg_files,
                                     True, stroke_size, 0.6, bool(unify_place),
                                     head_trim / 1000.0, tail_trim / 1000.0, min_clip, drop_set,

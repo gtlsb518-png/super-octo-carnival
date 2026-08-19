@@ -391,13 +391,25 @@
       </label>
       <span style="font-size:11px; color:var(--muted);">GPU large-v3 · 처음 켜면 자동 설치 + 모델 다운로드 (~3GB, 시간 걸림)</span>
     </div>
-    <div class="setting-item" style="margin-top:14px; max-width:320px;">
-      <label>
-        자막 한 줄 글자 수 (어절 단위로 끊음)
-        <span id="chars-val">12 자</span>
+    <div style="margin-top:14px; max-width:360px;">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="auto-sub-chars" checked
+               style="width:16px; height:16px; accent-color:var(--accent);"
+               onchange="updateSubCharsUI()" />
+        <span style="font-size:12px;">자막 한 줄 길이 자동 (화면 비율에 맞춤)</span>
       </label>
-      <input type="range" id="max-sub-chars" min="8" max="20" value="12" step="1"
-             oninput="document.getElementById('chars-val').textContent = this.value + ' 자'" />
+      <div id="auto-chars-hint" style="font-size:11px; color:var(--muted); margin:6px 0 0 24px;">
+        숏츠(세로) 12자 · 롱폼(가로) 20자 — 비율을 바꾸면 자동으로 맞춰집니다
+      </div>
+
+      <div class="setting-item" id="manual-chars-box" style="margin-top:12px; display:none;">
+        <label>
+          자막 한 줄 글자 수 (어절 단위로 끊음)
+          <span id="chars-val">12 자</span>
+        </label>
+        <input type="range" id="max-sub-chars" min="8" max="26" value="12" step="1"
+               oninput="document.getElementById('chars-val').textContent = this.value + ' 자'" />
+      </div>
     </div>
     <div style="margin-top:14px;">
       <label style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px; color:var(--muted);">
@@ -606,6 +618,27 @@
     return String(val(id, '')).trim();
   }
 
+  // ── 자막 글자 수: 자동(비율 맞춤) / 직접 지정 전환 ──────────
+  const AUTO_SUB_CHARS = { '9:16': 12, '16:9': 20 };   // 서버 CANVAS_PRESETS 와 동일
+  function updateSubCharsUI() {
+    const auto = chk('auto-sub-chars', true);
+    const ratioSel = document.querySelector('input[name="ratio"]:checked');
+    const ratio = ratioSel ? ratioSel.value : '9:16';
+    const box = document.getElementById('manual-chars-box');
+    const hint = document.getElementById('auto-chars-hint');
+    if (box)  box.style.display = auto ? 'none' : '';
+    if (hint) {
+      hint.style.display = auto ? '' : 'none';
+      const n = AUTO_SUB_CHARS[ratio] || 12;
+      const label = ratio === '9:16' ? '숏츠(세로)' : '롱폼(가로)';
+      hint.textContent = `${label} → 한 줄 ${n}자로 자동 (비율을 바꾸면 자동으로 맞춰집니다)`;
+    }
+  }
+  document.querySelectorAll('input[name="ratio"]').forEach(function (r) {
+    r.addEventListener('change', updateSubCharsUI);
+  });
+  updateSubCharsUI();
+
   // ── 경로 입력 ────────────────────────────────────────────
   function onPathInput(val) {
     val = val.trim();
@@ -699,7 +732,8 @@
     const useSub  = chk('use-subtitle', true) ? 'true' : 'false';
     const ratioSel = document.querySelector('input[name="ratio"]:checked');
     const ratio   = ratioSel ? ratioSel.value : '9:16';
-    const maxChars = num('max-sub-chars', 12);
+    // 자동이면 0을 보내고, 서버가 화면 비율에 맞는 글자 수를 정한다
+    const maxChars = chk('auto-sub-chars', true) ? 0 : num('max-sub-chars', 12);
     const encoded = encodeURIComponent(videoPath);
 
     // 컷 여유: 화면은 "여유(+ 면 더 남김)", 서버는 "깎는 양" 이라 부호를 뒤집는다
