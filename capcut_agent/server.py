@@ -1445,6 +1445,40 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     return _rebalance_tail(groups, hard + 2)
 
 
+def _sub_norm(text: str) -> str:
+    """중복 자막 비교용: 한글/영숫자만 남기고 소문자화 (공백·문장부호 무시)."""
+    return re.sub(r"[^0-9a-z가-힣]", "", text.lower())
+
+
+def merge_adjacent_duplicate_subs(chunks: list[dict]) -> list[dict]:
+    """
+    '붙어있는 + 글자가 완전히 같은' 자막을 하나로 합친다.
+
+    한 번 말한 문장이 클립 경계에서 잘리면, 조각마다 Whisper가 같은 문장을
+    통째로 다시 인식해서 같은 자막이 연속으로 두 번(이상) 나오는 일이 있다.
+    (예: "잠깐, 방산주" [2.033~2.800] / "잠깐, 방산주" [2.800~3.533])
+    시간이 맞닿아 있고 글자가 같으면 이건 한 번 말한 걸 겹쳐 인식한 것이므로
+    앞 자막의 끝시간만 늘려 하나로 합친다.
+
+    ※ 떨어져서 반복되는 자막(여러 번 찍은 테이크/엔지컷)은 건드리지 않는다.
+      → 맞닿아 있을 때만(간격 1프레임 이내) 합친다.
+    ※ 겹침 총합이 보존되므로 '자막 길이 = 클립 길이' 커버리지는 그대로 100%.
+    """
+    if not chunks:
+        return chunks
+    out = [dict(chunks[0])]
+    for cur in chunks[1:]:
+        prev = out[-1]
+        same_text = _sub_norm(cur["text"]) == _sub_norm(prev["text"])
+        real_text = _sub_norm(cur["text"]) != ""          # "..." 같은 빈 자막은 제외
+        adjacent = 0 <= cur["start_us"] - prev["end_us"] <= FRAME_US
+        if same_text and real_text and adjacent:
+            prev["end_us"] = cur["end_us"]                 # 끝시간만 늘려 하나로
+            continue
+        out.append(dict(cur))
+    return out
+
+
 def subtitle_chunks_for_timeline(segments: list[dict],
                                  keep_ranges: list[tuple[float, float, int, int]],
                                  max_chars: int = MAX_SUBTITLE_CHARS,
@@ -1558,7 +1592,8 @@ def subtitle_chunks_for_timeline(segments: list[dict],
 
     if stats is not None:
         stats["corrected"] = total_fixed
-    return out
+    # 붙어있는 완전 중복 자막(클립 경계에서 겹쳐 인식된 것)을 하나로 합친다
+    return merge_adjacent_duplicate_subs(out)
 
 
 def subtitle_coverage_report(chunks: list[dict],
