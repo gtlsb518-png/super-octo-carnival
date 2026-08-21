@@ -21,3 +21,4 @@ goldfib_trades.csv
 # 고래 추종 봇 실행 산출물
 whale_settings.json
 whale_trades.csv
+whale_leaderboard_stats.json

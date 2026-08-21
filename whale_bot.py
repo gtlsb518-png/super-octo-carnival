@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
 """
-🐋 고래 추종 자동매매 봇 — 단독 실행형
+🐋 고래 추종 자동매매 봇 + 🏆 리더보드 트레이더 추적 — 단독 실행형
 
 🔥 이 파일 하나만 있으면 실행됩니다.
    실행:  python whale_bot.py     (더블클릭 가능)
 
-아이디어:
-  바이낸스 선물 '실시간 체결 스트림(aggTrade)'을 구독해서
-  초대형 시장가 체결(= 고래)이 어느 방향으로 터지는지 실시간 감지하고,
-  그 방향으로 자동 진입한다. ('시장의 고래 흐름'을 따라감)
+[1] 고래 추종 자동매매 (실시간 대형체결)
+    바이낸스 선물 '실시간 체결 스트림(aggTrade)'을 구독해서
+    초대형 시장가 체결(= 고래)이 어느 방향으로 터지는지 감지하고,
+    그 방향으로 자동 진입한다. (코인별로 기준을 따로 설정 가능)
 
-진입:
-  · 최근 N초(window_sec) 동안의 '고래 체결'만 모아서
-    순매수금액 - 순매도금액 = 순흐름(net)을 계산
-  · 순매수 net ≥ 임계금액(net_usd)  → 롱 진입
-  · 순매도 net ≤ -임계금액          → 숏 진입 (allow_short 시)
-  · 여기서 '고래 체결'이란 단일 체결금액 ≥ whale_usd 인 시장가 체결
+    진입:
+      · 최근 N초(집계 창) 동안의 '고래 체결'만 모아 순매수-순매도 = 순흐름 계산
+      · 순매수 net ≥ 진입임계  → 롱
+      · 순매도 net ≤ -진입임계 → 숏 (allow_short 시)
+      · '고래 체결' = 단일 체결금액 ≥ 고래기준금액(코인별)
+    청산 (2중):
+      1) 진입 즉시 거래소에 TP(익절) + SL(손절) 주문 등록 → 꺼져도 청산됨
+      2) 보유 중 고래 흐름이 반대로 강하게 뒤집히면 즉시 시장가 청산
 
-청산 (2중):
-  1) 진입 즉시 거래소에 TP(익절) + SL(손절) 주문을 걸어둠
-     → 프로그램이 꺼져도 거래소가 알아서 청산
-  2) 보유 중 고래 흐름이 '반대'로 강하게 뒤집히면 즉시 시장가 청산
-     (reverse_exit)
+[2] 리더보드 트레이더 추적 (실명 고래)
+    바이낸스 선물 리더보드 상위 트레이더를 조회해
+    · 지금 어떤 코인에 어떻게 진입했는지 (방향/진입가/레버리지/평가손익)
+    · ROI 성과
+    · 승률(Binance 미제공 → 이 프로그램이 포지션 청산을 관찰해 직접 집계)
+    을 실시간으로 보여준다. (정보 표시용 — 자동매매는 [1]이 담당)
 
 안전장치:
   · 기본 테스트넷(모의) 모드. 실거래는 체크 해제 필요
-  · 체결 스트림은 항상 메인넷 실시세(테스트넷엔 고래가 없음)
+  · 체결/리더보드 데이터는 항상 메인넷
   · 주문은 테스트넷/메인넷 선택
   · 코인당 동시 1포지션, 청산 후 재진입 쿨다운
-  · 수량/가격은 거래소 규격(stepSize/tickSize)에 맞춤
 """
 
 import hashlib
@@ -58,8 +60,12 @@ import websocket  # noqa: E402  (websocket-client)
 
 SETTINGS_FILE = 'whale_settings.json'
 TRADE_LOG_CSV = 'whale_trades.csv'
+LB_STATS_FILE = 'whale_leaderboard_stats.json'   # 트레이더별 관찰 승률 누적
 
-# ==================== 기본 설정값 ====================
+# 코인별로 따로 설정할 수 있는 항목
+PER_COIN_KEYS = ('whale_usd', 'net_usd', 'amount', 'leverage', 'tp_pct', 'sl_pct')
+
+# ==================== 기본 설정값 (코인별 미지정 시 공통 기본값) ====================
 DEFAULTS = {
     'api_key': '',
     'api_secret': '',
@@ -76,6 +82,15 @@ DEFAULTS = {
     'reverse_exit': True,     # 고래 반대신호 시 즉시 청산
     'cooldown_sec': 60,       # 청산 후 재진입 쿨다운 (초)
     'max_positions': 3,       # 동시 보유 최대 포지션 수
+    # ----- 코인별 개별 설정 (없으면 위 공통값 사용) -----
+    # 예: {"BTCUSDT": {"whale_usd": 800000, "net_usd": 2000000, "leverage": 2}}
+    'per_coin': {},
+    # ----- 리더보드 추적 -----
+    'lb_enable': True,
+    'lb_period': 'WEEKLY',    # DAILY / WEEKLY / MONTHLY / ALL
+    'lb_stat': 'ROI',         # ROI / PNL
+    'lb_top': 10,             # 추적할 상위 트레이더 수
+    'lb_poll_sec': 30,        # 리더보드 갱신 주기 (초)
 }
 
 
@@ -88,7 +103,6 @@ def load_settings():
         except Exception:
             pass
     else:
-        # 기존 봇의 1_config.py가 같은 폴더에 있으면 API 키 가져오기
         try:
             import importlib
             cfg = importlib.import_module('1_config')
@@ -97,6 +111,8 @@ def load_settings():
             s['testnet'] = bool(getattr(cfg, 'TESTNET', True))
         except Exception:
             pass
+    if not isinstance(s.get('per_coin'), dict):
+        s['per_coin'] = {}
     return s
 
 
@@ -145,8 +161,7 @@ class BinanceFutures:
                     code = err.get('code')
                     if code == -1021:            # 시간 오차
                         self.sync_time()
-                    # -2022(ReduceOnly 거부), -4046(마진타입 동일) 등은 소음이라 무시 가능
-                    if code not in (-4046,):
+                    if code not in (-4046,):     # -4046=마진타입 동일(소음)
                         self.log(f"❌ API 오류 {code}: {err.get('msg')}")
                 except Exception:
                     self.log(f"❌ API 오류: {r.text[:200]}")
@@ -214,13 +229,11 @@ class BinanceFutures:
                   {'symbol': symbol, 'marginType': 'ISOLATED'}, signed=True)
 
     def market_order(self, symbol, side, qty_str):
-        """side: BUY(롱 진입 / 숏 청산) or SELL(숏 진입 / 롱 청산)"""
         return self._req('POST', '/fapi/v1/order',
                          {'symbol': symbol, 'side': side, 'type': 'MARKET',
                           'quantity': qty_str}, signed=True)
 
     def close_market(self, symbol, close_side, qty_str):
-        """close_side: 롱 청산=SELL, 숏 청산=BUY"""
         return self._req('POST', '/fapi/v1/order',
                          {'symbol': symbol, 'side': close_side, 'type': 'MARKET',
                           'quantity': qty_str, 'reduceOnly': 'true'}, signed=True)
@@ -241,19 +254,17 @@ class BinanceFutures:
         return self._req('DELETE', '/fapi/v1/allOpenOrders', {'symbol': symbol}, signed=True)
 
 
-# ==================== 실시간 고래 체결 스트림 ====================
+# ==================== 실시간 고래 체결 스트림 (코인별 기준) ====================
 class WhaleStream:
     """
-    바이낸스 선물 aggTrade 스트림(항상 메인넷)을 구독해서,
-    심볼별로 '최근 window_sec 초 동안의 고래 체결'만 보관한다.
-      · 고래 체결 = 단일 체결금액 ≥ whale_usd
-      · net_flow() → (순흐름, 매수금액, 매도금액, 최근고래건수)
+    aggTrade 스트림(항상 메인넷) 구독. 심볼별 '고래 기준금액' 이상 체결만 보관.
+      whale_usd_map: {심볼: 고래기준$}   window_map: {심볼: 집계창(초)}
     """
 
-    def __init__(self, symbols, whale_usd, window_sec, log=print):
+    def __init__(self, symbols, whale_usd_map, window_map, log=print):
         self.symbols = [s.upper() for s in symbols]
-        self.whale_usd = float(whale_usd)
-        self.window_sec = float(window_sec)
+        self.whale_usd_map = {k.upper(): float(v) for k, v in whale_usd_map.items()}
+        self.window_map = {k.upper(): float(v) for k, v in window_map.items()}
         self.log = log
         self.lock = threading.Lock()
         self.trades = {s: deque() for s in self.symbols}   # (ts, side, notional)
@@ -261,10 +272,6 @@ class WhaleStream:
         self.connected = False
         self.running = False
         self.ws = None
-
-    def update_params(self, whale_usd, window_sec):
-        self.whale_usd = float(whale_usd)
-        self.window_sec = float(window_sec)
 
     def _url(self):
         streams = '/'.join(f"{s.lower()}@aggTrade" for s in self.symbols)
@@ -278,14 +285,13 @@ class WhaleStream:
             if sym not in self.trades:
                 return
             price = float(d['p'])
-            qty = float(d['q'])
-            notional = price * qty
-            # m=True → 매수자가 메이커 = 공격자는 매도(시장가 매도)
-            side = 'sell' if d.get('m') else 'buy'
+            notional = price * float(d['q'])
+            side = 'sell' if d.get('m') else 'buy'   # m=True → 공격자=매도
             now = time.time()
+            thr = self.whale_usd_map.get(sym, 500000.0)
             with self.lock:
                 self.last_price[sym] = price
-                if notional >= self.whale_usd:
+                if notional >= thr:
                     self.trades[sym].append((now, side, notional))
         except Exception:
             pass
@@ -309,18 +315,14 @@ class WhaleStream:
         while self.running:
             try:
                 self.ws = websocket.WebSocketApp(
-                    self._url(),
-                    on_open=self._on_open,
-                    on_message=self._on_message,
-                    on_error=self._on_error,
-                    on_close=self._on_close,
-                )
+                    self._url(), on_open=self._on_open, on_message=self._on_message,
+                    on_error=self._on_error, on_close=self._on_close)
                 self.ws.run_forever(ping_interval=180, ping_timeout=10)
             except Exception as e:
                 self.log(f"⚠️ 스트림 재연결 대기: {e}")
             if self.running:
                 self.connected = False
-                time.sleep(3)   # 재연결
+                time.sleep(3)
 
     def stop(self):
         self.running = False
@@ -331,8 +333,9 @@ class WhaleStream:
             pass
 
     def net_flow(self, sym):
-        """최근 window_sec 초의 고래 순흐름 반환"""
-        cutoff = time.time() - self.window_sec
+        """최근 window 초의 고래 순흐름 → (순흐름, 매수$, 매도$, 건수)"""
+        win = self.window_map.get(sym, 10.0)
+        cutoff = time.time() - win
         buy = sell = 0.0
         cnt = 0
         with self.lock:
@@ -354,26 +357,245 @@ class WhaleStream:
             return self.last_price.get(sym, 0.0)
 
 
+# ==================== 리더보드 트레이더 추적 ====================
+class LeaderboardTracker:
+    """
+    바이낸스 선물 리더보드(공개 API) 상위 트레이더를 조회.
+      · 현재 공개 포지션(코인/방향/진입가/레버리지/ROE/평가손익)
+      · ROI 성과 (Binance 제공)
+      · 관찰 승률: Binance가 승률을 주지 않으므로, 각 트레이더의 포지션이
+        '청산'되는 순간을 관찰해 마지막 평가손익 부호로 승/패를 직접 누적.
+        (whale_leaderboard_stats.json 에 저장 — 프로그램이 지켜본 만큼만 집계)
+    ⚠️ 비공식 공개 API라 지역/정책에 따라 차단(403/451)될 수 있음.
+    """
+    BAPI = "https://www.binance.com/bapi/futures"
+
+    def __init__(self, cfg, log=print):
+        self.cfg, self.log = cfg, log
+        self.s = requests.Session()
+        self.s.headers.update({
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Accept': 'application/json',
+            'clienttype': 'web',
+        })
+        self.lock = threading.Lock()
+        self.traders = []          # 표시용 리스트(dict)
+        self.prev_pos = {}         # uid -> {symbol: {'side','pnl','roe'}}
+        self.stats = self._load_stats()   # uid -> {'nick','wins','losses'}
+        self.running = False
+        self.last_error = ''
+
+    # ---------- 저장/불러오기 ----------
+    def _load_stats(self):
+        if os.path.exists(LB_STATS_FILE):
+            try:
+                with open(LB_STATS_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_stats(self):
+        try:
+            with open(LB_STATS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.stats, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # ---------- API ----------
+    def _post(self, path, body):
+        try:
+            r = self.s.post(self.BAPI + path, json=body, timeout=15)
+            if r.status_code >= 400:
+                self.last_error = f"HTTP {r.status_code}"
+                return None
+            j = r.json()
+            return j.get('data')
+        except Exception as e:
+            self.last_error = type(e).__name__
+            return None
+
+    def fetch_rank(self):
+        data = self._post('/v3/public/future/leaderboard/getLeaderboardRank', {
+            'isShared': True, 'isTrader': False,
+            'periodType': self.cfg.get('lb_period', 'WEEKLY'),
+            'statisticsType': self.cfg.get('lb_stat', 'ROI'),
+            'tradeType': 'PERPETUAL',
+        })
+        if not data:
+            return []
+        # 응답이 리스트이거나 {'coinRankList'|'accountRankList':[...]}
+        if isinstance(data, dict):
+            data = (data.get('accountRankList') or data.get('coinRankList')
+                    or data.get('rankList') or [])
+        out = []
+        for t in data:
+            uid = t.get('encryptedUid')
+            if not uid:
+                continue
+            out.append({
+                'uid': uid,
+                'nick': t.get('nickName') or uid[:8],
+                'roi': _f(t.get('roi')) * (100 if abs(_f(t.get('roi'))) < 5 else 1),
+                'pnl': _f(t.get('pnl')),
+                'rank': t.get('rank') or (len(out) + 1),
+            })
+        return out
+
+    def fetch_positions(self, uid):
+        data = self._post('/v1/public/future/leaderboard/getOtherPosition',
+                          {'encryptedUid': uid, 'tradeType': 'PERPETUAL'})
+        if not data:
+            return None      # None = 조회실패/비공개
+        lst = data.get('otherPositionRetList') if isinstance(data, dict) else None
+        if lst is None:
+            return []
+        out = []
+        for p in lst:
+            amt = _f(p.get('amount'))
+            if amt == 0:
+                continue
+            out.append({
+                'symbol': p.get('symbol', ''),
+                'side': 'long' if amt > 0 else 'short',
+                'entry': _f(p.get('entryPrice')),
+                'mark': _f(p.get('markPrice')),
+                'pnl': _f(p.get('pnl')),
+                'roe': _f(p.get('roe')) * 100,   # roe는 소수(0.05=5%)로 옴
+                'lev': _f(p.get('leverage')),
+            })
+        return out
+
+    # ---------- 승률 관찰 ----------
+    def _observe_closes(self, uid, nick, cur_positions):
+        """이전에 있던 포지션이 사라지거나 방향이 바뀌면 '청산'으로 보고 승/패 집계"""
+        prev = self.prev_pos.get(uid, {})
+        cur = {p['symbol']: p for p in cur_positions}
+        st = self.stats.setdefault(uid, {'nick': nick, 'wins': 0, 'losses': 0})
+        st['nick'] = nick
+        changed = False
+        for sym, pp in prev.items():
+            cp = cur.get(sym)
+            if cp is None or cp['side'] != pp['side']:
+                # 청산됨(또는 반대전환) → 마지막 평가손익 부호로 승패
+                if pp.get('pnl', 0) >= 0:
+                    st['wins'] += 1
+                else:
+                    st['losses'] += 1
+                changed = True
+        self.prev_pos[uid] = {p['symbol']: {'side': p['side'], 'pnl': p['pnl'],
+                                            'roe': p['roe']} for p in cur_positions}
+        if changed:
+            self._save_stats()
+
+    def winrate(self, uid):
+        st = self.stats.get(uid)
+        if not st:
+            return None, 0
+        n = st['wins'] + st['losses']
+        if n == 0:
+            return None, 0
+        return st['wins'] / n * 100, n
+
+    # ---------- 루프 ----------
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self.running = False
+
+    def _loop(self):
+        self.log("🏆 리더보드 트레이더 추적 시작 "
+                 f"({self.cfg.get('lb_period')} / {self.cfg.get('lb_stat')} / "
+                 f"상위 {self.cfg.get('lb_top')}명)")
+        first = True
+        while self.running:
+            try:
+                rank = self.fetch_rank()
+                if not rank:
+                    if first:
+                        self.log(f"⚠️ 리더보드 조회 실패({self.last_error or '응답없음'}). "
+                                 "네트워크/지역 제한일 수 있습니다.")
+                    time.sleep(max(10, int(self.cfg.get('lb_poll_sec', 30))))
+                    first = False
+                    continue
+                top = rank[:int(self.cfg.get('lb_top', 10))]
+                built = []
+                for t in top:
+                    if not self.running:
+                        break
+                    positions = self.fetch_positions(t['uid'])
+                    if positions is not None:
+                        self._observe_closes(t['uid'], t['nick'], positions)
+                    wr, n = self.winrate(t['uid'])
+                    built.append({**t, 'positions': positions or [],
+                                  'winrate': wr, 'obs': n,
+                                  'shared': positions is not None})
+                    time.sleep(0.3)   # 요청 간 간격(레이트리밋 완화)
+                with self.lock:
+                    self.traders = built
+                if first:
+                    self.log(f"🏆 리더보드 {len(built)}명 추적 중 "
+                             "(포지션·ROI·관찰승률 표시)")
+                first = False
+            except Exception as e:
+                self.log(f"⚠️ 리더보드 루프 오류: {e}")
+            for _ in range(max(5, int(self.cfg.get('lb_poll_sec', 30)))):
+                if not self.running:
+                    break
+                time.sleep(1)
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.traders)
+
+
+def _f(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ==================== 트레이딩 봇 ====================
 class WhaleBot:
     def __init__(self, cfg, log, status_cb):
         self.cfg, self.log, self.status_cb = cfg, log, status_cb
         self.api = BinanceFutures(cfg['api_key'], cfg['api_secret'],
                                   cfg['testnet'], log)
-        self.stream = WhaleStream(self._symbols(), cfg['whale_usd'],
-                                  cfg['window_sec'], log)
+        syms = self._symbols()
+        self.stream = WhaleStream(
+            syms,
+            {s: self.pcfg(s, 'whale_usd') for s in syms},
+            {s: self.cfg['window_sec'] for s in syms},   # 창은 공통(원하면 코인별 확장 가능)
+            log)
+        self.lb = LeaderboardTracker(cfg, log) if cfg.get('lb_enable') else None
         self.running = False
-        self.state = {}         # 심볼별 상태 표시용
-        self.cooldown = {}      # 심볼별 재진입 가능 시각
+        self.state = {}
+        self.cooldown = {}
+
+    # 코인별 설정 조회 (per_coin 우선, 없으면 공통 기본값)
+    def pcfg(self, sym, key):
+        ov = self.cfg.get('per_coin', {}).get(sym, {})
+        v = ov.get(key)
+        if v not in (None, ''):
+            return v
+        return self.cfg[key]
 
     def start(self):
         self.running = True
         self.stream.start()
+        if self.lb:
+            self.lb.start()
         threading.Thread(target=self._loop, daemon=True).start()
 
     def stop(self):
         self.running = False
         self.stream.stop()
+        if self.lb:
+            self.lb.stop()
 
     def _symbols(self):
         return [s.strip().upper() for s in self.cfg['symbols'].split(',') if s.strip()]
@@ -385,12 +607,13 @@ class WhaleBot:
         mode = "테스트넷(모의)" if self.cfg['testnet'] else "🔴 실거래"
         self.log("=" * 48)
         self.log(f"🐋 고래 추종 봇 시작 | {mode}")
-        self.log(f"   코인: {', '.join(self._symbols())}")
-        self.log(f"   고래기준 ${self.cfg['whale_usd']:,.0f} | 창 {self.cfg['window_sec']}초 | "
-                 f"진입임계 ${self.cfg['net_usd']:,.0f}")
-        self.log(f"   진입금 {self.cfg['amount']} USDT × {self.cfg['leverage']}배 | "
-                 f"익절 {self.cfg['tp_pct']}% | 손절 {self.cfg['sl_pct']}% | "
-                 f"숏 {'허용' if self.cfg['allow_short'] else '금지'}")
+        for sym in self._symbols():
+            self.log(f"   · {sym}: 고래≥${self.pcfg(sym,'whale_usd'):,.0f} "
+                     f"진입임계 ${self.pcfg(sym,'net_usd'):,.0f} "
+                     f"진입금 {self.pcfg(sym,'amount')}×{int(self.pcfg(sym,'leverage'))} "
+                     f"TP {self.pcfg(sym,'tp_pct')}% SL {self.pcfg(sym,'sl_pct')}%")
+        self.log(f"   창 {self.cfg['window_sec']}초 | 숏 {'허용' if self.cfg['allow_short'] else '금지'}"
+                 f" | 반대신호청산 {'ON' if self.cfg['reverse_exit'] else 'OFF'}")
         bal = self.api.balance()
         self.log(f"   잔고: {bal:,.2f} USDT")
         self.log("=" * 48)
@@ -411,41 +634,34 @@ class WhaleBot:
         net, buy, sell, cnt = self.stream.net_flow(sym)
         price = self.stream.price(sym)
         st = self.state.setdefault(sym, {})
-        st['price'] = price
-        st['net'] = net
-        st['buy'] = buy
-        st['sell'] = sell
-        st['cnt'] = cnt
+        st.update(price=price, net=net, buy=buy, sell=sell, cnt=cnt)
 
         pos = self.api.position(sym)
-        net_usd = float(self.cfg['net_usd'])
+        net_usd = float(self.pcfg(sym, 'net_usd'))
 
-        # ---------- 포지션 보유 중 ----------
+        # ---------- 보유 중 ----------
         if pos:
             st['pos'] = True
             st['pside'] = pos['side']
             st['entry'] = pos['entry']
             st['pnl'] = pos['pnl']
-            st['roi'] = (pos['pnl'] / (self.cfg['amount'] or 1)) * 100
+            st['roi'] = (pos['pnl'] / (float(self.pcfg(sym, 'amount')) or 1)) * 100
             st['sig'] = f"📈 {pos['side'].upper()} 보유"
-
-            # 고래 반대신호 청산
             if self.cfg['reverse_exit']:
                 if pos['side'] == 'long' and net <= -net_usd:
-                    self.log(f"🔄 [{sym}] 롱 보유 중 고래 순매도 ${-net:,.0f} 감지 → 청산")
+                    self.log(f"🔄 [{sym}] 롱 보유 중 고래 순매도 ${-net:,.0f} → 청산")
                     self._close(sym, pos)
                 elif pos['side'] == 'short' and net >= net_usd:
-                    self.log(f"🔄 [{sym}] 숏 보유 중 고래 순매수 ${net:,.0f} 감지 → 청산")
+                    self.log(f"🔄 [{sym}] 숏 보유 중 고래 순매수 ${net:,.0f} → 청산")
                     self._close(sym, pos)
             return
 
-        # ---------- 방금 청산됨 감지 ----------
+        # ---------- 방금 청산됨 ----------
         if pos is False and st.get('pos'):
             self.log(f"✅ [{sym}] 포지션 청산 완료 (거래소 TP/SL 체결)")
-            self.api.cancel_all(sym)     # 남은 반대편 주문 정리
-            st.pop('entry', None)
-            st.pop('roi', None)
-            st.pop('pside', None)
+            self.api.cancel_all(sym)
+            for k in ('entry', 'roi', 'pside'):
+                st.pop(k, None)
             self.cooldown[sym] = time.time() + float(self.cfg['cooldown_sec'])
         st['pos'] = False
 
@@ -454,8 +670,7 @@ class WhaleBot:
             st['sig'] = '스트림 연결중…'
             return
         if time.time() < self.cooldown.get(sym, 0):
-            remain = int(self.cooldown[sym] - time.time())
-            st['sig'] = f'쿨다운 {remain}s'
+            st['sig'] = f"쿨다운 {int(self.cooldown[sym]-time.time())}s"
             return
         if price <= 0:
             st['sig'] = '체결 대기중'
@@ -477,13 +692,17 @@ class WhaleBot:
             st['sig'] = '대기중'
 
     def _enter(self, sym, direction, price):
+        amount = float(self.pcfg(sym, 'amount'))
+        lev = int(self.pcfg(sym, 'leverage'))
+        tp_pct = float(self.pcfg(sym, 'tp_pct'))
+        sl_pct = float(self.pcfg(sym, 'sl_pct'))
         arrow = '🟢 롱' if direction == 'long' else '🔴 숏'
         self.log(f"{arrow} [{sym}] 고래 순흐름 감지! 진입 시도 (기준가 {price:,.4f})")
         self.api.cancel_all(sym)
         self.api.set_isolated(sym)
-        self.api.set_leverage(sym, int(self.cfg['leverage']))
+        self.api.set_leverage(sym, lev)
 
-        raw_qty = self.cfg['amount'] * self.cfg['leverage'] / price
+        raw_qty = amount * lev / price
         qty_str, qty, min_qty, min_notional = self.api.fmt_qty(sym, raw_qty)
         if qty < min_qty or qty * price < min_notional:
             self.log(f"❌ [{sym}] 주문금액 부족 (수량 {qty}, 최소 {min_qty} / "
@@ -499,14 +718,13 @@ class WhaleBot:
         fill = float(order.get('avgPrice') or 0) or price
         self.log(f"✅ [{sym}] {direction.upper()} 진입 완료! 체결가 {fill:,.4f} | 수량 {qty_str}")
 
-        # 거래소 TP/SL (프로그램 꺼져도 유지)
         close_side = 'SELL' if direction == 'long' else 'BUY'
         if direction == 'long':
-            tp = self.api.fmt_price(sym, fill * (1 + self.cfg['tp_pct'] / 100))
-            sl = self.api.fmt_price(sym, fill * (1 - self.cfg['sl_pct'] / 100))
+            tp = self.api.fmt_price(sym, fill * (1 + tp_pct / 100))
+            sl = self.api.fmt_price(sym, fill * (1 - sl_pct / 100))
         else:
-            tp = self.api.fmt_price(sym, fill * (1 - self.cfg['tp_pct'] / 100))
-            sl = self.api.fmt_price(sym, fill * (1 + self.cfg['sl_pct'] / 100))
+            tp = self.api.fmt_price(sym, fill * (1 - tp_pct / 100))
+            sl = self.api.fmt_price(sym, fill * (1 + sl_pct / 100))
         ok_tp = self.api.place_tp(sym, close_side, tp)
         ok_sl = self.api.place_sl(sym, close_side, sl)
         self.log(f"   🎯 익절 {tp} ({'등록' if ok_tp else '실패'})"
@@ -517,33 +735,31 @@ class WhaleBot:
         st = self.state.setdefault(sym, {})
         st['pos'] = True
         st['pside'] = direction
-        self._record(sym, direction, fill, qty, tp, sl)
+        self._record(sym, direction, fill, qty, tp, sl, amount, lev)
 
     def _close(self, sym, pos):
         close_side = 'SELL' if pos['side'] == 'long' else 'BUY'
         qty_str, _, _, _ = self.api.fmt_qty(sym, abs(pos['amt']))
-        self.api.cancel_all(sym)     # 거래소 TP/SL 취소
+        self.api.cancel_all(sym)
         r = self.api.close_market(sym, close_side, qty_str)
-        self.log(f"{'✅' if r else '❌'} [{sym}] 반대신호 청산 "
-                 f"(손익 {pos['pnl']:+.2f} USDT)")
+        self.log(f"{'✅' if r else '❌'} [{sym}] 반대신호 청산 (손익 {pos['pnl']:+.2f} USDT)")
         st = self.state.setdefault(sym, {})
         st['pos'] = False
         st.pop('pside', None)
         self.cooldown[sym] = time.time() + float(self.cfg['cooldown_sec'])
 
-    def _record(self, sym, direction, price, qty, tp, sl):
+    def _record(self, sym, direction, price, qty, tp, sl, amount, lev):
         try:
             new = not os.path.exists(TRADE_LOG_CSV)
             with open(TRADE_LOG_CSV, 'a', encoding='utf-8-sig') as f:
                 if new:
                     f.write('시각,코인,방향,진입가,수량,익절가,손절가,진입금,레버리지\n')
                 f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{sym},{direction},{price},"
-                        f"{qty},{tp},{sl},{self.cfg['amount']},{self.cfg['leverage']}\n")
+                        f"{qty},{tp},{sl},{amount},{lev}\n")
         except Exception:
             pass
 
     def close_all(self):
-        """모든 포지션 즉시 시장가 청산"""
         for sym in self._symbols():
             pos = self.api.position(sym)
             if pos:
@@ -562,8 +778,8 @@ def launch_gui():
     bot = [None]
 
     root = tk.Tk()
-    root.title("🐋 고래 추종 자동매매 봇 (실시간 대형체결 추종)")
-    root.geometry("1120x780")
+    root.title("🐋 고래 추종 봇 + 🏆 리더보드 트레이더 추적")
+    root.geometry("1240x820")
     root.configure(bg=BG)
 
     banner = tk.Label(root, text="", font=('Arial', 10, 'bold'))
@@ -579,24 +795,24 @@ def launch_gui():
 
     left = tk.Frame(root, bg=PANEL)
     left.pack(side='left', fill='y', padx=8, pady=8)
-    tk.Label(left, text="⚙️ 설정", bg=PANEL, fg=ACC,
-             font=('Arial', 12, 'bold')).pack(pady=(8, 4))
+    tk.Label(left, text="⚙️ 공통 설정 (코인별 미지정 시)", bg=PANEL, fg=ACC,
+             font=('Arial', 11, 'bold')).pack(pady=(8, 4))
 
     vars_ = {}
     form = tk.Frame(left, bg=PANEL)
     form.pack(padx=10)
     rows = [
-        ('API Key', 'api_key', 26), ('API Secret', 'api_secret', 26),
-        ('코인 (쉼표로 구분)', 'symbols', 26),
-        ('고래 기준금액 ($)', 'whale_usd', 14),
-        ('집계 창 (초)', 'window_sec', 14),
-        ('진입 임계금액 ($)', 'net_usd', 14),
-        ('진입금 (USDT)', 'amount', 14),
-        ('레버리지 (배)', 'leverage', 14),
-        ('익절 TP %', 'tp_pct', 14),
-        ('손절 SL %', 'sl_pct', 14),
-        ('재진입 쿨다운 (초)', 'cooldown_sec', 14),
-        ('최대 포지션 수', 'max_positions', 14),
+        ('API Key', 'api_key', 24), ('API Secret', 'api_secret', 24),
+        ('코인 (쉼표로 구분)', 'symbols', 24),
+        ('고래 기준금액 ($)', 'whale_usd', 13),
+        ('집계 창 (초)', 'window_sec', 13),
+        ('진입 임계금액 ($)', 'net_usd', 13),
+        ('진입금 (USDT)', 'amount', 13),
+        ('레버리지 (배)', 'leverage', 13),
+        ('익절 TP %', 'tp_pct', 13),
+        ('손절 SL %', 'sl_pct', 13),
+        ('재진입 쿨다운 (초)', 'cooldown_sec', 13),
+        ('최대 포지션 수', 'max_positions', 13),
     ]
     for r, (label, key, w) in enumerate(rows):
         tk.Label(form, text=label, bg=PANEL, fg=FG, font=('Arial', 9),
@@ -608,30 +824,46 @@ def launch_gui():
         vars_[key] = v
 
     allow_short_var = tk.BooleanVar(value=cfg['allow_short'])
-    tk.Checkbutton(left, text="숏 진입 허용", variable=allow_short_var,
-                   bg=PANEL, fg='#ffaa00', selectcolor=BG, activebackground=PANEL,
-                   font=('Arial', 10)).pack(anchor='w', padx=10, pady=(6, 0))
-
     reverse_exit_var = tk.BooleanVar(value=cfg['reverse_exit'])
-    tk.Checkbutton(left, text="고래 반대신호 시 청산", variable=reverse_exit_var,
-                   bg=PANEL, fg='#ffaa00', selectcolor=BG, activebackground=PANEL,
-                   font=('Arial', 10)).pack(anchor='w', padx=10)
-
+    lb_enable_var = tk.BooleanVar(value=cfg['lb_enable'])
     testnet_var = tk.BooleanVar(value=cfg['testnet'])
+
+    for text, var, fg in [("숏 진입 허용", allow_short_var, '#ffaa00'),
+                          ("고래 반대신호 시 청산", reverse_exit_var, '#ffaa00'),
+                          ("리더보드 트레이더 추적", lb_enable_var, '#00ccff')]:
+        tk.Checkbutton(left, text=text, variable=var, bg=PANEL, fg=fg,
+                       selectcolor=BG, activebackground=PANEL,
+                       font=('Arial', 10)).pack(anchor='w', padx=10, pady=(4, 0))
+
     tk.Checkbutton(left, text="테스트넷(모의거래) 사용", variable=testnet_var,
                    bg=PANEL, fg='#00ffff', selectcolor=BG, activebackground=PANEL,
                    font=('Arial', 10, 'bold'),
                    command=lambda: (cfg.update(testnet=testnet_var.get()),
                                     paint_banner())).pack(anchor='w', padx=10, pady=6)
 
-    tk.Label(left, text="※ 진입 로직 (자동)", bg=PANEL, fg='#ffaa00',
-             font=('Arial', 9, 'bold')).pack(anchor='w', padx=10)
-    for t in ["  · 실시간 체결(aggTrade) 구독",
-              "  · 단일 체결 ≥ 고래기준 = '고래'",
-              "  · 창(초) 내 순매수-순매도 = 순흐름",
-              "  · 순흐름 ≥ 임계 → 롱 / ≤ -임계 → 숏"]:
-        tk.Label(left, text=t, bg=PANEL, fg='#888888',
-                 font=('Arial', 8)).pack(anchor='w', padx=10)
+    # 리더보드 옵션 (period/stat/top/poll)
+    lbf = tk.Frame(left, bg=PANEL)
+    lbf.pack(padx=10, anchor='w')
+    tk.Label(lbf, text='리더보드 기간', bg=PANEL, fg=FG,
+             font=('Arial', 9)).grid(row=0, column=0, sticky='w')
+    lb_period_var = tk.StringVar(value=cfg['lb_period'])
+    ttk.Combobox(lbf, textvariable=lb_period_var, width=10, state='readonly',
+                 values=['DAILY', 'WEEKLY', 'MONTHLY', 'ALL']).grid(row=0, column=1, pady=2)
+    tk.Label(lbf, text='정렬 기준', bg=PANEL, fg=FG,
+             font=('Arial', 9)).grid(row=1, column=0, sticky='w')
+    lb_stat_var = tk.StringVar(value=cfg['lb_stat'])
+    ttk.Combobox(lbf, textvariable=lb_stat_var, width=10, state='readonly',
+                 values=['ROI', 'PNL']).grid(row=1, column=1, pady=2)
+    tk.Label(lbf, text='추적 인원', bg=PANEL, fg=FG,
+             font=('Arial', 9)).grid(row=2, column=0, sticky='w')
+    lb_top_var = tk.StringVar(value=str(cfg['lb_top']))
+    tk.Entry(lbf, textvariable=lb_top_var, width=12,
+             font=('Arial', 9)).grid(row=2, column=1, pady=2)
+    tk.Label(lbf, text='갱신주기(초)', bg=PANEL, fg=FG,
+             font=('Arial', 9)).grid(row=3, column=0, sticky='w')
+    lb_poll_var = tk.StringVar(value=str(cfg['lb_poll_sec']))
+    tk.Entry(lbf, textvariable=lb_poll_var, width=12,
+             font=('Arial', 9)).grid(row=3, column=1, pady=2)
 
     def collect():
         c = dict(cfg)
@@ -649,10 +881,80 @@ def launch_gui():
         c['testnet'] = testnet_var.get()
         c['allow_short'] = allow_short_var.get()
         c['reverse_exit'] = reverse_exit_var.get()
+        c['lb_enable'] = lb_enable_var.get()
+        c['lb_period'] = lb_period_var.get()
+        c['lb_stat'] = lb_stat_var.get()
+        try:
+            c['lb_top'] = int(float(lb_top_var.get()))
+        except ValueError:
+            c['lb_top'] = DEFAULTS['lb_top']
+        try:
+            c['lb_poll_sec'] = int(float(lb_poll_var.get()))
+        except ValueError:
+            c['lb_poll_sec'] = DEFAULTS['lb_poll_sec']
+        c['per_coin'] = cfg.get('per_coin', {})
         return c
 
     def gui_log(m):
         log_q.put(str(m))
+
+    # ---------- 코인별 설정 편집 팝업 ----------
+    def open_per_coin():
+        syms = [s.strip().upper() for s in vars_['symbols'].get().split(',') if s.strip()]
+        if not syms:
+            messagebox.showinfo("코인별 설정", "먼저 코인을 입력하세요.")
+            return
+        top = tk.Toplevel(root)
+        top.title("🪙 코인별 개별 설정 (비우면 공통값 사용)")
+        top.configure(bg=BG)
+        top.geometry("720x360")
+        hdr = ['코인'] + list(PER_COIN_KEYS)
+        labels = ['코인', '고래기준$', '진입임계$', '진입금', '레버리지', 'TP%', 'SL%']
+        for j, lab in enumerate(labels):
+            tk.Label(top, text=lab, bg=BG, fg=ACC, font=('Arial', 9, 'bold'),
+                     width=11).grid(row=0, column=j, padx=2, pady=4)
+        cell_vars = {}
+        pc = cfg.get('per_coin', {})
+        for i, sym in enumerate(syms, start=1):
+            tk.Label(top, text=sym, bg=BG, fg=FG,
+                     font=('Arial', 9, 'bold')).grid(row=i, column=0, padx=2, pady=2)
+            ov = pc.get(sym, {})
+            for j, key in enumerate(PER_COIN_KEYS, start=1):
+                val = ov.get(key, '')
+                sv = tk.StringVar(value='' if val in (None, '') else str(val))
+                tk.Entry(top, textvariable=sv, width=11,
+                         font=('Arial', 9)).grid(row=i, column=j, padx=2, pady=2)
+                cell_vars[(sym, key)] = sv
+        tk.Label(top, text="※ 칸을 비우면 왼쪽 공통 설정값이 적용됩니다.",
+                 bg=BG, fg='#888888', font=('Arial', 8)).grid(
+            row=len(syms) + 1, column=0, columnspan=7, pady=6)
+
+        def save_pc():
+            newpc = {}
+            for sym in syms:
+                d = {}
+                for key in PER_COIN_KEYS:
+                    raw = cell_vars[(sym, key)].get().strip()
+                    if raw == '':
+                        continue
+                    try:
+                        d[key] = int(float(raw)) if key == 'leverage' else float(raw)
+                    except ValueError:
+                        pass
+                if d:
+                    newpc[sym] = d
+            cfg['per_coin'] = newpc
+            save_settings(collect())
+            gui_log(f"🪙 코인별 설정 저장: {', '.join(newpc.keys()) or '(모두 공통값)'}")
+            top.destroy()
+
+        tk.Button(top, text="💾 저장", command=save_pc, bg='#00aa00', fg='#fff',
+                  font=('Arial', 10, 'bold'), padx=12, pady=4).grid(
+            row=len(syms) + 2, column=0, columnspan=7, pady=8)
+
+    tk.Button(left, text="🪙 코인별 개별 설정…", command=open_per_coin,
+              bg='#334455', fg='#fff', font=('Arial', 10, 'bold'),
+              padx=10, pady=4).pack(pady=(8, 0))
 
     def start():
         c = collect()
@@ -694,14 +996,17 @@ def launch_gui():
     tk.Button(left, text="🛑 전체 청산", command=close_all, bg='#cc4400', fg='#fff',
               font=('Arial', 10, 'bold'), padx=10, pady=4).pack()
 
-    # ---------- 우측: 상태 + 로그 ----------
+    # ---------- 우측: 탭 (고래 흐름 / 리더보드) + 로그 ----------
     right = tk.Frame(root, bg=BG)
     right.pack(side='left', fill='both', expand=True, padx=(0, 8), pady=8)
-    tk.Label(right, text="📊 코인별 고래 흐름", bg=BG, fg=ACC,
-             font=('Arial', 12, 'bold')).pack(anchor='w')
 
-    cols = ['코인', '상태', '현재가', '순흐름($)', '매수($)', '매도($)',
-            '고래수', '진입가', '손익', 'ROI%']
+    nb = ttk.Notebook(right)
+    nb.pack(fill='both', expand=True)
+    tab_flow = tk.Frame(nb, bg=BG)
+    tab_lb = tk.Frame(nb, bg=BG)
+    nb.add(tab_flow, text='  🐋 고래 흐름 · 내 포지션  ')
+    nb.add(tab_lb, text='  🏆 리더보드 트레이더  ')
+
     style = ttk.Style()
     try:
         style.theme_use('clam')
@@ -710,30 +1015,53 @@ def launch_gui():
         style.configure('Treeview.Heading', background='#3d3d3d', foreground=FG)
     except Exception:
         pass
-    tree = ttk.Treeview(right, columns=cols, show='headings', height=9)
+
+    # 탭1: 고래 흐름
+    cols = ['코인', '상태', '현재가', '순흐름($)', '매수($)', '매도($)',
+            '고래수', '진입가', '손익', 'ROI%']
+    tree = ttk.Treeview(tab_flow, columns=cols, show='headings', height=10)
     for c in cols:
         tree.heading(c, text=c)
         tree.column(c, width=95 if c in ('순흐름($)', '매수($)', '매도($)') else 72,
                     anchor='center')
     tree.column('상태', width=120)
-    tree.pack(fill='x')
+    tree.pack(fill='both', expand=True)
 
+    # 탭2: 리더보드 (부모=트레이더, 자식=포지션)
+    lb_cols = ['ROI%/방향', '누적손익/진입가', '관찰승률/ROE%', '관찰수/평가손익', '레버리지']
+    lb_tree = ttk.Treeview(tab_lb, columns=lb_cols, show='tree headings', height=14)
+    lb_tree.heading('#0', text='순위 · 트레이더 / ↳ 포지션')
+    lb_tree.column('#0', width=240, anchor='w')
+    for c in lb_cols:
+        lb_tree.heading(c, text=c)
+        lb_tree.column(c, width=120, anchor='center')
+    lb_tree.tag_configure('long', foreground='#00ff88')
+    lb_tree.tag_configure('short', foreground='#ff6666')
+    lb_tree.tag_configure('trader', foreground=FG)
+    lb_tree.pack(fill='both', expand=True)
+    tk.Label(tab_lb, text="↳ 자식행 = 그 트레이더의 현재 공개 포지션 (어떻게 진입했는지) · "
+             "승률은 이 프로그램이 청산을 관찰한 만큼만 집계",
+             bg=BG, fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=4, pady=(2, 0))
+
+    # 로그
     tk.Label(right, text="📋 로그", bg=BG, fg=ACC,
              font=('Arial', 11, 'bold')).pack(anchor='w', pady=(8, 0))
     lf = tk.Frame(right, bg=BG)
     lf.pack(fill='both', expand=True)
     sb = tk.Scrollbar(lf)
     sb.pack(side='right', fill='y')
-    log_text = tk.Text(lf, bg='#141414', fg='#ccc', font=('Consolas', 9),
+    log_text = tk.Text(lf, bg='#141414', fg='#ccc', font=('Consolas', 9), height=8,
                        yscrollcommand=sb.set, wrap='word')
     log_text.pack(side='left', fill='both', expand=True)
     sb.config(command=log_text.yview)
 
     def refresh_status():
-        pass  # 실제 갱신은 poll에서 (스레드 안전)
+        pass
 
-    def _fmt_usd(v):
+    def _usd(v):
         return f"{v:+,.0f}" if v else '0'
+
+    lb_open = set()   # 펼쳐둔 트레이더 uid 기억
 
     def poll():
         try:
@@ -745,30 +1073,63 @@ def launch_gui():
                     log_text.delete('1.0', '100.0')
         except queue.Empty:
             pass
+
         if bot[0]:
+            # 탭1 갱신
             for i in tree.get_children():
                 tree.delete(i)
             for sym in bot[0]._symbols():
                 st = bot[0].state.get(sym, {})
                 tree.insert('', 'end', values=[
-                    sym,
-                    st.get('sig', '-'),
+                    sym, st.get('sig', '-'),
                     f"{st.get('price', 0):,.4f}" if st.get('price') else '-',
-                    _fmt_usd(st.get('net', 0)),
-                    f"{st.get('buy', 0):,.0f}",
-                    f"{st.get('sell', 0):,.0f}",
+                    _usd(st.get('net', 0)),
+                    f"{st.get('buy', 0):,.0f}", f"{st.get('sell', 0):,.0f}",
                     st.get('cnt', 0),
                     f"{st.get('entry', 0):,.4f}" if st.get('entry') else '-',
                     f"{st.get('pnl', 0):+.2f}" if st.get('pos') else '-',
                     f"{st.get('roi', 0):+.2f}%" if st.get('pos') else '-',
                 ])
-        root.after(1000, poll)
+
+            # 탭2 갱신 (리더보드)
+            if bot[0].lb:
+                # 펼침 상태 저장
+                for iid in lb_tree.get_children():
+                    uid = lb_tree.item(iid, 'tags')
+                    if uid and lb_tree.item(iid, 'open'):
+                        lb_open.add(iid)
+                    elif iid in lb_open and not lb_tree.item(iid, 'open'):
+                        lb_open.discard(iid)
+                for i in lb_tree.get_children():
+                    lb_tree.delete(i)
+                for t in bot[0].lb.snapshot():
+                    uid = t['uid']
+                    wr = t.get('winrate')
+                    wr_txt = f"{wr:.0f}% ({t.get('obs',0)})" if wr is not None else f"관찰중({t.get('obs',0)})"
+                    shared = '' if t.get('shared') else ' 🔒'
+                    parent = lb_tree.insert(
+                        '', 'end', iid=uid, open=(uid in lb_open),
+                        text=f"{t.get('rank','?')}. {t['nick']}{shared}",
+                        tags=('trader',),
+                        values=[f"ROI {t.get('roi',0):+.1f}%",
+                                f"손익 {t.get('pnl',0):+,.0f}",
+                                f"승률 {wr_txt}",
+                                f"{len(t.get('positions',[]))}개 포지션", ''])
+                    for p in t.get('positions', []):
+                        side_txt = '🟢롱' if p['side'] == 'long' else '🔴숏'
+                        lb_tree.insert(
+                            parent, 'end',
+                            text=f"   ↳ {p['symbol']}",
+                            tags=(p['side'],),
+                            values=[side_txt, f"진입 {p['entry']:,.4f}",
+                                    f"ROE {p['roe']:+.1f}%",
+                                    f"{p['pnl']:+,.0f}", f"{p['lev']:.0f}x"])
+        root.after(1500, poll)
 
     paint_banner()
     gui_log("✅ 준비 완료. API 키 확인 후 [▶️ 시작]을 누르세요.")
-    gui_log(f"   고래기준 ${cfg['whale_usd']:,.0f} | 창 {cfg['window_sec']}초 | "
-            f"진입임계 ${cfg['net_usd']:,.0f}")
-    gui_log("   ⚠️ 임계금액이 낮으면 잦은 진입, 높으면 신호가 드물어집니다. 코인별로 조절하세요.")
+    gui_log("   🪙 코인마다 기준이 다르면 [코인별 개별 설정]에서 따로 지정하세요.")
+    gui_log("   🏆 [리더보드 트레이더] 탭에서 실명 고래의 포지션/ROI/관찰승률을 확인하세요.")
     poll()
     root.protocol("WM_DELETE_WINDOW", lambda: (stop(), save_settings(collect()),
                                                root.destroy()))
