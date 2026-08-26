@@ -2097,12 +2097,29 @@ IMAGE_SOURCE_DUR_US = 10_800_000_000   # 이미지 material의 소스 길이 (3�
 DEFAULT_IMAGE_DUR_SEC = 3.0            # 이미지 1장 타임라인 기본 노출 시간
 
 
+def get_image_size(path: Path) -> tuple[int, int] | None:
+    """이미지의 실제 픽셀 크기 (PIL로 직접 읽음). 실패하면 None."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            w, h = im.size
+        if w and h and w > 0 and h > 0:
+            return int(w), int(h)
+    except Exception:
+        pass
+    return None
+
+
 def get_media_info(path: Path) -> tuple[int, int, float | None, bool]:
     """(width, height, duration_sec|None, is_image). 이미지는 duration None."""
     is_image = path.suffix.lower() in IMAGE_EXTS
-    w, h = get_video_resolution(path)
     if is_image:
+        # 이미지는 PIL로 실제 크기를 읽는다. ffprobe가 크기를 못 읽어 1920x1080으로
+        # 잘못 잡히면, 캡컷이 그 비율로 이미지를 찌그러뜨리기 때문(모서리로 줄여도 유지).
+        sz = get_image_size(path)
+        w, h = sz if sz else get_video_resolution(path)
         return w, h, None, True
+    w, h = get_video_resolution(path)
     try:
         dur = get_video_duration(path)
     except Exception:
