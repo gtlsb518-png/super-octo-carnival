@@ -1798,7 +1798,7 @@ def get_video_resolution(video_path: Path) -> tuple[int, int]:
 #   세로(숏츠)는 폭이 좁아 짧게, 가로(롱폼)는 폭이 넓어 길게 잡는다.
 #   (max_sub_chars 를 0 이하로 주면 이 값을 자동으로 쓴다)
 CANVAS_PRESETS = {
-    "9:16":  {"width": 1080, "height": 1920, "subtitle_y": -0.35,   "sub_chars": 12},  # 숏츠 (기본)
+    "9:16":  {"width": 1080, "height": 1920, "subtitle_y": -0.80,   "sub_chars": 12},  # 숏츠 (기본, 자막 하단)
     "16:9":  {"width": 1920, "height": 1080, "subtitle_y": -0.6907, "sub_chars": 20},  # 가로
 }
 
