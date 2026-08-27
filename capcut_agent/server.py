@@ -1445,45 +1445,6 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     return _rebalance_tail(groups, hard + 2)
 
 
-def _sub_norm(text: str) -> str:
-    """자막 비교용: 한글/영숫자만 남기고 소문자화 (공백·문장부호 무시)."""
-    return re.sub(r"[^0-9a-z가-힣]", "", text.lower())
-
-
-# 끝음절 메아리로 볼 수 있는 최대 글자 수 (문장부호 제외). '야','지','어' 또는 '거야' 등
-ECHO_MAX_CHARS = 2
-
-
-def absorb_final_syllable_echo(chunks: list[dict]) -> list[dict]:
-    """
-    길게 끄는 '끝음절 메아리'를 앞 자막에 흡수한다.
-
-    영상에서 "~한거야~~~" 처럼 마지막 음을 길게 끌면, Whisper가 그 끝음절('야')을
-    별도 조각으로 다시 내놓아 같은 소리가 짧게 한 번 더 뜨는 일이 있다.
-    앞 자막이 바로 그 글자로 '끝나면' 이건 메아리이므로, 앞 자막의 끝시간만
-    늘려 흡수한다 → 마지막 음이 길게 유지되고 그다음에 다음 자막 클립이 나온다.
-    (글자는 붙이지 않는다 — "답답했지 지" 같은 중복 방지)
-
-    ※ '놉','빵'처럼 앞 자막의 끝음절과 '다른' 짧은 말은 메아리가 아니므로
-      각각 독립된 자막 클립으로 그대로 둔다.
-    ※ 겹침 총합이 보존되므로 '자막 길이 = 클립 길이' 커버리지는 그대로 100%.
-    """
-    if len(chunks) < 2:
-        return chunks
-    out = [dict(chunks[0])]
-    for cur in chunks[1:]:
-        prev = out[-1]
-        cn, pn = _sub_norm(cur["text"]), _sub_norm(prev["text"])
-        adjacent = 0 <= cur["start_us"] - prev["end_us"] <= FRAME_US
-        is_echo = (0 < len(cn) <= ECHO_MAX_CHARS and len(cn) < len(pn)
-                   and pn.endswith(cn) and adjacent)
-        if is_echo:
-            prev["end_us"] = cur["end_us"]     # 끝음을 길게 물고 있게, 글자는 안 붙임
-            continue
-        out.append(dict(cur))
-    return out
-
-
 def subtitle_chunks_for_timeline(segments: list[dict],
                                  keep_ranges: list[tuple[float, float, int, int]],
                                  max_chars: int = MAX_SUBTITLE_CHARS,
@@ -1598,10 +1559,8 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     if stats is not None:
         stats["corrected"] = total_fixed
     # 자막은 영상 클립 경계를 지킨다(클립 2개면 자막도 2개로 끊는다).
-    # 완전 중복 자막을 합치지 않음 — 같은 말이라도 클립이 나뉘어 있으면 그대로 둔다.
-    # 단, 길게 끄는 끝음절 메아리('~야~~~'의 '야')만 앞 자막에 흡수한다.
-    # (짧은 감탄사 '놉','빵'은 끝음절과 달라 흡수되지 않고 독립 클립으로 남는다)
-    return absorb_final_syllable_echo(out)
+    # 자막 후처리(중복 합치기·끝음절 흡수)는 넣지 않는다 — 인식 결과 그대로.
+    return out
 
 
 def subtitle_coverage_report(chunks: list[dict],
