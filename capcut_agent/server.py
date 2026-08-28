@@ -49,6 +49,11 @@ _whisper_model = None
 # ══════════════════════════════════════════════════════════
 ASR_MODEL = "large-v3"
 
+# 자막 인식 속도(병렬): 클립을 동시에 몇 개씩 인식할지. 2~3 권장.
+#   결과물은 하나씩 인식한 것과 완전히 같고(클립끼리 서로 영향 없음) 속도만 빨라진다.
+ASR_WORKERS = 2
+WHISPER_SR = 16000          # Whisper 입력 샘플레이트 (오디오 한 번만 뽑아 재사용)
+
 
 def ensure_faster_whisper() -> tuple[bool, str]:
     """
@@ -192,15 +197,17 @@ def get_whisper_model():
     if _whisper_model is None:
         from faster_whisper import WhisperModel
         try:
-            _whisper_model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
-            print(f"[Whisper] GPU 로드 완료 ({ASR_MODEL})")
+            _whisper_model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16",
+                                          num_workers=ASR_WORKERS)
+            print(f"[Whisper] GPU 로드 완료 ({ASR_MODEL}, {ASR_WORKERS}개 동시)")
         except Exception:
             # ★ CPU 는 compute_type="auto" — CPU 성능에 맞는 형식을 골라준다.
             #   "int8"을 강제하면 그 명령을 지원 안 하는 CPU에서 프로그램이
             #   통째로 꺼진다(Illegal instruction). "auto"는 그런 CPU에서
             #   자동으로 float32 등으로 내려가 안 꺼진다.
             print(f"[Whisper] GPU 실패 → CPU(auto) fallback ({ASR_MODEL})")
-            _whisper_model = WhisperModel(ASR_MODEL, device="cpu", compute_type="auto")
+            _whisper_model = WhisperModel(ASR_MODEL, device="cpu", compute_type="auto",
+                                          num_workers=ASR_WORKERS)
     return _whisper_model
 
 
@@ -283,6 +290,33 @@ def extract_audio_wav(video_path: Path) -> Path | None:
     except Exception:
         return None
     return out if out.exists() and out.stat().st_size > 1000 else None
+
+
+def load_audio_16k(video_path: Path):
+    """
+    영상에서 오디오를 '딱 한 번만' 16kHz 모노로 뽑아 메모리에 올린다.
+    예전에는 클립마다 ffmpeg 를 다시 돌려 임시 wav 를 만들었는데,
+    클립이 100개면 ffmpeg 도 100번 돌아서 그만큼 느렸다. 이걸 없앤다.
+    실패하면 None (그러면 각 클립이 알아서 ffmpeg 로 잘라서 인식한다).
+    """
+    import wave
+    import numpy as np
+    wav = extract_audio_wav(video_path)
+    if not wav:
+        return None
+    try:
+        with wave.open(str(wav), "rb") as f:
+            if f.getsampwidth() != 2 or f.getframerate() != WHISPER_SR:
+                return None
+            raw = f.readframes(f.getnframes())
+        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        return None
+    finally:
+        try:
+            wav.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 AUTO_DB_CANDIDATES = [-45.0, -40.0, -35.0, -32.0, -30.0, -27.0, -25.0, -22.0]
@@ -564,7 +598,7 @@ def clean_recognized_text(text: str, script_tokens: set[str] | None = None) -> s
 
 
 def transcribe_clip_words(video_path: Path, start: float, end: float,
-                          initial_prompt: str = "") -> list[dict]:
+                          initial_prompt: str = "", audio=None) -> list[dict]:
     """
     영상의 [start, end] 구간만 잘라내 단독 인식하고, 원본 영상 기준
     '절대 시각'을 가진 단어 목록을 반환한다.
@@ -573,22 +607,34 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
     쏠려 있으면(엔지컷의 머뭇거림·헛기침 등) 자막이 실제 발화 위치와
     어긋났다. word_timestamps로 Whisper가 계산한 실제 단어별 시각을
     그대로 써서 이 문제를 없앤다.
+    audio 가 주어지면(미리 뽑아둔 16kHz 배열) 그 구간만 잘라 바로 넘긴다
+    (클립마다 ffmpeg 를 다시 돌리지 않아 훨씬 빠르다). 결과는 동일하다.
     반환: [{"start": 원본초, "end": 원본초, "word": str}, ...]
     """
     import tempfile
     model = get_whisper_model()
-    tmp = Path(tempfile.gettempdir()) / f"_capcut_clip_{uuid.uuid4().hex}.wav"
-    offset = max(start - 0.05, 0)  # ffmpeg로 잘라낸 구간의 시작 = 원본 영상에서의 오프셋
+    tmp = None
+    offset = max(start - 0.05, 0)  # 잘라낸 구간의 시작 = 원본 영상에서의 오프셋
     try:
-        cmd = ["ffmpeg", "-y", "-v", "error",
-               "-ss", f"{offset:.3f}", "-to", f"{end + 0.05:.3f}",
-               "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(tmp)]
-        subprocess.run(cmd, capture_output=True)
-        if not tmp.exists() or tmp.stat().st_size < 1500:
-            return []
+        if audio is not None:
+            # 미리 뽑아둔 오디오에서 필요한 구간만 잘라 바로 넘긴다 (ffmpeg 호출 없음)
+            i0 = int(offset * WHISPER_SR)
+            i1 = min(int((end + 0.05) * WHISPER_SR), len(audio))
+            if i1 - i0 < 800:            # 0.05초 미만이면 인식할 게 없다
+                return []
+            source = audio[i0:i1]
+        else:
+            tmp = Path(tempfile.gettempdir()) / f"_capcut_clip_{uuid.uuid4().hex}.wav"
+            cmd = ["ffmpeg", "-y", "-v", "error",
+                   "-ss", f"{offset:.3f}", "-to", f"{end + 0.05:.3f}",
+                   "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(tmp)]
+            subprocess.run(cmd, capture_output=True)
+            if not tmp.exists() or tmp.stat().st_size < 1500:
+                return []
+            source = str(tmp)
         kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
         segs, _ = model.transcribe(
-            str(tmp), language="ko", beam_size=1,
+            source, language="ko", beam_size=1,
             vad_filter=False,                  # 이미 잘라낸 구간이라 VAD 불필요
             condition_on_previous_text=False,
             no_repeat_ngram_size=3,
@@ -611,7 +657,8 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
         return []
     finally:
         try:
-            tmp.unlink()
+            if tmp is not None:
+                tmp.unlink()
         except Exception:
             pass
 
@@ -792,15 +839,24 @@ def transcribe_all_clips(video_path: Path,
     각 단어는 클립 안에서의 실제 발화 시각을 그대로 갖고 있어 자막이
     영상과 밀리지 않는다.
     """
-    segs = []
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
     total = len(keep_ranges)
-    n_halluc = 0
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
-    for i, (ks, ke, _tl_s, _tl_e) in enumerate(keep_ranges):
+    # ★ 오디오는 여기서 딱 한 번만 뽑는다 (클립마다 ffmpeg 를 다시 돌리지 않는다).
+    audio = load_audio_16k(video_path)
+    get_whisper_model()                 # 모델 로딩은 한 번만 (동시에 두 번 안 하도록)
+
+    counter = {"done": 0, "halluc": 0}
+    lock = threading.Lock()
+
+    def one_clip(item):
+        i, (ks, ke, _tl_s, _tl_e) = item
         words = []
         if ke - ks >= 0.15:
-            raw_words = transcribe_clip_words(video_path, ks, ke, script_text)
+            raw_words = transcribe_clip_words(video_path, ks, ke, script_text, audio)
             for w in raw_words:
                 # 효과음 태그·영어 환각·이모지/특수문자 제거 (단어 단위로 적용)
                 cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
@@ -815,19 +871,29 @@ def transcribe_all_clips(video_path: Path,
         words = cap_by_speech_rate(collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
         if _is_syllable_soup(words):
             words = []                  # "멘 탈 흔" → 말로 치지 않음
+        halluc = 0
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
             words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
-            n_halluc += 1
-        if words:
-            text = " ".join(w["word"] for w in words)
-        else:
-            text = NO_SPEECH_PLACEHOLDER
-        segs.append({"start": ks, "end": ke, "text": text, "words": words})
-        if progress is not None:
-            progress["done"] = i + 1
-            progress["total"] = total
-            progress["halluc"] = n_halluc
-    return segs
+            halluc = 1
+        text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
+        with lock:
+            counter["done"] += 1
+            counter["halluc"] += halluc
+            if progress is not None:
+                progress["done"] = counter["done"]
+                progress["total"] = total
+                progress["halluc"] = counter["halluc"]
+        return i, {"start": ks, "end": ke, "text": text, "words": words}
+
+    # ★ 클립 ASR_WORKERS 개를 동시에 인식한다. 클립끼리는 서로 영향을 주지 않아
+    #   (condition_on_previous_text=False) 결과는 하나씩 돌린 것과 완전히 같고,
+    #   아래에서 원래 순서대로 다시 정렬한다.
+    if total > 1 and ASR_WORKERS > 1:
+        with ThreadPoolExecutor(max_workers=ASR_WORKERS) as pool:
+            done = list(pool.map(one_clip, enumerate(keep_ranges)))
+    else:
+        done = [one_clip(item) for item in enumerate(keep_ranges)]
+    return [seg for _i, seg in sorted(done, key=lambda x: x[0])]
 
 
 
@@ -2928,7 +2994,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 하나씩 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {ASR_WORKERS}개씩 동시에 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
