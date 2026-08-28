@@ -827,73 +827,127 @@ def cap_by_speech_rate(words: list[dict], clip_sec: float) -> list[dict]:
     return out
 
 
+def _transcribe_array(audio, time_offset: float = 0.0, initial_prompt: str = "",
+                      ns_thresh: float = 0.85, lp_thresh: float = -1.6) -> list[dict]:
+    """numpy 오디오 배열을 인식해서 단어 목록(원본 시각 = time_offset 기준)을 반환."""
+    model = get_whisper_model()
+    kwargs = {"initial_prompt": initial_prompt[:700]} if initial_prompt.strip() else {}
+    try:
+        segs, _ = model.transcribe(
+            audio, language="ko", beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,   # 환각이 뒤로 번지지 않게
+            no_repeat_ngram_size=3,
+            word_timestamps=True,
+            **kwargs,
+        )
+    except Exception:
+        return []
+    words = []
+    for s in segs:
+        if getattr(s, "no_speech_prob", 0.0) > ns_thresh:
+            continue
+        if getattr(s, "avg_logprob", 0.0) < lp_thresh:
+            continue
+        for w in (s.words or []):
+            wt = (w.word or "").strip()
+            if wt:
+                words.append({"start": time_offset + w.start,
+                              "end": time_offset + w.end, "word": wt})
+    return words
+
+
 def transcribe_all_clips(video_path: Path,
                          keep_ranges: list[tuple[float, float, int, int]],
                          script_text: str = "",
                          progress: dict | None = None) -> list[dict]:
     """
-    ★ 영상 클립을 하나씩 개별 인식한다 (전체 한 번에 인식하지 않음).
-    전체 인식은 짧은 엔지컷을 통째로 놓치기 때문에, 클립마다 따로 물어봐서
-    '모든 클립이 빠짐없이' 자기 자막을 갖도록 보장한다. 느리지만 확실하다.
-    인식이 안 되는 클립도 자막 클립 자체는 만든다(내용은 "...").
-    각 단어는 클립 안에서의 실제 발화 시각을 그대로 갖고 있어 자막이
-    영상과 밀리지 않는다.
+    ★ 영상 오디오를 '한 번에' 인식하고, 단어를 실제 발화 시각으로 각 클립에
+      나눠 담는다. Whisper 는 2초 클립도 30초짜리 비용으로 인코더를 돌려서,
+      클립을 하나씩 인식하면 클립 수만큼 그 비용이 곱해져 매우 느리다.
+      전체를 한 번에 인식하면 인코더가 영상 길이만큼만 돌아 훨씬 빠르고,
+      문맥으로 들어서 인식도 더 정확하다. 소리가 있는데 전체 인식이 놓친
+      클립만 그 구간을 따로 다시 인식해 빠짐을 막는다(선별 재인식).
+    각 단어는 실제 발화 시각을 그대로 가져 자막이 영상과 밀리지 않는다.
     """
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-
+    import numpy as np
     total = len(keep_ranges)
+    counter = {"halluc": 0}
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
-    # ★ 오디오는 여기서 딱 한 번만 뽑는다 (클립마다 ffmpeg 를 다시 돌리지 않는다).
-    audio = load_audio_16k(video_path)
-    get_whisper_model()                 # 모델 로딩은 한 번만 (동시에 두 번 안 하도록)
 
-    counter = {"done": 0, "halluc": 0}
-    lock = threading.Lock()
-
-    def one_clip(item):
-        i, (ks, ke, _tl_s, _tl_e) = item
+    def refine(ks: float, ke: float, raw_words: list[dict]) -> dict:
+        """인식 단어 → 정제해서 클립 하나의 결과로 (전체/개별 공용)."""
         words = []
-        if ke - ks >= 0.15:
-            raw_words = transcribe_clip_words(video_path, ks, ke, script_text, audio)
-            for w in raw_words:
-                # 효과음 태그·영어 환각·이모지/특수문자 제거 (단어 단위로 적용)
-                cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
-                if not cleaned:
-                    continue
-                for piece in cleaned.split():   # 정제 후 한 단어가 여러 조각이 될 수도 있음
-                    words.append({
-                        "start": min(max(w["start"], ks), ke),
-                        "end": min(max(w["end"], ks), ke),
-                        "word": piece,
-                    })
-        words = cap_by_speech_rate(collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
+        for w in raw_words:
+            cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
+            if not cleaned:
+                continue
+            for piece in cleaned.split():
+                words.append({"start": min(max(w["start"], ks), ke),
+                              "end": min(max(w["end"], ks), ke), "word": piece})
+        words = cap_by_speech_rate(
+            collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
         if _is_syllable_soup(words):
-            words = []                  # "멘 탈 흔" → 말로 치지 않음
-        halluc = 0
+            words = []
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
-            words = []          # "시청해주셔서 감사합니다" 같은 상투 문구 → 말 없음 처리
-            halluc = 1
+            words = []
+            counter["halluc"] += 1
         text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
-        with lock:
-            counter["done"] += 1
-            counter["halluc"] += halluc
-            if progress is not None:
-                progress["done"] = counter["done"]
-                progress["total"] = total
-                progress["halluc"] = counter["halluc"]
-        return i, {"start": ks, "end": ke, "text": text, "words": words}
+        return {"start": ks, "end": ke, "text": text, "words": words}
 
-    # ★ 클립 ASR_WORKERS 개를 동시에 인식한다. 클립끼리는 서로 영향을 주지 않아
-    #   (condition_on_previous_text=False) 결과는 하나씩 돌린 것과 완전히 같고,
-    #   아래에서 원래 순서대로 다시 정렬한다.
-    if total > 1 and ASR_WORKERS > 1:
-        with ThreadPoolExecutor(max_workers=ASR_WORKERS) as pool:
-            done = list(pool.map(one_clip, enumerate(keep_ranges)))
-    else:
-        done = [one_clip(item) for item in enumerate(keep_ranges)]
-    return [seg for _i, seg in sorted(done, key=lambda x: x[0])]
+    # ── 1) 영상 전체를 한 번에 인식 (짧은 클립을 하나씩 돌리는 것보다 훨씬 빠름) ──
+    audio = load_audio_16k(video_path)
+    if audio is None:
+        # 오디오를 못 뽑으면 예전처럼 클립마다 인식 (안전망)
+        segs = []
+        for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+            raw = transcribe_clip_words(video_path, ks, ke, script_text) if ke - ks >= 0.15 else []
+            segs.append(refine(ks, ke, raw))
+            if progress is not None:
+                progress.update(done=i + 1, total=total, halluc=counter["halluc"])
+        return segs
+
+    if progress is not None:
+        progress.update(done=0, total=total)
+    full_words = _transcribe_array(audio, 0.0, script_text)
+    if progress is not None:
+        progress.update(done=max(total // 2, 1), total=total)   # 큰 걸음(전체 인식) 표시
+
+    # ── 2) 단어를 시각으로 각 클립에 나눠 담는다 (구간은 오름차순·비겹침) ──
+    buckets: list[list[dict]] = [[] for _ in keep_ranges]
+    j = 0
+    for w in full_words:
+        mid = (w["start"] + w["end"]) / 2
+        while j + 1 < total and mid >= keep_ranges[j][1]:
+            j += 1
+        ks, ke = keep_ranges[j][0], keep_ranges[j][1]
+        if ks <= mid < ke or (j == total - 1 and mid >= ks):
+            buckets[j].append(w)
+        elif mid < ks and j > 0 and keep_ranges[j - 1][0] <= mid < keep_ranges[j - 1][1]:
+            buckets[j - 1].append(w)
+
+    # ── 3) 소리는 있는데 한 단어도 안 담긴 클립만 따로 다시 인식 (놓침 방지) ──
+    def clip_rms(ks: float, ke: float) -> float:
+        a0, a1 = int(max(ks, 0) * WHISPER_SR), min(int(ke * WHISPER_SR), len(audio))
+        if a1 - a0 < 800:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(audio[a0:a1]))))
+
+    segs = []
+    n_retry = 0
+    for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+        raw = buckets[i]
+        if not raw and ke - ks >= 0.4 and clip_rms(ks, ke) >= 0.012:
+            off = max(ks - 0.05, 0)
+            a0, a1 = int(off * WHISPER_SR), min(int((ke + 0.05) * WHISPER_SR), len(audio))
+            if a1 - a0 >= 800:
+                raw = _transcribe_array(audio[a0:a1], off, script_text)
+                n_retry += 1
+        segs.append(refine(ks, ke, raw))
+        if progress is not None:
+            progress.update(done=i + 1, total=total, halluc=counter["halluc"], retry=n_retry)
+    return segs
 
 
 
@@ -2994,7 +3048,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 {ASR_WORKERS}개씩 동시에 인식합니다. (첫 실행 시 모델 다운로드 ~3GB)'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'영상 전체를 한 번에 빠르게 인식합니다 (클립 {len(keep_ranges)}개). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
