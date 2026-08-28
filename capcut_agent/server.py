@@ -915,17 +915,37 @@ def transcribe_all_clips(video_path: Path,
         progress.update(done=max(total // 2, 1), total=total)   # 큰 걸음(전체 인식) 표시
 
     # ── 2) 단어를 시각으로 각 클립에 나눠 담는다 (구간은 오름차순·비겹침) ──
+    # ★ 단어는 '겹침(overlap)'이 가장 큰 클립에 배정한다. (중간점 기준으로 하면
+    #   클립 첫 단어가 잘려나간 무음 구간에 걸려 통째로 사라진다 — 실제 버그였음)
+    #   겹치는 클립이 하나도 없으면(무음 구간 안) 가까운 클립 경계가 0.4초 이내일
+    #   때만 그 클립에 붙이고, 멀면 버린다(진짜 잘라낸 구간의 말).
+    SNAP_TOL = 0.25
     buckets: list[list[dict]] = [[] for _ in keep_ranges]
     j = 0
     for w in full_words:
-        mid = (w["start"] + w["end"]) / 2
-        while j + 1 < total and mid >= keep_ranges[j][1]:
+        ws, we = w["start"], w["end"]
+        while j + 1 < total and keep_ranges[j][1] <= ws:
             j += 1
-        ks, ke = keep_ranges[j][0], keep_ranges[j][1]
-        if ks <= mid < ke or (j == total - 1 and mid >= ks):
-            buckets[j].append(w)
-        elif mid < ks and j > 0 and keep_ranges[j - 1][0] <= mid < keep_ranges[j - 1][1]:
-            buckets[j - 1].append(w)
+        best_i, best_ov = -1, 0.0
+        for k in (j - 1, j, j + 1):
+            if 0 <= k < total:
+                ks, ke = keep_ranges[k][0], keep_ranges[k][1]
+                ov = min(we, ke) - max(ws, ks)          # 시간 겹침
+                if ov > best_ov:
+                    best_ov, best_i = ov, k
+        if best_i >= 0:
+            buckets[best_i].append(w)                   # 조금이라도 겹치는 클립에
+            continue
+        mid = (ws + we) / 2                              # 겹침 0 → 가장 가까운 경계로 스냅
+        near_i, near_d = -1, 1e9
+        for k in (j - 1, j, j + 1):
+            if 0 <= k < total:
+                ks, ke = keep_ranges[k][0], keep_ranges[k][1]
+                d = 0.0 if ks <= mid < ke else min(abs(mid - ks), abs(mid - ke))
+                if d < near_d:
+                    near_d, near_i = d, k
+        if near_i >= 0 and near_d <= SNAP_TOL:
+            buckets[near_i].append(w)
 
     # ── 3) 소리는 있는데 한 단어도 안 담긴 클립만 따로 다시 인식 (놓침 방지) ──
     def clip_rms(ks: float, ke: float) -> float:
