@@ -645,7 +645,12 @@ class TradingBot:
 
         설정한 TP 가격에 도달하면 거래소가 즉시 청산 → 폴링 지연/슬리피지 최소화.
         등록 실패 시 False 반환 (기존 봇 폴링 익절이 백업으로 동작).
+
+        🔥 청산 방식이 '스위칭만'이면 TP 주문을 걸지 않음 (반대신호까지 보유).
         """
+        if self.config.get('exit_mode', 'tp') == 'switch':
+            self.log(f"   🔁 청산 방식: 스위칭만 → TP 주문 없음 (반대신호까지 보유)", pos_type)
+            return False
         try:
             if pos_type == 'LONG':
                 tp_price = entry_price * (1 + tp_pct / 100)
@@ -1284,7 +1289,8 @@ class TradingBot:
                                 entry_price_str = self.format_price(signals['price'])
                                 self.log(f"✅ {pos_type} 진입! ${entry_price_str} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", pos_type)
                                 self.log(f"   📊 ADX: {adx_value:.1f} ({market_type}) → TP {dynamic_tp}%", pos_type)
-                                self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", pos_type)
+                                if self.config.get('exit_mode', 'tp') != 'switch':
+                                    self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", pos_type)
                                 self.log(f"   💸 예상 수수료: ${entry_fee:.2f} + ${entry_fee:.2f} = ${entry_fee*2:.2f} (0.08%)", pos_type)
                                 self.log(f"   🛡️ SL: AUTO (스위칭)", pos_type)
                                 
@@ -1430,8 +1436,9 @@ class TradingBot:
                         user_tp = self.config.get('entry_tp_long') or self.config.get('tp', 0.3)
                         target_roi = user_tp * leverage
                         
-                        # ROI >= 목표면 즉시 익절
-                        if pnl_pct >= target_roi and not self.config.get("is_closing"):
+                        # ROI >= 목표면 즉시 익절 (🔥 '스위칭만' 모드면 TP 익절 안 함)
+                        tp_enabled = self.config.get('exit_mode', 'tp') != 'switch'
+                        if tp_enabled and pnl_pct >= target_roi and not self.config.get("is_closing"):
                             print(f"[🎯 익절] {self.config['symbol']} LONG: ROI {pnl_pct:.2f}% >= 목표 {target_roi:.2f}% (TP {user_tp}%)")
                             
                             self.config["is_closing"] = True
@@ -1676,7 +1683,8 @@ class TradingBot:
                                         
 
                                         self.log(f"✅ SHORT 진입! ${signals['price']:.2f} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'SHORT')
-                                        self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'SHORT')
+                                        if self.config.get('exit_mode', 'tp') != 'switch':
+                                            self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'SHORT')
                                         self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'SHORT')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'SHORT')
                                         
@@ -1770,8 +1778,9 @@ class TradingBot:
                         user_tp = self.config.get('entry_tp_short') or self.config.get('tp', 0.3)
                         target_roi = user_tp * leverage
                         
-                        # ROI >= 목표면 즉시 익절
-                        if pnl_pct >= target_roi and not self.config.get("is_closing"):
+                        # ROI >= 목표면 즉시 익절 (🔥 '스위칭만' 모드면 TP 익절 안 함)
+                        tp_enabled = self.config.get('exit_mode', 'tp') != 'switch'
+                        if tp_enabled and pnl_pct >= target_roi and not self.config.get("is_closing"):
                             print(f"[🎯 익절] {self.config['symbol']} SHORT: ROI {pnl_pct:.2f}% >= 목표 {target_roi:.2f}% (TP {user_tp}%)")
                             
                             self.config["is_closing"] = True
@@ -2019,7 +2028,8 @@ class TradingBot:
                                         
 
                                         self.log(f"✅ LONG 진입! ${signals['price']:.2f} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'LONG')
-                                        self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'LONG')
+                                        if self.config.get('exit_mode', 'tp') != 'switch':
+                                            self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'LONG')
                                         self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'LONG')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'LONG')
                                         
@@ -2287,6 +2297,8 @@ class App:
                 # 🔥 동적 TP 설정
                 'tp_trend': 3.0,  # ✅ 추세장 TP 3.0% (ADX >= 21) — 1시간봉 기준
                 'tp_sideways': 2.0,  # ✅ 횡보장 TP 2.0% (ADX < 21) — 1시간봉 기준
+                # 🔥 청산 방식: 'tp'=TP 도달 시 익절(+스위칭) / 'switch'=반대신호 스위칭만
+                'exit_mode': 'tp',
                 'adx_period': 10,  # ADX 기간
                 'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
                 # 🔥 거래량 필터 비활성화
@@ -3858,7 +3870,13 @@ class App:
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
         
         # SL은 항상 AUTO (스위칭)
-        tk.Label(settings_line, text=f"SL:AUTO", bg='#2d2d2d', fg='#00ffff',
+        tk.Label(settings_line, text="SL:AUTO", bg='#2d2d2d', fg='#00ffff',
+                font=('Arial', 9, 'bold')).pack(side='left', padx=3)
+
+        # 🔥 청산 방식 표시
+        _sw = coin.get('exit_mode', 'tp') == 'switch'
+        tk.Label(settings_line, text="청산:스위칭만" if _sw else "청산:TP+스위칭",
+                bg='#2d2d2d', fg='#ffaa00' if _sw else '#00ff88',
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
         
         tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 2)}", bg='#2d2d2d', fg='#aaaaaa',
@@ -3941,10 +3959,24 @@ class App:
         tp_var = tk.DoubleVar(value=coin['tp'])
         tk.Entry(scrollable_frame, textvariable=tp_var, font=('Arial', 11)).pack(pady=5)
         
+        # 🔥🔥 청산 방식 선택
+        tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
+        tk.Label(scrollable_frame, text="🎯 청산 방식", bg='#2d2d2d', fg='#00ff88', font=('Arial', 11, 'bold')).pack(pady=5)
+        exit_mode_var = tk.StringVar(value=coin.get('exit_mode', 'tp'))
+        tk.Radiobutton(scrollable_frame, text="TP 익절 + 스위칭 (기본)", variable=exit_mode_var,
+                       value='tp', bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
+                       font=('Arial', 10), activebackground='#2d2d2d').pack(anchor='w', padx=30)
+        tk.Radiobutton(scrollable_frame, text="스위칭만 (TP 없이 반대신호까지 보유)",
+                       variable=exit_mode_var, value='switch', bg='#2d2d2d', fg='#ffaa00',
+                       selectcolor='#1e1e1e', font=('Arial', 10),
+                       activebackground='#2d2d2d').pack(anchor='w', padx=30)
+        tk.Label(scrollable_frame, text="※ 스위칭만: 수수료↓ 큰추세 다먹음 / 수익 반납·물림 깊어짐",
+                 bg='#2d2d2d', fg='#888888', font=('Arial', 8)).pack(pady=2)
+
         # 🔥 동적 TP 설정
         tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
-        tk.Label(scrollable_frame, text="📊 동적 TP (ADX 기반)", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
-        
+        tk.Label(scrollable_frame, text="📊 동적 TP (ADX 기반) — 'TP 익절' 선택 시에만 적용", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
+
         tk.Label(scrollable_frame, text="추세장 TP (%) - ADX >= 21:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
         tp_trend_var = tk.DoubleVar(value=coin.get('tp_trend', 3.0))  # ✅ 기본값 3.0%
         tk.Entry(scrollable_frame, textvariable=tp_trend_var, font=('Arial', 11)).pack(pady=3)
@@ -4011,6 +4043,9 @@ class App:
             coin['tp'] = tp_var.get()
             coin['sl'] = 0  # AUTO 고정
             
+            # 🔥 청산 방식 저장
+            coin['exit_mode'] = exit_mode_var.get()
+
             # 🔥 동적 TP 저장
             coin['tp_trend'] = tp_trend_var.get()
             coin['tp_sideways'] = tp_sideways_var.get()
