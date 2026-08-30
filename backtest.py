@@ -611,6 +611,7 @@ def make_configs(p, compare):
              'vol'  → 거래량 필터 OFF vs ON (2종)
              'tp'   → 익절방식 비교: 지금(ADX) vs 스위칭만 vs ATR(여러 배수)
              'strat'→ 진입전략 비교: 기본(UT+EMA) vs 황금피보 vs 볼린저
+             'switchema'→ 스위칭만 모드로 고정하고 EMA 속도 비교
     (하위호환: True=='full', False=='off')
     """
     if compare is True:
@@ -655,6 +656,23 @@ def make_configs(p, compare):
             dict(p, name='ATR TP x2.0', tp_mode='atr', atr_tp_mult=2.0),
             dict(p, name='ATR TP x2.5', tp_mode='atr', atr_tp_mult=2.5),
         ]
+
+    if compare == 'switchema':
+        # 🔥 '스위칭만'(TP 없음)으로 고정하고 EMA 속도만 비교
+        #    → 스위칭이 유일한 청산이 될 때 EMA 몇이 최적인지 확인
+        combos = [(p['ema_fast'], p['ema_slow']), (21, 55), (12, 26), (9, 21), (5, 20)]
+        seen, out = set(), []
+        for f, s in combos:
+            if (f, s) in seen:
+                continue
+            seen.add((f, s))
+            tag = '(설정값)' if (f, s) == (p['ema_fast'], p['ema_slow']) else ''
+            out.append(dict(p, name=f'스위칭만 EMA{int(f)}-{int(s)}{tag}',
+                            tp_mode='switch', ema_fast=int(f), ema_slow=int(s)))
+        # 비교 기준선: 지금 방식(TP 익절 + 스위칭)
+        out.insert(0, dict(p, name=f"지금(TP익절 EMA{int(p['ema_fast'])}-{int(p['ema_slow'])})",
+                           tp_mode='adx'))
+        return out
 
     if compare == 'strat':
         # 진입전략 비교: 내 기본 vs 황금피보 vs 볼린저
@@ -1165,6 +1183,7 @@ def launch_gui():
         '설정값 vs 하이브리드': 'vs',
         '진입전략 비교(기본/황금피보/볼린저)': 'strat',
         '익절방식 비교(ADX/스위칭/ATR)': 'tp',
+        '스위칭만 + EMA속도 비교': 'switchema',
         '볼륨필터 OFF vs ON': 'vol',
         'EMA 4종 비교': 'full',
         '단일 (현재 설정만)': 'off',
@@ -1450,7 +1469,7 @@ def run_cli():
                     help='ADX 계산 시간봉 (기본 1h)')
     ap.add_argument('--ema', default=f"{DEFAULTS['ema_fast']},{DEFAULTS['ema_slow']}")
     ap.add_argument('--compare', default='vs',
-                    choices=['off', 'vs', 'full', 'vol', 'tp', 'strat'],
+                    choices=['off', 'vs', 'full', 'vol', 'tp', 'strat', 'switchema'],
                     help="off=단일 / vs=설정값vs하이브리드(기본) / full=EMA4종 / "
                          "vol=볼륨OFFvsON / tp=익절방식(ADX/스위칭/ATR)")
     ap.add_argument('--start', default=None, help='시작일 YYYY-MM-DD (지정 시 --days 무시)')
