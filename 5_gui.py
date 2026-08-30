@@ -955,8 +955,13 @@ class TradingBot:
                     # 성공 시 오류 카운터 리셋
                     consecutive_errors = 0
                     
-                    # 🔥🔥🔥 완성된 봉만 사용 (트레이딩뷰와 동일하게!)
-                    df_closed = df[:-1]
+                    # 🔥🔥🔥 신호 기준 봉 선택
+                    #   'confirmed' = 완성된 봉만 (트레이딩뷰와 동일, 리페인팅 없음)
+                    #   'live'      = 진행 중인 봉 포함 (신호 즉시 반응, 리페인팅 가능)
+                    if self.config.get('signal_mode', 'confirmed') == 'live':
+                        df_closed = df
+                    else:
+                        df_closed = df[:-1]
                     
                     # 캐시에 저장
                     self._cached_df = df_closed
@@ -2299,6 +2304,8 @@ class App:
                 'tp_sideways': 1.2,  # ✅ 횡보장 TP 1.2% (ADX < 21) — 시뮬 검증값
                 # 🔥 청산 방식: 'tp'=TP 도달 시 익절(+스위칭) / 'switch'=반대신호 스위칭만
                 'exit_mode': 'tp',
+                # 🔥 신호 기준: 'confirmed'=완성봉만(안전) / 'live'=진행중 봉 포함(빠름)
+                'signal_mode': 'confirmed',
                 'adx_period': 10,  # ADX 기간
                 'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
                 # 🔥 거래량 필터 비활성화
@@ -3878,6 +3885,11 @@ class App:
         tk.Label(settings_line, text="청산:스위칭만" if _sw else "청산:TP+스위칭",
                 bg='#2d2d2d', fg='#ffaa00' if _sw else '#00ff88',
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
+
+        _lv = coin.get('signal_mode', 'confirmed') == 'live'
+        tk.Label(settings_line, text="신호:즉시" if _lv else "신호:확정",
+                bg='#2d2d2d', fg='#ffaa00' if _lv else '#aaaaaa',
+                font=('Arial', 9, 'bold')).pack(side='left', padx=3)
         
         tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 2)}", bg='#2d2d2d', fg='#aaaaaa',
                 font=('Arial', 9)).pack(side='left', padx=3)
@@ -3973,6 +3985,20 @@ class App:
         tk.Label(scrollable_frame, text="※ 스위칭만: 수수료↓ 큰추세 다먹음 / 수익 반납·물림 깊어짐",
                  bg='#2d2d2d', fg='#888888', font=('Arial', 8)).pack(pady=2)
 
+        # 🔥🔥 신호 기준 봉 선택
+        tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
+        tk.Label(scrollable_frame, text="⏱️ 신호 기준 봉", bg='#2d2d2d', fg='#00ff88', font=('Arial', 11, 'bold')).pack(pady=5)
+        signal_mode_var = tk.StringVar(value=coin.get('signal_mode', 'confirmed'))
+        tk.Radiobutton(scrollable_frame, text="봉 확정 후 (안전·기본)", variable=signal_mode_var,
+                       value='confirmed', bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
+                       font=('Arial', 10), activebackground='#2d2d2d').pack(anchor='w', padx=30)
+        tk.Radiobutton(scrollable_frame, text="진행 중 봉 포함 (즉시 반응·리페인팅 가능)",
+                       variable=signal_mode_var, value='live', bg='#2d2d2d', fg='#ffaa00',
+                       selectcolor='#1e1e1e', font=('Arial', 10),
+                       activebackground='#2d2d2d').pack(anchor='w', padx=30)
+        tk.Label(scrollable_frame, text="※ 즉시반응: 진입가 유리 / 신호가 사라질 위험(실측 0.3%)",
+                 bg='#2d2d2d', fg='#888888', font=('Arial', 8)).pack(pady=2)
+
         # 🔥 동적 TP 설정
         tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
         tk.Label(scrollable_frame, text="📊 동적 TP (ADX 기반) — 'TP 익절' 선택 시에만 적용", bg='#2d2d2d', fg='#00ffff', font=('Arial', 11, 'bold')).pack(pady=5)
@@ -4045,6 +4071,7 @@ class App:
             
             # 🔥 청산 방식 저장
             coin['exit_mode'] = exit_mode_var.get()
+            coin['signal_mode'] = signal_mode_var.get()
 
             # 🔥 동적 TP 저장
             coin['tp_trend'] = tp_trend_var.get()
