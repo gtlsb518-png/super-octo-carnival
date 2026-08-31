@@ -1263,8 +1263,29 @@ def map_words_to_timeline(stream: list[dict],
 
 
 def _ends_clause(word: str) -> bool:
-    """한국어 구절 끝(구두점)인지 — 여기서 끊으면 자연스럽다."""
-    return word[-1:] in ",.?!…\"”)"
+    """
+    한국어 구절/문장 끝인지 — 여기서 끊으면 자연스럽다.
+    구두점(. ? ! ,)뿐 아니라 종결어미(-야/-어/-지/-거야/-잖아 …)로 끝나도 문장 끝으로 본다.
+    → 문장이 끝났는데 다음 문장 첫 단어가 꼬리 합치기로 도로 붙는 것을 막는다.
+      (예: "골드만삭스야" + "다들…" 을 한 줄로 합치지 않는다)
+    """
+    if word[-1:] in ",.?!…\"”)":
+        return True
+    core = word.strip().rstrip("\"'”’)]}").rstrip(",.?!…")
+    return bool(core) and core.endswith(_FINAL_ENDINGS)
+
+
+def _is_final_ending(word: str) -> bool:
+    """구두점 없이 종결어미(-야/-어/-지/-거야/-잖아 …)로 문장이 끝나는 말인지.
+    (구두점으로 끝나는 건 이미 별도로 문장 끝 처리하므로 여기선 제외)"""
+    if word[-1:] in ",.?!…\"”)":
+        return False
+    core = word.strip().rstrip("\"'”’)]}")
+    if not core or core in _BOUND_NOUNS:     # "거야/거지/중이야" 등은 문맥상 이어질 수 있어 제외
+        return False
+    if core.endswith(_CONNECTIVE_ENDINGS):   # "-는지/-면서/-니까/-거나" 등은 문장이 안 끝남
+        return False                         # (예: "되는지"는 종결이 아니라 연결)
+    return core.endswith(_FINAL_ENDINGS)
 
 
 # 끊기 좋은 자리를 판단하는 한국어 어미·조사 목록.
@@ -1457,6 +1478,9 @@ def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
         return groups
     if _ends_clause(last[-1]["word"]):
         return groups                    # 꼬리가 그 자체로 한 문장이면(오케이?) 그대로 둔다
+    if _ends_clause(prev[-1]["word"]):
+        return groups                    # 앞 조각이 문장으로 끝나면(꼬리는 새 문장 시작)
+                                         # 앞 문장 끝말을 꼬리로 끌어오지 않는다
     best = None
     for k in range(1, len(prev)):
         new_prev, new_last = prev[:-k], prev[-k:] + last
@@ -1544,8 +1568,12 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
                 _group_len(cur + [{"word": nxt}]) <= hard + 2:
             continue                    # 다음이 쉼표 → 같이 담는다 (문장 끝은 제외)
 
-        if sc >= 100:                                   # 문장 끝 → 무조건
+        if sc >= 100:                                   # 문장 끝(구두점) → 무조건
             groups.append(cur); cur = []
+        elif cl >= 5 and nxt and _is_final_ending(wd["word"]):
+            groups.append(cur); cur = []                # 종결어미로 문장이 끝나고 뒤에 말이
+                                                        # 더 있으면 → 문장 단위로 먼저 끊는다
+                                                        # ("골드만삭스야" 뒤 "다들…" 을 분리)
         elif cl >= 5 and 50 <= sc < 80 and nxt_sc >= 100:
             groups.append(cur); cur = []                # 어미로 끝났는데 다음이 한 문장 → 먼저 끊기
         elif cl >= 5 and sc >= 50 and _is_clause_tail(wd["word"], prev_word):
