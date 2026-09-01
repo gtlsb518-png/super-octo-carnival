@@ -915,11 +915,10 @@ def transcribe_all_clips(video_path: Path,
         progress.update(done=max(total // 2, 1), total=total)   # 큰 걸음(전체 인식) 표시
 
     # ── 2) 단어를 시각으로 각 클립에 나눠 담는다 (구간은 오름차순·비겹침) ──
-    # ★ 단어는 '겹침(overlap)'이 가장 큰 클립에 배정한다. (중간점 기준으로 하면
-    #   클립 첫 단어가 잘려나간 무음 구간에 걸려 통째로 사라진다 — 실제 버그였음)
-    #   겹치는 클립이 하나도 없으면(무음 구간 안) 가까운 클립 경계가 0.4초 이내일
-    #   때만 그 클립에 붙이고, 멀면 버린다(진짜 잘라낸 구간의 말).
-    SNAP_TOL = 0.25
+    # ★ 단어는 '겹침(overlap)'이 가장 큰 클립에만 배정한다. 억지로 옆 클립에 붙이지
+    #   않는다 → 자막이 반드시 '그 클립 위'에 그 클립의 말로만 나온다.
+    #   (중간점 기준이면 클립 첫 단어가 잘려나간 무음에 걸려 사라지므로 겹침 기준을 쓴다)
+    FRONT_TOL = 0.12          # 클립 시작 '직전'에서 끝나는 말은 그 클립의 첫 말로 인정
     buckets: list[list[dict]] = [[] for _ in keep_ranges]
     j = 0
     for w in full_words:
@@ -934,18 +933,15 @@ def transcribe_all_clips(video_path: Path,
                 if ov > best_ov:
                     best_ov, best_i = ov, k
         if best_i >= 0:
-            buckets[best_i].append(w)                   # 조금이라도 겹치는 클립에
+            buckets[best_i].append(w)                   # 실제로 겹치는 클립에만 넣는다
             continue
-        mid = (ws + we) / 2                              # 겹침 0 → 가장 가까운 경계로 스냅
-        near_i, near_d = -1, 1e9
-        for k in (j - 1, j, j + 1):
-            if 0 <= k < total:
-                ks, ke = keep_ranges[k][0], keep_ranges[k][1]
-                d = 0.0 if ks <= mid < ke else min(abs(mid - ks), abs(mid - ke))
-                if d < near_d:
-                    near_d, near_i = d, k
-        if near_i >= 0 and near_d <= SNAP_TOL:
-            buckets[near_i].append(w)
+        # 겹치는 클립이 없으면(= 잘라낸 무음/구간 안의 말) 버린다.
+        # 억지로 옆 클립에 붙이면 '다음 클립 자막이 이전 클립에 붙는' 문제가 생긴다.
+        # 단, 클립 시작 '직전'(1프레임 이내)에서 끝나는 말은 그 클립의 첫 말로 본다.
+        for k in (j, j + 1):
+            if 0 <= k < total and 0 <= keep_ranges[k][0] - we <= FRONT_TOL:
+                buckets[k].append(w)
+                break
 
     # ── 3) 소리는 있는데 한 단어도 안 담긴 클립만 따로 다시 인식 (놓침 방지) ──
     def clip_rms(ks: float, ke: float) -> float:

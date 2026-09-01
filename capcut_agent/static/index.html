@@ -295,15 +295,15 @@
         <label>
           <span style="display:flex; align-items:center; gap:6px;">노이즈 임계값
             <label style="display:flex; align-items:center; gap:4px; cursor:pointer; color:var(--accent); font-size:11px;">
-              <input type="checkbox" id="auto-noise" checked style="accent-color:var(--accent);"
+              <input type="checkbox" id="auto-noise" style="accent-color:var(--accent);"
                      onchange="document.getElementById('noise-db').disabled = this.checked;
                                document.getElementById('db-val').textContent = this.checked ? '자동' : document.getElementById('noise-db').value + ' dB';" />
               자동
             </label>
           </span>
-          <span id="db-val">자동</span>
+          <span id="db-val">-40 dB</span>
         </label>
-        <input type="range" id="noise-db" min="-60" max="-20" value="-40" step="1" disabled
+        <input type="range" id="noise-db" min="-60" max="-20" value="-40" step="1"
                oninput="document.getElementById('db-val').textContent = this.value + ' dB'" />
       </div>
       <div class="setting-item">
