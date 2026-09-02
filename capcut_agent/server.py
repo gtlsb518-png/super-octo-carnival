@@ -862,22 +862,20 @@ def transcribe_all_clips(video_path: Path,
                          script_text: str = "",
                          progress: dict | None = None) -> list[dict]:
     """
-    ★ 영상 오디오를 '한 번에' 인식하고, 단어를 실제 발화 시각으로 각 클립에
-      나눠 담는다. Whisper 는 2초 클립도 30초짜리 비용으로 인코더를 돌려서,
-      클립을 하나씩 인식하면 클립 수만큼 그 비용이 곱해져 매우 느리다.
-      전체를 한 번에 인식하면 인코더가 영상 길이만큼만 돌아 훨씬 빠르고,
-      문맥으로 들어서 인식도 더 정확하다. 소리가 있는데 전체 인식이 놓친
-      클립만 그 구간을 따로 다시 인식해 빠짐을 막는다(선별 재인식).
-    각 단어는 실제 발화 시각을 그대로 가져 자막이 영상과 밀리지 않는다.
+    ★ 각 영상 클립을 '그 클립 오디오로만' 따로 인식한다 → 자막이 무조건 그 클립의
+      말 그대로 나오고, 옆 클립으로 밀리거나 건너뛰는 일이 원천적으로 없다.
+    속도 핵심: 오디오를 딱 한 번만 메모리에 올려두고(load_audio_16k) 클립 구간만
+      잘라 인식한다. 예전 느림의 원인이던 '클립마다 ffmpeg 재실행'을 없애서,
+      정확하면서도 훨씬 빠르다. (오디오 로드 실패 시에만 클립별 ffmpeg 폴백)
+    각 단어는 그 클립 안 실제 발화 시각을 그대로 가져 자막이 영상과 밀리지 않는다.
     """
-    import numpy as np
     total = len(keep_ranges)
     counter = {"halluc": 0}
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
     script_tokens.discard("")
 
     def refine(ks: float, ke: float, raw_words: list[dict]) -> dict:
-        """인식 단어 → 정제해서 클립 하나의 결과로 (전체/개별 공용)."""
+        """인식 단어 → 정제해서 클립 하나의 결과로."""
         words = []
         for w in raw_words:
             cleaned = sanitize_word(clean_recognized_text(w["word"], script_tokens))
@@ -896,76 +894,14 @@ def transcribe_all_clips(video_path: Path,
         text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
         return {"start": ks, "end": ke, "text": text, "words": words}
 
-    # ── 1) 영상 전체를 한 번에 인식 (짧은 클립을 하나씩 돌리는 것보다 훨씬 빠름) ──
-    audio = load_audio_16k(video_path)
-    if audio is None:
-        # 오디오를 못 뽑으면 예전처럼 클립마다 인식 (안전망)
-        segs = []
-        for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
-            raw = transcribe_clip_words(video_path, ks, ke, script_text) if ke - ks >= 0.15 else []
-            segs.append(refine(ks, ke, raw))
-            if progress is not None:
-                progress.update(done=i + 1, total=total, halluc=counter["halluc"])
-        return segs
-
-    if progress is not None:
-        progress.update(done=0, total=total)
-    full_words = _transcribe_array(audio, 0.0, script_text)
-    if progress is not None:
-        progress.update(done=max(total // 2, 1), total=total)   # 큰 걸음(전체 인식) 표시
-
-    # ── 2) 단어를 시각으로 각 클립에 나눠 담는다 (구간은 오름차순·비겹침) ──
-    # ★ 단어는 '겹침(overlap)'이 가장 큰 클립에만 배정한다. 억지로 옆 클립에 붙이지
-    #   않는다 → 자막이 반드시 '그 클립 위'에 그 클립의 말로만 나온다.
-    #   (중간점 기준이면 클립 첫 단어가 잘려나간 무음에 걸려 사라지므로 겹침 기준을 쓴다)
-    FRONT_TOL = 0.12          # 클립 시작 '직전'에서 끝나는 말은 그 클립의 첫 말로 인정
-    buckets: list[list[dict]] = [[] for _ in keep_ranges]
-    j = 0
-    for w in full_words:
-        ws, we = w["start"], w["end"]
-        while j + 1 < total and keep_ranges[j][1] <= ws:
-            j += 1
-        best_i, best_ov = -1, 0.0
-        for k in (j - 1, j, j + 1):
-            if 0 <= k < total:
-                ks, ke = keep_ranges[k][0], keep_ranges[k][1]
-                ov = min(we, ke) - max(ws, ks)          # 시간 겹침
-                if ov > best_ov:
-                    best_ov, best_i = ov, k
-        if best_i >= 0:
-            buckets[best_i].append(w)                   # 실제로 겹치는 클립에만 넣는다
-            continue
-        # 겹치는 클립이 없으면(= 잘라낸 무음/구간 안의 말) 버린다.
-        # 억지로 옆 클립에 붙이면 '다음 클립 자막이 이전 클립에 붙는' 문제가 생긴다.
-        # 단, 클립 시작 '직전'(1프레임 이내)에서 끝나는 말은 그 클립의 첫 말로 본다.
-        for k in (j, j + 1):
-            if 0 <= k < total and 0 <= keep_ranges[k][0] - we <= FRONT_TOL:
-                buckets[k].append(w)
-                break
-
-    # ── 3) 한 단어도 안 담긴 클립은 그 클립 오디오만 따로 다시 인식한다 (자막 건너뜀 방지) ──
-    #   전체 인식이 짧은 클립을 놓치거나, 겹침 배정에서 단어가 빠져 빈 클립이 생겨도
-    #   여기서 그 클립 소리를 직접 다시 물어봐서 '말이 있는 클립엔 반드시 자막'이 붙게 한다.
-    #   (조용한 무음 클립만 건너뛴다 — 아주 낮은 소리 기준)
-    def clip_rms(ks: float, ke: float) -> float:
-        a0, a1 = int(max(ks, 0) * WHISPER_SR), min(int(ke * WHISPER_SR), len(audio))
-        if a1 - a0 < 800:
-            return 0.0
-        return float(np.sqrt(np.mean(np.square(audio[a0:a1]))))
-
+    # 오디오를 한 번만 메모리에 올린다. 각 클립은 이 배열에서 구간만 잘라 인식(ffmpeg 없음).
+    audio = load_audio_16k(video_path)   # 실패하면 None → transcribe_clip_words 가 클립별 ffmpeg 로 폴백
     segs = []
-    n_retry = 0
     for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
-        raw = buckets[i]
-        if not raw and ke - ks >= 0.2 and clip_rms(ks, ke) >= 0.006:
-            off = max(ks - 0.05, 0)
-            a0, a1 = int(off * WHISPER_SR), min(int((ke + 0.05) * WHISPER_SR), len(audio))
-            if a1 - a0 >= 800:
-                raw = _transcribe_array(audio[a0:a1], off, script_text)
-                n_retry += 1
+        raw = transcribe_clip_words(video_path, ks, ke, script_text, audio) if ke - ks >= 0.15 else []
         segs.append(refine(ks, ke, raw))
         if progress is not None:
-            progress.update(done=i + 1, total=total, halluc=counter["halluc"], retry=n_retry)
+            progress.update(done=i + 1, total=total, halluc=counter["halluc"])
     return segs
 
 
@@ -3106,7 +3042,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'영상 전체를 한 번에 빠르게 인식합니다 (클립 {len(keep_ranges)}개). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립마다 그 클립 소리로 정확히 인식합니다 (클립 {len(keep_ranges)}개, 오디오는 한 번만 불러옴). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
