@@ -1271,6 +1271,13 @@ def _ends_clause(word: str) -> bool:
     return bool(core) and core.endswith(_FINAL_ENDINGS)
 
 
+def _same_word(a: str, b: str) -> bool:
+    """두 어절이 (문장부호 빼고) 같은 말인지 — 바로 이어지는 반복 판별용."""
+    na = a.strip().strip(",.?!…\"'”’)]}")
+    nb = b.strip().strip(",.?!…\"'”’)]}")
+    return bool(na) and na == nb
+
+
 def _is_final_ending(word: str) -> bool:
     """구두점 없이 종결어미(-야/-어/-지/-거야/-잖아 …)로 문장이 끝나는 말인지.
     (구두점으로 끝나는 건 이미 별도로 문장 끝 처리하므로 여기선 제외)"""
@@ -1566,6 +1573,10 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
 
         if sc >= 100:                                   # 문장 끝(구두점) → 무조건
             groups.append(cur); cur = []
+        elif nxt and _same_word(wd["word"], nxt):
+            groups.append(cur); cur = []                # 같은 말이 바로 반복되면 그 사이에서
+                                                        # 끊는다: "우리들 우리들 친구들" →
+                                                        # "우리들" / "우리들 친구들"
         elif cl >= 5 and nxt and _is_final_ending(wd["word"]):
             groups.append(cur); cur = []                # 종결어미로 문장이 끝나고 뒤에 말이
                                                         # 더 있으면 → 문장 단위로 먼저 끊는다
