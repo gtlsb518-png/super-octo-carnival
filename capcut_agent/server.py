@@ -943,7 +943,10 @@ def transcribe_all_clips(video_path: Path,
                 buckets[k].append(w)
                 break
 
-    # ── 3) 소리는 있는데 한 단어도 안 담긴 클립만 따로 다시 인식 (놓침 방지) ──
+    # ── 3) 한 단어도 안 담긴 클립은 그 클립 오디오만 따로 다시 인식한다 (자막 건너뜀 방지) ──
+    #   전체 인식이 짧은 클립을 놓치거나, 겹침 배정에서 단어가 빠져 빈 클립이 생겨도
+    #   여기서 그 클립 소리를 직접 다시 물어봐서 '말이 있는 클립엔 반드시 자막'이 붙게 한다.
+    #   (조용한 무음 클립만 건너뛴다 — 아주 낮은 소리 기준)
     def clip_rms(ks: float, ke: float) -> float:
         a0, a1 = int(max(ks, 0) * WHISPER_SR), min(int(ke * WHISPER_SR), len(audio))
         if a1 - a0 < 800:
@@ -954,7 +957,7 @@ def transcribe_all_clips(video_path: Path,
     n_retry = 0
     for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
         raw = buckets[i]
-        if not raw and ke - ks >= 0.4 and clip_rms(ks, ke) >= 0.012:
+        if not raw and ke - ks >= 0.2 and clip_rms(ks, ke) >= 0.006:
             off = max(ks - 0.05, 0)
             a0, a1 = int(off * WHISPER_SR), min(int((ke + 0.05) * WHISPER_SR), len(audio))
             if a1 - a0 >= 800:
