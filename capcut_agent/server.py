@@ -1721,21 +1721,24 @@ def subtitle_chunks_for_timeline(segments: list[dict],
             continue
 
         # ── 조각별 표시 구간 ──────────────────────────────
-        # ★ 첫 자막은 '실제로 말을 시작한 시각'에 뜬다.
-        #   예전엔 무조건 클립 맨 앞(clip_start)부터 띄워서, 클립이 시작되고 한참 뒤에
-        #   말해도 자막이 먼저 떠 있었다 → "뒤에 나와야 할 자막이 앞으로 당겨져" 보임.
-        #   (4글자 자막이 4초씩 떠 있는 원인)
+        # ★ 첫 자막은 원칙적으로 클립 시작에 붙인다(손편집본과 동일). 다만 클립이
+        #   시작되고 한참(LEAD_SNAP_US 이상) 뒤에야 말이 나오면 그때 띄운다.
+        #   예전엔 무조건 클립 맨 앞부터 띄워서, 말하기 전부터 자막이 깔려
+        #   "뒤에 나와야 할 자막이 앞으로 당겨져" 보였다
+        #   (4글자 자막이 4초씩 떠 있던 원인).
         # 마지막 조각은 클립 끝까지 이어져 자막바가 중간에 사라지지 않게 한다.
         # 조각 경계는 실제 발화 시각을 따라가되, 각 조각이 최소 MIN_SHOW_US 는
         # 떠 있도록 앞뒤로 밀어준다 (클립에 자리가 있을 때만).
+        LEAD_SNAP_US = 400_000        # 0.4초 안에 말이 시작되면 그냥 클립 시작에 붙인다
         n_g = len(groups)
-        first_spoken = groups[0][0].get("tl_start", clip_start)
-        # 클립 밖으로 나가지 않게, 그리고 마지막에 최소한의 자리는 남게 제한
-        first_start = min(max(int(first_spoken), clip_start),
-                          max(clip_start, clip_end - n_g * MIN_DUR_US))
-        first_start = snap_us_to_frame(first_start)
-        first_start = min(max(first_start, clip_start), clip_end - MIN_DUR_US) \
-            if clip_end - clip_start > MIN_DUR_US else clip_start
+        first_spoken = int(groups[0][0].get("tl_start", clip_start))
+        if first_spoken - clip_start <= LEAD_SNAP_US:
+            first_start = clip_start                  # 바로 말함 → 클립 시작에 붙임
+        else:
+            # 앞이 길게 비어 있음 → 말하는 시각에 띄운다 (뒤 조각 자리는 남겨둠)
+            first_start = min(first_spoken,
+                              max(clip_start, clip_end - n_g * MIN_SHOW_US))
+            first_start = max(snap_us_to_frame(first_start), clip_start)
         bounds = [first_start]
         for i, g in enumerate(groups[1:], start=1):
             lo = bounds[-1] + MIN_SHOW_US
