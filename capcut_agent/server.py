@@ -1480,6 +1480,26 @@ def _ends_adnominal(word: str) -> bool:
     return "가" <= c <= "힣" and (ord(c) - 0xAC00) % 28 == 8      # ㄹ 받침 (-을/-ㄹ 관형형)
 
 
+# 조사로 끝나는 '-는' — 관형형이 아니라 그냥 주제격 조사다 ('공부방에서는 / 싹 다')
+_PARTICLE_NUN = ("에서는", "에는", "게는", "로는", "까지는", "부터는", "보다는",
+                 "한테는", "만은", "말고는", "빼고는")
+
+
+def _is_adnominal_word(word: str) -> bool:
+    """
+    '가는 배', '없는 사람들', '물린 사람들', '타고 싶은 사람' 처럼
+    바로 뒤 명사를 꾸미는 말인지. 이런 말 뒤에서 끊으면 덩어리가 쪼개져 어색하다.
+    (손편집본에서 이 자리를 한 번도 끊지 않았다)
+    """
+    w = word.strip().rstrip("\"'”’)]}").rstrip(",.?!")
+    if len(w) < 2 or w in _NO_END_WORDS:
+        return False
+    if w.endswith(_PARTICLE_NUN):        # 조사 '-는' 은 끊어도 된다
+        return False
+    # ㄹ받침 규칙(_ends_adnominal)은 '오늘/서울/2조를' 까지 걸려서 여기선 안 쓴다
+    return w.endswith(_ADNOMINAL_TAILS)
+
+
 def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
     """이 어절 뒤에서 끊었을 때 얼마나 자연스러운지 (높을수록 좋은 자리)."""
     w = word.strip()
@@ -1497,6 +1517,8 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
         return 0
     if next_word and next_word.strip().rstrip(",.?!") in _BOUND_NOUNS:
         return 0
+    if _is_adnominal_word(core):
+        return 5                         # 꾸미는 말 — 뒤 명사와 붙어야 한다
     if core.endswith(_STANDALONE_RISK) and len(core) < 5:
         # "그대로" "이만큼" "다 같이" 처럼 그 자체가 한 단어인 경우 —
         # 연결어미(-대로/-만큼/-처럼)만큼 좋은 자리는 아니지만 끊어도 무난하다
@@ -1799,15 +1821,17 @@ def subtitle_chunks_for_timeline(segments: list[dict],
       각각 별도 클립이 되는데, 클립마다 그 클립에서 실제로 말한 내용이
       자기 자막으로 붙어야 나중에 테이크를 골라내는 편집이 가능하다.
 
-    ★ 영상 클립 하나당 자막 클립 하나, 그리고 자막은 무조건 한 줄.
-      한 클립에서 한 말은 자막 하나에 다 들어간다 (시간 분할도 줄바꿈도 없음).
+    ★ 자막은 언제나 한 줄이다 (줄바꿈 없음).
+      한 클립 안에서는 문장 단위로 여러 조각으로 끊는다 — 손편집본 기준
+      클립당 평균 2.2개, 조각 하나가 0.27~1.83초, 글자 수 9자 안팎.
 
     - 각 단어는 겹침이 가장 큰 클립 하나에 배정
     - 한 클립 안에서 같은 말을 반복(더듬기·다시 말하기)하면 한 번만 남김
-    - 자막은 클립 끝까지 이어짐 (말이 늦게 시작하면 그 시각부터)
+    - 클립 안에서만 한국어 문장/어미 경계로 max_chars(±3) 분할
+    - 클립의 자막들은 클립 시작~끝을 빈틈없이 채움 (조각 경계는 실제 발화 시각)
     - 말이 없는 클립은 자막 없음
-    - 대본(script_text)이 있으면 클립마다 대본의 해당 문맥 구간에 정렬해 철자 교정
-      (내용·순서는 유지, 대본에 없는 애드립은 원문 그대로)
+    - 대본(script_text)이 있으면 클립마다 대본의 해당 구간에 정렬해
+      철자 교정 + 인식이 놓친 말을 대본대로 채움 (엔지컷은 부풀리지 않음)
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
     MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
@@ -1855,29 +1879,76 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         if not words:
             continue
 
-        # ── 영상 클립 하나당 자막 클립 하나, 무조건 한 줄 ─────────
-        # ★ 사용자 요청: "영상 클립 하나당 자막 클립 하나 나오게 해야된다고"
-        #                "자막 1줄로만 돼야해"
-        #   문장을 시간으로 잘게 쪼개지도, 줄바꿈으로 나누지도 않는다.
-        #   (예전엔 0.2~0.3초짜리 조각이 우수수 지나가서 문장이 다 쪼개져 보였다)
-        # 자막은 원칙적으로 클립 시작에 붙인다(손편집본과 동일). 다만 클립이
-        # 시작되고 한참(LEAD_SNAP_US 이상) 뒤에야 말이 나오면 그때 띄운다.
-        LEAD_SNAP_US = 400_000        # 0.4초 안에 말이 시작되면 그냥 클립 시작에 붙인다
-        if first_spoken - clip_start <= LEAD_SNAP_US:
-            start_us = clip_start                     # 바로 말함 → 클립 시작에 붙임
-        else:
-            # 앞이 길게 비어 있음 → 말하는 시각에 띄운다
-            start_us = min(first_spoken, max(clip_start, clip_end - MIN_SHOW_US))
-            start_us = max(snap_us_to_frame(start_us), clip_start)
-        if clip_end - start_us < MIN_DUR_US:
-            start_us = max(clip_start, clip_end - MIN_DUR_US)
-
-        # 이 클립에서 말한 내용 전부를 한 줄로 (줄바꿈 없음)
-        text = strip_periods(" ".join(w["word"] for w in words))
-        if not text:                           # 글자가 하나도 없으면 그 클립엔 자막 없음
+        # ── 클립 안에서 문장 단위로 끊는다 (손편집본과 동일) ──────
+        # 손편집본 기준: 클립당 자막 평균 2.2개, 한 조각 0.27~1.83초, 글자 9자 안팎.
+        # 자막은 클립 경계를 넘지 않고, 조각은 전부 한 줄이다.
+        groups = chunk_words_korean(words, max_chars)
+        # 클립이 짧으면 조각 수를 줄인다 — 0.07초짜리 자막이 우수수 지나가지 않게
+        if groups:
+            groups = limit_groups(groups, max(1, (clip_end - clip_start) // MIN_SHOW_US))
+        if not groups:
             continue
 
-        out.append({"start_us": start_us, "end_us": clip_end, "text": text})
+        # ── 조각별 표시 구간 ──────────────────────────────
+        # ★ 첫 자막은 원칙적으로 클립 시작에 붙인다(손편집본과 동일). 다만 클립이
+        #   시작되고 한참(LEAD_SNAP_US 이상) 뒤에야 말이 나오면 그때 띄운다.
+        # 마지막 조각은 클립 끝까지 이어져 자막바가 중간에 사라지지 않게 한다.
+        # 조각 경계는 실제 발화 시각을 따라가되, 각 조각이 최소 MIN_SHOW_US 는
+        # 떠 있도록 앞뒤로 밀어준다 (클립에 자리가 있을 때만).
+        LEAD_SNAP_US = 400_000        # 0.4초 안에 말이 시작되면 그냥 클립 시작에 붙인다
+        n_g = len(groups)
+        if first_spoken - clip_start <= LEAD_SNAP_US:
+            first_start = clip_start                  # 바로 말함 → 클립 시작에 붙임
+        else:
+            # 앞이 길게 비어 있음 → 말하는 시각에 띄운다 (뒤 조각 자리는 남겨둠)
+            first_start = min(first_spoken,
+                              max(clip_start, clip_end - n_g * MIN_SHOW_US))
+            first_start = max(snap_us_to_frame(first_start), clip_start)
+        bounds = [first_start]
+        for i, g in enumerate(groups[1:], start=1):
+            lo = bounds[-1] + MIN_SHOW_US
+            hi = clip_end - (n_g - i) * MIN_SHOW_US
+            b = g[0].get("tl_start", lo)
+            if lo <= hi:
+                b = min(max(b, lo), hi)
+            else:                       # 자리가 빠듯하면 최소 2프레임만 확보
+                b = min(max(b, bounds[-1] + MIN_DUR_US), clip_end)
+            # ★ 길게 끄는 말("올랐는데~~~")이 잘리지 않게:
+            #   앞 조각은 자기 마지막 말이 끝나기 전에는 절대 안 끊는다.
+            #   (Whisper는 길게 끈 말의 끝과 다음 말의 시작을 겹쳐서 주는 일이 잦다)
+            prev_end = max((w.get("tl_end", 0) for w in groups[i - 1]), default=0)
+            if prev_end:
+                room = clip_end - (n_g - i) * MIN_DUR_US
+                b = min(max(b, prev_end), max(room, bounds[-1] + MIN_DUR_US))
+            # 영상 클립과 같은 프레임 격자에 올린다 (한 프레임도 어긋나지 않게)
+            b = snap_us_to_frame(b)
+            b = min(max(b, bounds[-1] + FRAME_US), clip_end)
+            bounds.append(b)
+        bounds.append(clip_end)
+
+        clip_out: list[dict] = []
+        for gi, g in enumerate(groups):
+            s, e = bounds[gi], bounds[gi + 1]
+            text = strip_periods(" ".join(w["word"] for w in g))
+            if not text:                       # 빈 조각은 자막을 만들지 않는다 ("..." 안 씀)
+                continue
+            if e - s < MIN_DUR_US and clip_out:
+                # 자리가 부족하면 직전 자막에 합치고, 그 자리까지 직전 자막이 이어받는다
+                clip_out[-1]["text"] += " " + text
+                clip_out[-1]["end_us"] = e
+                continue
+            clip_out.append({"start_us": s, "end_us": e, "text": text})
+
+        if not clip_out:                       # 글자가 하나도 없으면 그 클립엔 자막 없음
+            continue
+
+        # ── 클립 경계 강제 정합 ────────────────────────────
+        # 이 클립의 자막들은 반드시 first_start ~ clip_end 를 빈틈없이 채운다.
+        clip_out[0]["start_us"] = first_start      # 말을 시작한 시각에 첫 자막이 뜬다
+        for a, b in zip(clip_out, clip_out[1:]):
+            a["end_us"] = b["start_us"]
+        clip_out[-1]["end_us"] = clip_end
+        out.extend(clip_out)
 
     if stats is not None:
         stats["corrected"] = total_fixed
@@ -2080,7 +2151,8 @@ def get_video_resolution(video_path: Path) -> tuple[int, int]:
 #   세로(숏츠)는 폭이 좁아 짧게, 가로(롱폼)는 폭이 넓어 길게 잡는다.
 #   (max_sub_chars 를 0 이하로 주면 이 값을 자동으로 쓴다)
 CANVAS_PRESETS = {
-    "9:16":  {"width": 1080, "height": 1920, "subtitle_y": -0.35,   "sub_chars": 12},  # 숏츠 (기본)
+    # 숏츠 sub_chars=10 — 손편집본(5ec41315) 자막 글자 수 중앙 9자 / 상위10% 12자 기준
+    "9:16":  {"width": 1080, "height": 1920, "subtitle_y": -0.35,   "sub_chars": 10},  # 숏츠 (기본)
     "16:9":  {"width": 1920, "height": 1080, "subtitle_y": -0.6907, "sub_chars": 20},  # 가로
 }
 
