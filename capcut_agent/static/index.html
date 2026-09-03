@@ -311,9 +311,9 @@
       <div class="setting-item">
         <label>
           최소 무음 길이
-          <span id="sec-val">0.3 s</span>
+          <span id="sec-val">0.20 s</span>
         </label>
-        <input type="range" id="min-silence" min="0.1" max="3.0" value="0.3" step="0.05"
+        <input type="range" id="min-silence" min="0.1" max="3.0" value="0.2" step="0.05"
                oninput="document.getElementById('sec-val').textContent = parseFloat(this.value).toFixed(2) + ' s'" />
       </div>
     </div>
@@ -325,13 +325,13 @@
       </div>
       <div class="settings-grid">
         <div class="setting-item">
-          <label>클립 앞 여유 <span id="head-val">+30 ms</span></label>
-          <input type="range" id="head-pad" min="-400" max="400" value="30" step="10"
+          <label>클립 앞 여유 <span id="head-val">+60 ms</span></label>
+          <input type="range" id="head-pad" min="-400" max="400" value="60" step="10"
                  oninput="document.getElementById('head-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
         <div class="setting-item">
-          <label>클립 뒤 여유 <span id="tail-val">0 ms</span></label>
-          <input type="range" id="tail-pad" min="-400" max="400" value="0" step="10"
+          <label>클립 뒤 여유 <span id="tail-val">+20 ms</span></label>
+          <input type="range" id="tail-pad" min="-400" max="400" value="20" step="10"
                  oninput="document.getElementById('tail-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
       </div>
@@ -738,7 +738,7 @@
 
     const autoNoise = chk('auto-noise', true);
     const noiseDb = val('noise-db', -40);
-    const minSil  = val('min-silence', 0.3);
+    const minSil  = val('min-silence', 0.2);
     const useSub  = chk('use-subtitle', true) ? 'true' : 'false';
     const ratioSel = document.querySelector('input[name="ratio"]:checked');
     const ratio   = ratioSel ? ratioSel.value : '9:16';
@@ -747,8 +747,8 @@
     const encoded = encodeURIComponent(videoPath);
 
     // 컷 여유: 화면은 "여유(+ 면 더 남김)", 서버는 "깎는 양" 이라 부호를 뒤집는다
-    const headTrim = -num('head-pad', 30);
-    const tailTrim = -num('tail-pad', 0);
+    const headTrim = -num('head-pad', 60);
+    const tailTrim = -num('tail-pad', 20);
     const minClip  = chk('drop-short') ? num('min-clip', 0.7) : 0;
 
     // 같은 말 반복(엔지컷) 정리
