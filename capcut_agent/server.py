@@ -986,16 +986,21 @@ def transcribe_all_clips(video_path: Path,
             return 0.0
         return float(np.sqrt(np.mean(np.square(audio[a0:a1]))))
 
-    for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
-        if buckets[i] or ke - ks < 0.2:
-            continue
-        if clip_rms(ks, ke) < 0.006:          # 진짜 조용한 구간이면 그대로 둔다
-            continue
+    todo = [i for i, (ks, ke, _s, _e) in enumerate(keep_ranges)
+            if not buckets[i] and ke - ks >= 0.2 and clip_rms(ks, ke) >= 0.006]
+    if progress is not None:
+        # ★ 이 단계도 진행률을 알려준다. 안 알려주면 화면이 '자막 인식 N/N' 에서
+        #   멈춘 것처럼 보여서 사용자가 멈춘 줄 안다(실제로는 뒤에서 돌고 있음).
+        progress.update(phase="retry", rdone=0, rtotal=len(todo))
+    for n, i in enumerate(todo, 1):
+        ks, ke = keep_ranges[i][0], keep_ranges[i][1]
         off = max(ks - 0.05, 0.0)
         a0 = int(off * WHISPER_SR)
         a1 = min(int((ke + 0.05) * WHISPER_SR), len(audio))
         if a1 - a0 >= 800:
             buckets[i] = _transcribe_array(audio[a0:a1], off, script_text)
+        if progress is not None:
+            progress.update(phase="retry", rdone=n, rtotal=len(todo))
 
     segs = [refine(ks, ke, buckets[i]) for i, (ks, ke, _s, _e) in enumerate(keep_ranges)]
     if progress is not None:
@@ -3152,10 +3157,16 @@ async def process_video(
                     n_total = len(keep_ranges)
                     while not task.done():
                         await asyncio.sleep(2)
-                        d = prog.get("done", 0)
-                        if d != last:
-                            last = d
-                            yield f"data: {json.dumps({'step': 'asr', 'msg': f'자막 인식 {d}/{n_total} 클립...'})}\n\n"
+                        if prog.get("phase") == "retry":
+                            # 빠진 클립만 따로 다시 인식하는 단계 (여기도 진행률을 보여준다)
+                            rd, rt = prog.get("rdone", 0), prog.get("rtotal", 0)
+                            key, msg = ("r", rd), f'빠진 클립 다시 인식 {rd}/{rt} ...'
+                        else:
+                            d = prog.get("done", 0)
+                            key, msg = ("a", d), f'자막 인식 {d}/{n_total} 클립...'
+                        if key != last:
+                            last = key
+                            yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
                     raw_subs = await task
                 yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립별 인식 완료 ({len(raw_subs)}개)'})}\n\n"
                 n_halluc = prog.get("halluc", 0)
