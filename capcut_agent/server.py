@@ -236,10 +236,6 @@ FRAME_US = int(round(1_000_000 / FPS))   # 한 프레임 길이(us)
 # 어절 경계로 이 길이 안팎에서 끊는다. 완성본 참고 자막 기준 조각당 평균 9자.
 MAX_SUBTITLE_CHARS = 9
 
-# 자막은 영상 클립 하나당 하나만 만든다. 한 줄에 다 안 들어가면
-# 시간으로 쪼개지 않고 줄바꿈으로만 나누며, 최대 이 줄 수까지 쓴다.
-MAX_SUB_LINES = 4
-
 # 말 사이가 이만큼 벌어지면 자막을 끊는다 (자연스러운 호흡 단위 분할)
 SUB_PAUSE_BREAK_US = 350_000
 
@@ -1736,14 +1732,11 @@ def subtitle_chunks_for_timeline(segments: list[dict],
       각각 별도 클립이 되는데, 클립마다 그 클립에서 실제로 말한 내용이
       자기 자막으로 붙어야 나중에 테이크를 골라내는 편집이 가능하다.
 
-    ★ 영상 클립 하나당 자막 클립 하나.
-      한 클립에서 한 말은 자막 하나에 다 들어간다. 길면 시간으로 쪼개지 않고
-      줄바꿈(최대 MAX_SUB_LINES 줄)으로만 나눈다 — 문장이 0.2초짜리 조각으로
-      흩어지지 않게.
+    ★ 영상 클립 하나당 자막 클립 하나, 그리고 자막은 무조건 한 줄.
+      한 클립에서 한 말은 자막 하나에 다 들어간다 (시간 분할도 줄바꿈도 없음).
 
     - 각 단어는 겹침이 가장 큰 클립 하나에 배정
     - 한 클립 안에서 같은 말을 반복(더듬기·다시 말하기)하면 한 번만 남김
-    - 줄바꿈 자리는 한국어 어절/어미 기준(max_chars ±3)
     - 자막은 클립 끝까지 이어짐 (말이 늦게 시작하면 그 시각부터)
     - 말이 없는 클립은 자막 없음
     - 대본(script_text)이 있으면 클립마다 대본의 해당 문맥 구간에 정렬해 철자 교정
@@ -1789,17 +1782,13 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         # ★ 한 클립 안에서 같은 말을 반복한 부분은 한 번만 남긴다
         words = dedupe_clip_words(words)
 
-        groups = chunk_words_korean(words, max_chars) if words else []
-        if groups:
-            # 줄 수는 넉넉히 제한 (너무 긴 클립이라도 화면을 다 덮지 않게)
-            groups = limit_groups(groups, MAX_SUB_LINES)
-        if not groups:
+        if not words:
             continue
 
-        # ── 영상 클립 하나당 자막 클립 하나 ───────────────────
+        # ── 영상 클립 하나당 자막 클립 하나, 무조건 한 줄 ─────────
         # ★ 사용자 요청: "영상 클립 하나당 자막 클립 하나 나오게 해야된다고"
-        #   문장을 시간으로 잘게 쪼개지 않는다 — 한 클립에서 한 말은
-        #   자막 하나에 다 들어가고, 길면 줄바꿈으로만 나눈다.
+        #                "자막 1줄로만 돼야해"
+        #   문장을 시간으로 잘게 쪼개지도, 줄바꿈으로 나누지도 않는다.
         #   (예전엔 0.2~0.3초짜리 조각이 우수수 지나가서 문장이 다 쪼개져 보였다)
         # 자막은 원칙적으로 클립 시작에 붙인다(손편집본과 동일). 다만 클립이
         # 시작되고 한참(LEAD_SNAP_US 이상) 뒤에야 말이 나오면 그때 띄운다.
@@ -1813,9 +1802,8 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         if clip_end - start_us < MIN_DUR_US:
             start_us = max(clip_start, clip_end - MIN_DUR_US)
 
-        # 줄바꿈은 chunk_words_korean 이 잡아준 '문장이 안 깨지는 자리'를 그대로 쓴다
-        lines = [strip_periods(" ".join(w["word"] for w in g)) for g in groups]
-        text = "\n".join(l for l in lines if l)
+        # 이 클립에서 말한 내용 전부를 한 줄로 (줄바꿈 없음)
+        text = strip_periods(" ".join(w["word"] for w in words))
         if not text:                           # 글자가 하나도 없으면 그 클립엔 자막 없음
             continue
 
