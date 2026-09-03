@@ -495,7 +495,7 @@ def find_repeat_ng_clips(keep_ranges: list[tuple[float, float, int, int]],
 # Whisper 자막 인식
 # ══════════════════════════════════════════════════════════
 
-NO_SPEECH_PLACEHOLDER = "..."   # 말소리가 없는 클립에도 자막 클립은 만든다
+NO_SPEECH_PLACEHOLDER = ""      # 말소리가 없는 클립에는 자막을 만들지 않는다
 
 # Whisper가 잡음·숨소리 구간에 넣는 효과음 태그: [grunting] (laughs) 등
 _BRACKET_TAG_RE = re.compile(r"[\[\(\<\{][^\]\)\>\}]*[\]\)\>\}]")
@@ -751,7 +751,7 @@ def drop_rare_latin(segments: list[dict], script_tokens: set[str] | None = None)
             ws.append({**w, "word": new})
         if seg.get("words"):
             seg["words"] = ws
-            seg["text"] = " ".join(x["word"] for x in ws) or NO_SPEECH_PLACEHOLDER
+            seg["text"] = " ".join(x["word"] for x in ws)
     return n_drop
 
 
@@ -895,12 +895,15 @@ def transcribe_all_clips(video_path: Path,
                               "end": min(max(w["end"], ks), ke), "word": piece})
         words = cap_by_speech_rate(
             collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
-        if _is_syllable_soup(words):
-            words = []
+        # ★ 실제로 한 말은 최대한 다 살린다.
+        #   예전엔 '음절 수프'(멘 탈 흔) 판정으로 클립을 통째로 버렸는데,
+        #   말을 더듬거나 짧게 끊어 말한 진짜 발화까지 사라져서 그 판정은 쓰지 않는다.
+        #   Whisper 가 조용한 데서 지어내는 '시청해주셔서 감사합니다' 류 상투 문구와
+        #   숫자만 늘어놓는 잡음만 걸러낸다.
         if words and is_hallucinated_line(" ".join(w["word"] for w in words), ke - ks):
             words = []
             counter["halluc"] += 1
-        text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
+        text = " ".join(w["word"] for w in words)      # 말이 없으면 빈 문자열 ("..." 안 씀)
         return {"start": ks, "end": ke, "text": text, "words": words}
 
     # 오디오를 한 번만 메모리에 올린다 (클립마다 ffmpeg 재실행 없음).
@@ -1693,10 +1696,7 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         if groups:
             groups = limit_groups(groups, max(1, (clip_end - clip_start) // MIN_SHOW_US))
         if not groups:
-            # 말이 없거나 전부 걸러진 클립도 자막 클립은 만든다 (클립 길이 그대로)
-            if clip_end > clip_start:
-                out.append({"start_us": clip_start, "end_us": clip_end,
-                            "text": NO_SPEECH_PLACEHOLDER})
+            # 말이 없는 클립에는 자막을 아예 만들지 않는다 ("..." 표시 없음)
             continue
 
         # ── 조각별 표시 구간 ──────────────────────────────
@@ -1732,13 +1732,18 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         clip_out: list[dict] = []
         for gi, g in enumerate(groups):
             s, e = bounds[gi], bounds[gi + 1]
-            text = strip_periods(" ".join(w["word"] for w in g)) or NO_SPEECH_PLACEHOLDER
+            text = strip_periods(" ".join(w["word"] for w in g))
+            if not text:                       # 빈 조각은 자막을 만들지 않는다 ("..." 안 씀)
+                continue
             if e - s < MIN_DUR_US and clip_out:
                 # 자리가 부족하면 직전 자막에 합치고, 그 자리까지 직전 자막이 이어받는다
                 clip_out[-1]["text"] += " " + text
                 clip_out[-1]["end_us"] = e
                 continue
             clip_out.append({"start_us": s, "end_us": e, "text": text})
+
+        if not clip_out:                       # 글자가 하나도 없으면 그 클립엔 자막 없음
+            continue
 
         # ── 클립 경계 강제 정합 ────────────────────────────
         # 이 클립의 자막들은 반드시 clip_start ~ clip_end 를 빈틈없이 채운다.
