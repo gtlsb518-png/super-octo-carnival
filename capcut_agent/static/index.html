@@ -301,10 +301,12 @@
               자동
             </label>
           </span>
-          <span id="db-val">-40 dB</span>
+          <span id="db-val">-32 dB</span>
         </label>
-        <input type="range" id="noise-db" min="-60" max="-20" value="-40" step="1"
+        <input type="range" id="noise-db" min="-60" max="-20" value="-32" step="1"
                oninput="document.getElementById('db-val').textContent = this.value + ' dB'" />
+        <span style="font-size:11px; color:var(--muted); margin-top:4px; display:block;">
+          숫자를 0에 가깝게(-30·-25) 올릴수록 더 많이 잘림 / -40·-50 쪽이면 거의 안 잘림</span>
       </div>
       <div class="setting-item">
         <label>
@@ -341,9 +343,9 @@
                       color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 6px; outline:none;" /> 초 미만
       </label>
       <div style="font-size:11px; color:var(--dim); margin-top:8px; line-height:1.6;">
-        ※ 노이즈 임계값 "자동"이면 영상마다 방 소음을 재서 알맞은 값을 고릅니다.<br />
-        ※ 기본값: 노이즈 자동 / 최소 무음 0.3s / 앞 +10ms / 뒤 -10ms<br />
-        ※ 말이 씹히면 "앞 여유"를 0 → +100ms 쪽으로 올리세요.<br />
+        ※ 노이즈 임계값: 숫자가 0에 가까울수록(-30·-25) 더 많이 잘리고, -40·-50 쪽이면 거의 안 잘립니다.<br />
+        ※ 기본값: 노이즈 -32dB / 최소 무음 0.3s / 앞 +30ms / 뒤 0ms  ("자동"은 방 소음을 재서 알아서 고름)<br />
+        ※ 무음이 안 잘리면 숫자를 -30 쪽으로 올리고, 말이 씹히면 -35 쪽으로 내리세요.<br />
         ※ 엔지컷을 남겨서 직접 고르실 거면 "짧은 클립 버리기"는 꺼두세요.
       </div>
     </div>

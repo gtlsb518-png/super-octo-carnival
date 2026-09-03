@@ -2915,7 +2915,7 @@ async def index():
 async def process_video(
     request: Request,
     video_path: str,
-    noise_db: float = -40.0,
+    noise_db: float = -32.0,
     min_silence: float = 0.3,
     head_trim: float = 0.0,      # 클립 앞을 더 깎는 양 (ms)
     tail_trim: float = 0.0,      # 클립 뒤를 더 깎는 양 (ms)
