@@ -1081,21 +1081,46 @@ def _retime_words(src: list[dict], new_words: list[str]) -> list[dict]:
     return out
 
 
+def build_script_index(script_text: str) -> tuple[list[str], list[int]]:
+    """
+    대본을 단어열 + 각 단어가 몇 번째 '문장'인지로 쪼갠다.
+    문장 경계: 문장부호(. ? !) 로 끝나는 단어, 또는 줄 끝.
+    """
+    words: list[str] = []
+    sent_of: list[int] = []
+    sid = 0
+    for line in script_text.splitlines():
+        toks = line.split()
+        for i, t in enumerate(toks):
+            words.append(t)
+            sent_of.append(sid)
+            if t.endswith((".", "?", "!")) or i == len(toks) - 1:
+                sid += 1
+    return words, sent_of
+
+
 def align_clip_to_script(words: list[dict], script_words: list[str], script_norm: list[str],
-                         near: int = 0, threshold: float = 0.5) -> tuple[list[dict], int, int]:
+                         near: int = 0, threshold: float = 0.5,
+                         sent_of: list[int] | None = None,
+                         tail_room_us: int = 0) -> tuple[list[dict], int, int]:
     """
     한 영상 클립에서 인식된 단어열을, 대본의 '해당 문맥 구간'에 정렬해서 철자를 교정.
     문맥으로 맞추므로 단어 하나씩 비교하는 것보다 오타가 훨씬 줄고,
     띄어쓰기가 달라도(삼성이주가 → 삼성이 주가) 바로잡힌다.
 
-    규칙 (엔지컷 편집을 위해 내용은 절대 바꾸지 않음):
+    규칙:
       - 일치/불일치: 대본 단어로 교체 (철자 교정)
-      - 대본에만 있는 단어: 말하지 않았으므로 추가하지 않음 (엔지컷 유지)
+      - ★ 대본에만 있는 단어: 인식이 놓친 말로 보고 대본대로 채워 넣는다
+        (사용자 요청: "대본 참고해서 자막 클립이 생성되야하고")
+      - ★ 대본 한 문장의 SENT_COVER 이상을 실제로 말한 클립은 그 문장 전체로 채운다.
+        조금만 말하고 끊긴 엔지컷은 부풀리지 않는다
+        ('첫째'만 말한 NG 클립이 '첫째 수주가 끊겼어?'가 되지 않게)
       - 인식에만 있는 단어: 대본에 없는 애드립 → 원문 그대로 유지
       - 대본에서 맞는 구간을 못 찾으면 클립 전체를 원문 그대로 유지
     반환: (교정된 단어열, 다음 클립 탐색 힌트, 교정된 단어 수)
     """
     import difflib
+    SENT_COVER = 0.65        # 대본 문장을 통째로 쓰려면 이만큼은 실제로 말해야 함
     clip_norm = [_norm_token(w["word"]) for w in words]
     if not any(clip_norm) or not script_norm:
         return words, near, 0
@@ -1104,11 +1129,51 @@ def align_clip_to_script(words: list[dict], script_words: list[str], script_norm
     if length == 0 or ratio < threshold:
         return words, near, 0      # 대본에 없는 발화 → 손대지 않음
 
+    # ── 대본 문장 통째로 쓰기 ────────────────────────────────
+    # 인식이 문장 끝을 놓쳐도('...2조를' 까지만) 대본 문장으로 마저 채운다.
+    if sent_of and sent_of[start] == sent_of[start + length - 1]:
+        sid = sent_of[start]
+        a = start
+        while a > 0 and sent_of[a - 1] == sid:
+            a -= 1
+        b = start + length
+        while b < len(sent_of) and sent_of[b] == sid:
+            b += 1
+        sent_chars = sum(len(script_norm[i]) for i in range(a, b))
+        said = sum(len(x) for x in clip_norm)
+        if sent_chars and said / sent_chars >= SENT_COVER:
+            start, length = a, b - a
+
+    # ── 클립 뒤에 말할 시간이 남아 있으면 대본으로 마저 채운다 ─────
+    # 인식이 클립 끝말을 놓친 경우('...2조를' 에서 끊김)를 살린다.
+    # 말이 끝나자마자 잘린 엔지컷은 남는 시간이 없어 그대로 둔다.
+    if sent_of and tail_room_us > 0:
+        SPEAK_US_PER_CHAR = 130_000        # 한 글자 말하는 데 걸리는 대략 시간
+        b, sid, budget = start + length, sent_of[start + length - 1], tail_room_us
+        while b < len(sent_of) and sent_of[b] == sid and b - (start + length) < 4:
+            cost = max(200_000, len(script_norm[b]) * SPEAK_US_PER_CHAR)
+            if cost > budget:
+                break
+            budget -= cost
+            b += 1
+        length = b - start
+
     win_words = script_words[start:start + length]
     win_norm = script_norm[start:start + length]
     sm = difflib.SequenceMatcher(None, clip_norm, win_norm, autojunk=False)
 
     out, fixed = [], 0
+
+    def _add_from_script(names: list[str], at_us: int) -> None:
+        """대본에만 있던 말을 채워 넣는다 (표시 구간은 이웃 단어에 붙임)."""
+        nonlocal fixed
+        for t in names:
+            sw = sanitize_word(t)
+            if not sw:
+                continue
+            out.append({"word": sw, "tl_start": at_us, "tl_end": at_us})
+            fixed += 1
+
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             for k in range(i2 - i1):
@@ -1121,7 +1186,9 @@ def align_clip_to_script(words: list[dict], script_words: list[str], script_norm
             fixed += (i2 - i1)
         elif tag == "delete":
             out.extend(words[i1:i2])   # 애드립 → 그대로
-        # insert(대본에만 있는 단어): 말하지 않았으므로 넣지 않음
+        elif tag == "insert":          # 대본에만 있는 말 → 인식이 놓친 것으로 보고 채움
+            at = out[-1]["tl_end"] if out else words[0]["tl_start"]
+            _add_from_script(win_words[j1:j2], at)
     return out, start + length, fixed
 
 
@@ -1752,7 +1819,7 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     if not mapped:
         return []
 
-    script_words = script_text.split() if script_text.strip() else []
+    script_words, script_sent = build_script_index(script_text) if script_text.strip() else ([], [])
     script_norm = [_norm_token(w) for w in script_words] if script_words else []
     near, total_fixed = 0, 0
 
@@ -1766,21 +1833,24 @@ def subtitle_chunks_for_timeline(segments: list[dict],
     #   → 클립 하나도 빠짐없이 자막이 붙고, 자막 길이 합 = 영상 클립 길이가 된다.
     for ci, (_ks, _ke, clip_start, clip_end) in enumerate(keep_ranges):
         words = per_clip.get(ci, [])
-
-        # 대본 참고 교정: 이 클립이 대본의 어느 부분인지 찾아 문맥에 맞춰 철자만 교정
-        if script_norm and words:
-            words, near, fixed = align_clip_to_script(words, script_words, script_norm, near)
-            total_fixed += fixed
-
         if not words:
             # 말이 없는 클립에는 자막을 아예 만들지 않는다 ("..." 표시 없음)
             continue
 
-        # 말이 시작된 시각은 중복을 지우기 전 기준으로 잡는다
+        # 자막이 뜨는 시각은 대본 보정·중복 제거 전, 실제로 말한 시각 기준
         first_spoken = int(words[0].get("tl_start", clip_start))
+        # 마지막 인식 단어 뒤에 남은 클립 시간 = 인식이 놓쳤을 수 있는 말의 길이
+        tail_room = max(0, clip_end - max(w.get("tl_end", 0) for w in words))
 
         # ★ 한 클립 안에서 같은 말을 반복한 부분은 한 번만 남긴다
         words = dedupe_clip_words(words)
+
+        # 대본 참고: 이 클립이 대본의 어느 부분인지 찾아, 그 대본 문장 그대로 자막을 만든다
+        if script_norm and words:
+            words, near, fixed = align_clip_to_script(words, script_words, script_norm,
+                                                      near, sent_of=script_sent,
+                                                      tail_room_us=tail_room)
+            total_fixed += fixed
 
         if not words:
             continue
