@@ -3221,10 +3221,24 @@ _MEDIA_FILTER = ("영상·이미지|*.mp4;*.mov;*.avi;*.mkv;*.webm;*.m4v;"
                  "*.jpg;*.jpeg;*.png;*.webp;*.bmp;*.gif;*.heic|모든 파일|*.*")
 
 
+# 파일 선택 창은 '닫힐 때까지 기다리는' 블로킹 작업이다. async 함수에서 그냥 부르면
+# 창이 열려 있는 동안 서버 전체가 멈춰서 브라우저가 'Failed to fetch' 를 낸다.
+# → 반드시 별도 스레드(run_in_executor)에서 돌리고, 창이 겹쳐 열리지 않게 잠근다.
+_dialog_lock = asyncio.Lock()
+
+
+async def _pick_async(multi: bool, title: str, filt: str) -> list[str]:
+    if _dialog_lock.locked():
+        raise RuntimeError("파일 선택 창이 이미 열려 있습니다. 그 창에서 고르세요.")
+    async with _dialog_lock:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _pick_files_windows, multi, title, filt)
+
+
 @app.get("/api/browse")
 async def browse_file():
     try:
-        picked = _pick_files_windows(False, "영상 파일 선택", _VIDEO_FILTER)
+        picked = await _pick_async(False, "영상 파일 선택", _VIDEO_FILTER)
         return JSONResponse({"path": picked[0] if picked else ""})
     except Exception as e:
         return JSONResponse({"path": "", "error": str(e)})
@@ -3259,7 +3273,7 @@ async def get_thumb(path: str):
 async def browse_files():
     """파일 여러 개 선택 (영상+이미지). 다운로드(저장) 시간 순으로 정렬해서 반환."""
     try:
-        picked = _pick_files_windows(True, "영상·이미지 파일 여러 개 선택", _MEDIA_FILTER)
+        picked = await _pick_async(True, "영상·이미지 파일 여러 개 선택", _MEDIA_FILTER)
         ordered = sort_files_by_download_time([Path(p) for p in picked])
         return JSONResponse({"files": [str(p) for p in ordered]})
     except Exception as e:

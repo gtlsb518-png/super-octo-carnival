@@ -660,16 +660,24 @@
   }
 
   // 탐색기에서 찾아보기 (서버에 파일 다이얼로그 요청)
+  // ※ 파일 선택 창이 열려 있는 동안에는 다시 요청하지 않는다 (중복 창 방지)
+  let dialogOpen = false;
   async function browsePath() {
+    if (dialogOpen) { log('파일 선택 창이 이미 열려 있습니다.', 'warn'); return; }
+    dialogOpen = true;
     try {
       const res = await fetch('/api/browse');
       const data = await res.json();
-      if (data.path) {
+      if (data.error) {
+        log('찾아보기: ' + data.error, 'warn');
+      } else if (data.path) {
         document.getElementById('video-path').value = data.path;
         onPathInput(data.path);
       }
     } catch(e) {
-      log('찾아보기 실패 - 경로를 직접 입력해주세요', 'warn');
+      log('찾아보기 실패 - 경로를 직접 입력해주세요 (' + e.message + ')', 'warn');
+    } finally {
+      dialogOpen = false;
     }
   }
 
@@ -883,19 +891,26 @@
   let bgFiles = new Set();   // 배경제거를 적용할 파일 경로
 
   async function pickAppendFiles() {
+    if (dialogOpen) { log('파일 선택 창이 이미 열려 있습니다.', 'warn'); return; }
+    dialogOpen = true;
     try {
       const res = await fetch('/api/browse-multi');
       const data = await res.json();
-      if (data.files && data.files.length) {
+      if (data.error) {
+        log('파일 선택: ' + data.error, 'warn');
+      } else if (data.files && data.files.length) {
         appendFiles = data.files;   // 서버가 이미 다운로드 시간순 정렬
         bgFiles = new Set();        // 새로 고르면 배경제거 선택 초기화
         renderAppendList();
+        updateRunBtn();
         log(`추가 파일 ${appendFiles.length}개 선택 (다운로드 순 정렬)`, 'ok');
-      } else if (data.error) {
-        log('파일 선택 실패 - 브라우저 대신 서버 창을 확인하세요', 'warn');
+      } else {
+        log('선택된 파일이 없습니다.', 'warn');
       }
     } catch(e) {
-      log('파일 선택 오류: ' + e.message, 'err');
+      log('파일 선택 오류: ' + e.message + ' (서버 창이 떠 있는지 확인하세요)', 'err');
+    } finally {
+      dialogOpen = false;
     }
   }
 
