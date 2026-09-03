@@ -862,13 +862,22 @@ def transcribe_all_clips(video_path: Path,
                          script_text: str = "",
                          progress: dict | None = None) -> list[dict]:
     """
-    ★ 각 영상 클립을 '그 클립 오디오로만' 따로 인식한다 → 자막이 무조건 그 클립의
-      말 그대로 나오고, 옆 클립으로 밀리거나 건너뛰는 일이 원천적으로 없다.
-    속도 핵심: 오디오를 딱 한 번만 메모리에 올려두고(load_audio_16k) 클립 구간만
-      잘라 인식한다. 예전 느림의 원인이던 '클립마다 ffmpeg 재실행'을 없애서,
-      정확하면서도 훨씬 빠르다. (오디오 로드 실패 시에만 클립별 ffmpeg 폴백)
-    각 단어는 그 클립 안 실제 발화 시각을 그대로 가져 자막이 영상과 밀리지 않는다.
+    ★ 자막은 무조건 '그 클립 위에, 그 클립 말 그대로'.
+      그러면서도 빠르게 — 두 가지를 같이 잡는 방식이다.
+
+    핵심: 클립들을 30초 한 판(GROUP_MAX_SEC)에 '이어붙여서' 한 번에 인식한다.
+      · Whisper 는 2초 클립도 30초짜리 비용으로 인코더를 돌린다. 그래서 클립마다
+        따로 부르면 클립 수만큼 그 비용이 곱해져 느리다(클립 130개 = 130번).
+        30초씩 묶으면 호출이 10분의 1로 줄어 훨씬 빠르다.
+      · 이어붙일 때 클립 사이에 무음(GROUP_PAD_SEC)을 끼워 말이 서로 섞이지 않게 한다.
+      · 잘라낸 무음·NG 구간은 버퍼에 아예 안 들어가므로, 그 구간 말이 자막에 샐 수 없다.
+      · 각 단어는 '버퍼 안 위치'로 어느 클립인지 정확히 정해지고, 그 클립 기준
+        원본 시각으로 되돌린다 → 밀림·건너뜀 없음.
+    (오디오 로드 실패 시에만 클립별 ffmpeg 폴백)
     """
+    import numpy as np
+    GROUP_MAX_SEC = 24.0     # 한 판에 묶을 최대 길이 (Whisper 30초 창 안쪽)
+    GROUP_PAD_SEC = 0.4      # 클립 사이 무음 (서로 말이 섞이지 않게)
     total = len(keep_ranges)
     counter = {"halluc": 0}
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
@@ -894,14 +903,84 @@ def transcribe_all_clips(video_path: Path,
         text = " ".join(w["word"] for w in words) if words else NO_SPEECH_PLACEHOLDER
         return {"start": ks, "end": ke, "text": text, "words": words}
 
-    # 오디오를 한 번만 메모리에 올린다. 각 클립은 이 배열에서 구간만 잘라 인식(ffmpeg 없음).
-    audio = load_audio_16k(video_path)   # 실패하면 None → transcribe_clip_words 가 클립별 ffmpeg 로 폴백
-    segs = []
+    # 오디오를 한 번만 메모리에 올린다 (클립마다 ffmpeg 재실행 없음).
+    audio = load_audio_16k(video_path)
+    if audio is None:
+        # 오디오를 못 뽑으면 예전처럼 클립마다 ffmpeg 로 인식 (안전망)
+        segs = []
+        for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+            raw = transcribe_clip_words(video_path, ks, ke, script_text) if ke - ks >= 0.15 else []
+            segs.append(refine(ks, ke, raw))
+            if progress is not None:
+                progress.update(done=i + 1, total=total, halluc=counter["halluc"])
+        return segs
+
+    # ── 1) 연속 클립을 30초 한 판으로 묶는다 ──────────────────
+    groups: list[list[int]] = []
+    cur: list[int] = []
+    cur_sec = 0.0
     for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
-        raw = transcribe_clip_words(video_path, ks, ke, script_text, audio) if ke - ks >= 0.15 else []
-        segs.append(refine(ks, ke, raw))
+        dur = max(ke - ks, 0.0)
+        if cur and cur_sec + dur + GROUP_PAD_SEC > GROUP_MAX_SEC:
+            groups.append(cur)
+            cur, cur_sec = [], 0.0
+        cur.append(i)
+        cur_sec += dur + GROUP_PAD_SEC
+    if cur:
+        groups.append(cur)
+
+    pad = np.zeros(int(GROUP_PAD_SEC * WHISPER_SR), dtype=np.float32)
+    buckets: list[list[dict]] = [[] for _ in keep_ranges]
+    n_done = 0
+
+    for g in groups:
+        # ── 2) 클립들을 무음을 끼워 이어붙이고, 각 클립이 버퍼 어디인지 기록 ──
+        parts: list = []
+        spans: list[tuple[int, float, float, float]] = []   # (클립번호, 버퍼시작, 버퍼끝, 원본시작)
+        t = 0.0
+        for ci in g:
+            ks, ke = keep_ranges[ci][0], keep_ranges[ci][1]
+            a0 = int(max(ks, 0.0) * WHISPER_SR)
+            a1 = min(int(ke * WHISPER_SR), len(audio))
+            if a1 - a0 < 400:                 # 0.025초 미만이면 인식할 게 없다
+                continue
+            chunk = audio[a0:a1]
+            parts.append(chunk)
+            dur = len(chunk) / WHISPER_SR
+            spans.append((ci, t, t + dur, ks))
+            t += dur
+            parts.append(pad)
+            t += GROUP_PAD_SEC
+        if not spans:
+            n_done += len(g)
+            continue
+
+        # ── 3) 한 판을 한 번에 인식 ──────────────────────────
+        words = _transcribe_array(np.concatenate(parts), 0.0, script_text)
+
+        # ── 4) 단어를 '버퍼 위치'로 원래 클립에 되돌린다 ──────
+        for w in words:
+            mid = (w["start"] + w["end"]) / 2
+            hit = None
+            for sp in spans:
+                if sp[1] <= mid < sp[2]:
+                    hit = sp
+                    break
+            if hit is None:                   # 무음 패딩에 걸친 말 → 가장 가까운 클립으로
+                hit = min(spans, key=lambda s: 0.0 if s[1] <= mid < s[2]
+                          else min(abs(mid - s[1]), abs(mid - s[2])))
+            ci, bs, _be, ks = hit
+            buckets[ci].append({"start": ks + (w["start"] - bs),
+                                "end": ks + (w["end"] - bs),
+                                "word": w["word"]})
+
+        n_done += len(g)
         if progress is not None:
-            progress.update(done=i + 1, total=total, halluc=counter["halluc"])
+            progress.update(done=min(n_done, total), total=total, halluc=counter["halluc"])
+
+    segs = [refine(ks, ke, buckets[i]) for i, (ks, ke, _s, _e) in enumerate(keep_ranges)]
+    if progress is not None:
+        progress.update(done=total, total=total, halluc=counter["halluc"])
     return segs
 
 
@@ -3042,7 +3121,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립마다 그 클립 소리로 정확히 인식합니다 (클립 {len(keep_ranges)}개, 오디오는 한 번만 불러옴). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 30초씩 묶어 빠르게 인식합니다 (자막은 각 클립 말 그대로). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
