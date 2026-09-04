@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -863,23 +864,22 @@ def transcribe_all_clips(video_path: Path,
                          script_text: str = "",
                          progress: dict | None = None) -> list[dict]:
     """
-    ★ 자막은 무조건 '그 클립 위에, 그 클립 말 그대로'.
-      그러면서도 빠르게 — 두 가지를 같이 잡는 방식이다.
+    ★ 클립마다 '그 클립 소리로만' 따로 인식한다. (절대 바꾸지 말 것)
 
-    핵심: 남긴 클립들을 '그대로 이어붙인 소리'(= 컷편집된 영상의 소리)를 인식한다.
-      · 클립마다 따로 부르면 Whisper 가 2초 클립도 30초짜리 비용으로 돌아서
-        클립 수만큼 느려진다(130개 = 130번). 이어붙이면 몇 번이면 끝나 빠르다.
-      · ★ 클립 사이에 무음을 끼우지 않는다. 무음을 끼우면 소리가 뚝뚝 끊겨
-        Whisper 가 '여긴 말이 없다'로 보고 그 구간을 통째로 버린다(자막 누락 원인).
-        그냥 이어붙이면 자연스러운 연속 대화라 인식이 잘 된다.
-      · 잘라낸 무음·NG 구간은 버퍼에 아예 안 들어가므로 그 구간 말이 샐 수 없다.
-      · 각 단어는 '버퍼 안 위치'로 어느 클립인지 정확히 정해지고, 그 클립 기준
-        원본 시각으로 되돌린다 → 밀림 없음.
-      · 그래도 한 단어도 못 받은 클립은 그 클립 소리만 따로 다시 물어본다 → 누락 없음.
+    예전엔 클립들을 이어붙여 한 번에 인식했다(빠름). 그런데 이어붙인 자리에서
+    다음 클립 첫말이 앞 클립으로 새어 들어간다.
+      실측(C3995 드래프트): 앞 클립 끝말 == 뒤 클립 첫말인 경우가 36/192쌍,
+      그중 12건은 두 클립이 원본에서 1.5~10.5초나 떨어져 있어 절대 이어질 수 없는 말이었다.
+      ('…풀로 집중해 일단' → '일단 이', '…팔았거든 근데' → '근데 용인이랑…')
+      0.23초짜리 클립에 '이 거대한'(4음절) 같은 물리적으로 불가능한 자막도 생겼다.
+    → 클립을 따로따로 인식하면 그런 새어듦이 원천적으로 불가능하다.
+
+    속도는 ffmpeg 를 클립마다 다시 돌리지 않고 **오디오를 한 번만 메모리에 올려
+    거기서 잘라 쓰는 것**으로 확보한다. 예전 느림의 진짜 원인은 클립별 ffmpeg 였다.
     (오디오 로드 실패 시에만 클립별 ffmpeg 폴백)
     """
-    import numpy as np
-    GROUP_MAX_SEC = 60.0     # 한 번에 인식할 이어붙인 소리 길이 (진행률 표시용으로 나눔)
+    from concurrent.futures import ThreadPoolExecutor
+    CLIP_PAD_SEC = 0.10      # 끝소리가 잘리지 않게 앞뒤로 조금만 (잘라낸 무음 안에서만)
     total = len(keep_ranges)
     counter = {"halluc": 0}
     script_tokens = {_norm_token(w).lower() for w in script_text.split()} if script_text else set()
@@ -920,88 +920,30 @@ def transcribe_all_clips(video_path: Path,
                 progress.update(done=i + 1, total=total, halluc=counter["halluc"])
         return segs
 
-    # ── 1) 연속 클립을 GROUP_MAX_SEC 단위로 묶는다 (진행률 표시용) ──
-    groups: list[list[int]] = []
-    cur: list[int] = []
-    cur_sec = 0.0
-    for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
-        dur = max(ke - ks, 0.0)
-        if cur and cur_sec + dur > GROUP_MAX_SEC:
-            groups.append(cur)
-            cur, cur_sec = [], 0.0
-        cur.append(i)
-        cur_sec += dur
-    if cur:
-        groups.append(cur)
-
+    # ── 클립 하나만 인식 ────────────────────────────────
+    audio_end = len(audio) / WHISPER_SR
     buckets: list[list[dict]] = [[] for _ in keep_ranges]
-    n_done = 0
+    n_done = {"n": 0}
+    lock = threading.Lock()
 
-    for g in groups:
-        # ── 2) 클립들을 '그대로' 이어붙이고(무음 안 끼움), 각 클립 위치를 기록 ──
-        parts: list = []
-        spans: list[tuple[int, float, float, float]] = []   # (클립번호, 버퍼시작, 버퍼끝, 원본시작)
-        t = 0.0
-        for ci in g:
-            ks, ke = keep_ranges[ci][0], keep_ranges[ci][1]
-            a0 = int(max(ks, 0.0) * WHISPER_SR)
-            a1 = min(int(ke * WHISPER_SR), len(audio))
-            if a1 - a0 < 400:                 # 0.025초 미만이면 인식할 게 없다
-                continue
-            chunk = audio[a0:a1]
-            parts.append(chunk)
-            dur = len(chunk) / WHISPER_SR
-            spans.append((ci, t, t + dur, ks))
-            t += dur
-        if not spans:
-            n_done += len(g)
-            continue
-
-        # ── 3) 이어붙인 소리(= 컷편집된 영상 소리)를 한 번에 인식 ──
-        words = _transcribe_array(np.concatenate(parts), 0.0, script_text)
-
-        # ── 4) 단어를 '버퍼 위치'로 원래 클립에 되돌린다 ──────
-        for w in words:
-            mid = (w["start"] + w["end"]) / 2
-            hit = None
-            for sp in spans:
-                if sp[1] <= mid < sp[2]:
-                    hit = sp
-                    break
-            if hit is None:                   # 경계에 걸친 말 → 가장 가까운 클립으로
-                hit = min(spans, key=lambda s: min(abs(mid - s[1]), abs(mid - s[2])))
-            ci, bs, _be, ks = hit
-            buckets[ci].append({"start": ks + (w["start"] - bs),
-                                "end": ks + (w["end"] - bs),
-                                "word": w["word"]})
-
-        n_done += len(g)
-        if progress is not None:
-            progress.update(done=min(n_done, total), total=total, halluc=counter["halluc"])
-
-    # ── 5) 한 단어도 못 받은 클립은 그 클립 소리만 따로 다시 물어본다 (누락 방지) ──
-    #   말이 있는 클립엔 반드시 자막이 붙도록 하는 안전망. 조용한 클립만 건너뛴다.
-    def clip_rms(ks: float, ke: float) -> float:
-        a0, a1 = int(max(ks, 0.0) * WHISPER_SR), min(int(ke * WHISPER_SR), len(audio))
-        if a1 - a0 < 800:
-            return 0.0
-        return float(np.sqrt(np.mean(np.square(audio[a0:a1]))))
-
-    todo = [i for i, (ks, ke, _s, _e) in enumerate(keep_ranges)
-            if not buckets[i] and ke - ks >= 0.2 and clip_rms(ks, ke) >= 0.006]
-    if progress is not None:
-        # ★ 이 단계도 진행률을 알려준다. 안 알려주면 화면이 '자막 인식 N/N' 에서
-        #   멈춘 것처럼 보여서 사용자가 멈춘 줄 안다(실제로는 뒤에서 돌고 있음).
-        progress.update(phase="retry", rdone=0, rtotal=len(todo))
-    for n, i in enumerate(todo, 1):
+    def one_clip(i: int) -> None:
         ks, ke = keep_ranges[i][0], keep_ranges[i][1]
-        off = max(ks - 0.05, 0.0)
-        a0 = int(off * WHISPER_SR)
-        a1 = min(int((ke + 0.05) * WHISPER_SR), len(audio))
-        if a1 - a0 >= 800:
-            buckets[i] = _transcribe_array(audio[a0:a1], off, script_text)
-        if progress is not None:
-            progress.update(phase="retry", rdone=n, rtotal=len(todo))
+        # 앞뒤 여유는 '잘라낸 무음 안에서만' — 옆 클립 소리는 절대 안 들어간다
+        room_lo = ks - (keep_ranges[i - 1][1] if i else 0.0)
+        room_hi = (keep_ranges[i + 1][0] if i + 1 < total else audio_end) - ke
+        s = max(ks - min(CLIP_PAD_SEC, max(room_lo, 0.0)), 0.0)
+        e = min(ke + min(CLIP_PAD_SEC, max(room_hi, 0.0)), audio_end)
+        a0, a1 = int(s * WHISPER_SR), min(int(e * WHISPER_SR), len(audio))
+        if a1 - a0 >= 800:                    # 0.05초 미만이면 인식할 게 없다
+            buckets[i] = _transcribe_array(audio[a0:a1], s, script_text)
+        with lock:
+            n_done["n"] += 1
+            if progress is not None:
+                progress.update(done=n_done["n"], total=total, halluc=counter["halluc"])
+
+    # 모델을 num_workers=ASR_WORKERS 로 열어놨으므로 그만큼 동시에 돌린다
+    with ThreadPoolExecutor(max_workers=max(1, ASR_WORKERS)) as pool:
+        list(pool.map(one_clip, range(total)))
 
     segs = [refine(ks, ke, buckets[i]) for i, (ks, ke, _s, _e) in enumerate(keep_ranges)]
     if progress is not None:
@@ -1630,62 +1572,6 @@ def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
     return groups
 
 
-def _phrase_norm(words: list[dict], i: int, j: int) -> str:
-    """words[i:j] 를 비교용 한 덩어리 문자열로 (띄어쓰기·문장부호 무시)."""
-    return "".join(_norm_token(w["word"]) for w in words[i:j])
-
-
-def dedupe_clip_words(words: list[dict],
-                      max_phrase_words: int = 8,
-                      max_phrase_chars: int = 24) -> list[dict]:
-    """
-    ★ 한 영상 클립 안에서 같은 말을 두 번 이상 한 경우 한 번만 남긴다.
-      (촬영 중 말을 더듬거나 다시 말한 부분 — 사용자 요청:
-       "긴 영상에 중복 단어 있으면 하나만 나오게 해야하고")
-
-      '첫째 첫째 수주가 끊겼어?'            → '첫째 수주가 끊겼어?'
-      '캐나다 충격으로 캐나 다 충격 으로'   → '캐나다 충격으로'   (띄어쓰기 나은 쪽)
-      '배가 판리면 배가 팔리면'             → '배가 팔리면'       (다시 말한 쪽)
-
-    바로 뒤에 붙어서 반복되는 경우만 지운다(문장 전체에 흩어진 같은 단어는 그대로).
-    """
-    res = list(words)
-    i = 0
-    while i < len(res):
-        hit = fuzzy = None
-        # 긴 반복부터 찾는다 ('배가 팔리면 배가 팔리면' 을 '배가'만 지우지 않게)
-        for j in range(min(len(res), i + max_phrase_words), i, -1):
-            a = _phrase_norm(res, i, j)
-            if not a or len(a) > max_phrase_chars:
-                continue
-            for k in range(j + 1, min(len(res), j + max_phrase_words) + 1):
-                b = _phrase_norm(res, j, k)
-                if not b:
-                    continue
-                if len(b) > len(a) + 2:
-                    break
-                if b == a:
-                    hit = (j, k, True)         # 똑같은 말이 바로 뒤에 또 나옴
-                    break
-                # 발음이 뭉개져 조금 다르게 인식된 반복 (판리면/팔리면)
-                if fuzzy is None and len(a) >= 3 and abs(len(a) - len(b)) <= 2 and \
-                        difflib.SequenceMatcher(None, a, b).ratio() >= 0.8:
-                    fuzzy = (j, k, False)
-            if hit:
-                break
-        hit = hit or fuzzy
-        if not hit:
-            i += 1
-            continue
-        j, k, exact = hit
-        if exact and (j - i) <= (k - j):
-            del res[j:k]          # 똑같으면 띄어쓰기가 더 나은(어절 수 적은) 쪽을 남김
-        else:
-            del res[i:j]          # 더듬은 앞쪽을 버리고 다시 말한 쪽을 남김
-        # i 를 그대로 두어 3번 이상 반복도 이어서 처리
-    return res
-
-
 def limit_groups(groups: list[list[dict]], max_groups: int) -> list[list[dict]]:
     """
     조각 수를 max_groups 이하로 줄인다 (짧은 클립에서 자막이 깜빡이지 않게).
@@ -1861,13 +1747,14 @@ def subtitle_chunks_for_timeline(segments: list[dict],
             # 말이 없는 클립에는 자막을 아예 만들지 않는다 ("..." 표시 없음)
             continue
 
-        # 자막이 뜨는 시각은 대본 보정·중복 제거 전, 실제로 말한 시각 기준
+        # 자막이 뜨는 시각은 대본 보정 전, 실제로 말한 시각 기준
         first_spoken = int(words[0].get("tl_start", clip_start))
         # 마지막 인식 단어 뒤에 남은 클립 시간 = 인식이 놓쳤을 수 있는 말의 길이
         tail_room = max(0, clip_end - max(w.get("tl_end", 0) for w in words))
 
-        # ★ 한 클립 안에서 같은 말을 반복한 부분은 한 번만 남긴다
-        words = dedupe_clip_words(words)
+        # ★ 같은 말을 여러 번 해도 전부 그대로 남긴다 (사용자 요청:
+        #   "앞에 자막이 나왔다고 뒤에 안 나오는 게 아니라 다시 나와야 해")
+        #   예전의 중복 제거(dedupe_clip_words)는 이 요청으로 뺐다.
 
         # 대본 참고: 이 클립이 대본의 어느 부분인지 찾아, 그 대본 문장 그대로 자막을 만든다
         if script_norm and words:
@@ -3323,7 +3210,7 @@ async def process_video(
                     yield f"data: {json.dumps({'step': 'asr', 'msg': msg})}\n\n"
 
             if want_sub:
-                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 30초씩 묶어 빠르게 인식합니다 (자막은 각 클립 말 그대로). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
+                yield f"data: {json.dumps({'step': 'asr', 'msg': f'클립 {len(keep_ranges)}개를 하나씩 따로 인식합니다 (그 클립 소리만 → 옆 클립 말이 섞이지 않음). 첫 실행 시 모델 다운로드 ~3GB'})}\n\n"
                 async with _asr_lock:
                     loop = asyncio.get_event_loop()
                     prog: dict = {"done": 0, "total": len(keep_ranges)}
