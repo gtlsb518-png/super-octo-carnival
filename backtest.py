@@ -62,8 +62,8 @@ DEFAULTS = {
     'amount': 50.0,        # 진입금 (USDT)
     'leverage': 3,         # 레버리지
     'fee_pct': 0.04,       # 수수료 % (테이커, 진입/청산 각각)
-    'tp_trend': 1.2,       # 추세장 TP %
-    'tp_sideways': 1.0,    # 횡보장 TP %
+    'tp_trend': 1.5,       # 추세장 TP % (봇 설정과 동일)
+    'tp_sideways': 1.2,    # 횡보장 TP % (봇 설정과 동일)
     'adx_period': 10,      # ADX 기간
     'adx_th': 21,          # ADX 추세장 기준
     'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용, 매매봉과 별개)
@@ -72,7 +72,7 @@ DEFAULTS = {
     'ema_fast': 34,        # EMA Fast
     'ema_slow': 55,        # EMA Slow
     'days': 365,           # 백테스트 기간 (일)
-    'interval': '5m',      # 시간봉
+    'interval': '1h',      # 시간봉 (봇 설정과 동일)
     'hybrid': False,       # 하이브리드 조기청산
     'hybrid_fast': 9,      # 하이브리드 빠른 EMA Fast
     'hybrid_slow': 21,     # 하이브리드 빠른 EMA Slow
@@ -91,6 +91,15 @@ DEFAULTS = {
     'bb_len': 20,          # 볼린저 기간
     'bb_mult': 2.0,        # 볼린저 표준편차 배수
     'bb_squeeze': 125,     # 볼린저 스퀴즈 판단 기간
+    # 🔥 펀딩비 (선물은 포지션을 들고만 있어도 8시간마다 내는 돈)
+    #    보유시간이 길수록 누적 → 1시간봉처럼 오래 들고 있으면 무시 못 함
+    'funding_on': True,    # 펀딩비 반영 ON/OFF
+    'funding_pct': 0.01,   # 펀딩비 % (1회당). 평온 0.01 / 보통 0.03 / 과열 0.05~0.1
+    'funding_hours': 8,    # 펀딩 주기 (시간) — 바이낸스는 8시간 (00/08/16 UTC)
+    # 🔥 계좌 잔고 한도 (현실 모드)
+    #    0 = 무제한(기존 방식, 돈이 안 떨어진다고 가정 → 결과가 낙관적으로 나옴)
+    #    값 입력 시 잔고가 진입금보다 적으면 진입 못 하고, 0 이하면 파산 처리
+    'capital': 0.0,
 }
 
 DEFAULT_SYMBOLS = ['BTCUSDT', 'XRPUSDT', 'DOGEUSDT']
@@ -391,7 +400,7 @@ def bollinger_signals(df, length=20, mult=2.0, squeeze=125):
 
 STRAT_WARMUP = {'base': 60, 'goldfib': 245, 'bollinger': 150}
 # 전략별 권장 매매 시간봉 (황금피보 5/20/60/120/240선은 큰 봉이 적합)
-STRAT_INTERVAL = {'base': '5m', 'goldfib': '1h', 'bollinger': '1h'}
+STRAT_INTERVAL = {'base': '1h', 'goldfib': '1h', 'bollinger': '1h'}
 
 
 # ==================== 시뮬레이션 ====================
@@ -458,11 +467,52 @@ def run_backtest(df, p):
     if tp_mode == 'atr':
         atr_tp = atr_rma(df, int(p.get('atr_tp_period', 14))).values  # TP거리 계산용 ATR
 
+    # 🔥 펀딩비: 보유 중 펀딩 시각(기본 8시간마다)을 몇 번 지났는지 세서 부과
+    #    추세추종 봇은 대개 '쏠린 쪽'에 서 있어 롱·숏 모두 내는 쪽이 되므로
+    #    양방향 모두 비용으로 계산한다 (보수적·현실적).
+    fund_rate = 0.0
+    fund_cum = None
+    if p.get('funding_on', True) and float(p.get('funding_pct', 0.0)) > 0:
+        fund_rate = float(p['funding_pct']) / 100.0
+        fh = max(1, int(p.get('funding_hours', 8)))
+        idx = df.index
+        if isinstance(idx, pd.DatetimeIndex):
+            # 펀딩 정산 시각 = 하루 중 fh시간 간격 경계 (바이낸스 00/08/16 UTC)
+            flag = ((idx.hour % fh == 0) & (idx.minute == 0) & (idx.second == 0))
+            fund_cum = np.cumsum(flag.astype(np.int64))
+        else:
+            fund_cum = None   # 시간 정보 없으면 아래에서 봉수 기준으로 근사
+
+    # 시간 정보가 없을 때 쓸 봉당 시간 (근사용)
+    bar_hours = 1.0
+    if isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+        bar_hours = (df.index[1] - df.index[0]).total_seconds() / 3600.0
+
+    def funding_cost(pp, exit_i):
+        """진입~청산 사이에 낸 펀딩비 (USDT). 명목가 기준."""
+        if fund_rate <= 0:
+            return 0.0
+        notional = pp['qty'] * pp['entry']
+        if fund_cum is not None:
+            n_events = int(fund_cum[exit_i] - fund_cum[pp['entry_i']])
+        else:
+            fh = max(1, int(p.get('funding_hours', 8)))
+            n_events = int((exit_i - pp['entry_i']) * bar_hours // fh)
+        return notional * fund_rate * max(0, n_events)
+
+    # 🔥 계좌 잔고 한도: 0이면 무제한(기존 동작)
+    capital = float(p.get('capital', 0.0) or 0.0)
+    limited = capital > 0
+    skipped = 0          # 잔고 부족으로 진입을 못 한 '구간' 수 (연속은 1회로 셈)
+    was_blocked = False  # 직전에도 막혀 있었는지 (중복 카운트 방지)
+    bankrupt_at = None   # 파산 시각
+
     trades = []
     pos = None
     equity = 0.0
     peak = 0.0
     max_dd = 0.0
+    min_equity = 0.0     # 누적손익의 최저점 → 필요한 최소 계좌 규모 계산용
 
     def tp_pct_at(i):
         return p['tp_trend'] if adx[i] >= p['adx_th'] else p['tp_sideways']
@@ -498,31 +548,52 @@ def run_backtest(df, p):
                 'entry_i': i + 1, 'min_roi': 0.0}
 
     def close_pos(pp, exit_price, exit_i, reason):
-        nonlocal equity, peak, max_dd
+        nonlocal equity, peak, max_dd, bankrupt_at, min_equity
         if pp['side'] == 'LONG':
             gross = pp['qty'] * (exit_price - pp['entry'])
         else:
             gross = pp['qty'] * (pp['entry'] - exit_price)
         fee = fee_rate * pp['qty'] * (pp['entry'] + exit_price)
-        net = gross - fee
+        fund = funding_cost(pp, exit_i)
+        net = gross - fee - fund
         equity += net
         peak = max(peak, equity)
         max_dd = min(max_dd, equity - peak)
+        min_equity = min(min_equity, equity)
         trades.append({
             '시각': df.index[exit_i], '포지션': pp['side'], '진입가': pp['entry'],
             '청산가': exit_price, 'TP%': pp['tp_pct'],
             'ROI%': round(gross / amount * 100, 2), '수익': round(gross, 4),
-            '수수료': round(fee, 4), '순손익': round(net, 4),
+            '수수료': round(fee, 4), '펀딩비': round(fund, 4), '순손익': round(net, 4),
             '최저ROI%': round(pp['min_roi'], 2), '유형': reason,
             '보유(봉)': exit_i - pp['entry_i'],
+            '잔고': round(capital + equity, 2) if limited else None,
         })
+        if limited and bankrupt_at is None and capital + equity <= 0:
+            bankrupt_at = df.index[exit_i]
+
+    def can_open():
+        """잔고 한도 모드: 증거금(진입금)만큼 남아 있어야 새 포지션을 연다."""
+        nonlocal skipped, was_blocked
+        if not limited:
+            return True
+        if capital + equity < amount:
+            if not was_blocked:      # 연속으로 막힌 구간은 1회로만 집계
+                skipped += 1
+                was_blocked = True
+            return False
+        was_blocked = False
+        return True
 
     i = warmup
     while i < len(df) - 1:
+        # 파산하면 그 시점에 매매 종료 (실제 계좌는 여기서 끝남)
+        if limited and capital + equity <= 0:
+            break
         if pos is None:
-            if long_sig[i]:
+            if long_sig[i] and can_open():
                 pos = open_pos('LONG', i)
-            elif short_sig[i]:
+            elif short_sig[i] and can_open():
                 pos = open_pos('SHORT', i)
             i += 1
             continue
@@ -548,7 +619,7 @@ def run_backtest(df, p):
                 pos = None
             elif short_sig[j]:
                 close_pos(pos, o[j + 1], j, '스위칭')
-                pos = open_pos('SHORT', j)
+                pos = open_pos('SHORT', j) if can_open() else None
             elif p.get('hybrid') and roi_close <= roi_th and h_dead[j]:
                 close_pos(pos, o[j + 1], j, '조기청산')
                 pos = None
@@ -569,14 +640,25 @@ def run_backtest(df, p):
                 pos = None
             elif long_sig[j]:
                 close_pos(pos, o[j + 1], j, '스위칭')
-                pos = open_pos('LONG', j)
+                pos = open_pos('LONG', j) if can_open() else None
             elif p.get('hybrid') and roi_close <= roi_th and h_gold[j]:
                 close_pos(pos, o[j + 1], j, '조기청산')
                 pos = None
 
         i = j + 1
 
-    return pd.DataFrame(trades), max_dd
+    out = pd.DataFrame(trades)
+    # 부가 정보는 attrs로 전달 (반환값 형태를 바꾸지 않아 기존 호출부와 호환)
+    out.attrs.update({
+        'capital': capital, 'limited': limited,
+        'bankrupt': bankrupt_at is not None, 'bankrupt_at': bankrupt_at,
+        'skipped_entries': skipped,
+        'final_balance': (capital + equity) if limited else None,
+        'funding_on': fund_rate > 0,
+        # 이 설정으로 살아남으려면 필요한 최소 계좌 = 진입금 + 누적손익 최저점
+        'need_capital': amount + max(0.0, -min_equity),
+    })
+    return out, max_dd
 
 
 def summarize(trades, symbol, cfg_name, max_dd, p):
@@ -585,6 +667,14 @@ def summarize(trades, symbol, cfg_name, max_dd, p):
     total = len(trades)
     wins = int((trades['순손익'] > 0).sum())
     win_rate = wins / total * 100
+    a = trades.attrs
+    extra = {'필요잔고': round(a.get('need_capital') or 0.0, 2)}
+    if a.get('funding_on'):
+        extra['펀딩비'] = round(trades['펀딩비'].sum(), 2)
+    if a.get('limited'):
+        extra['최종잔고'] = round(a.get('final_balance') or 0.0, 2)
+        extra['잔고부족'] = int(a.get('skipped_entries') or 0)
+        extra['파산'] = 'O' if a.get('bankrupt') else ''
     return {
         '심볼': symbol, '설정': cfg_name, '거래수': total,
         '승률%': round(win_rate, 1),
@@ -599,6 +689,7 @@ def summarize(trades, symbol, cfg_name, max_dd, p):
         '최대단일손실': round(trades['순손익'].min(), 2),
         '최저ROI%': round(trades['최저ROI%'].min(), 1),
         '최대낙폭': round(max_dd, 2),
+        **extra,
     }
 
 
@@ -711,14 +802,15 @@ def monthly_table(trades):
         profit = g.loc[g['순손익'] > 0, '순손익'].sum()
         loss = g.loc[g['순손익'] <= 0, '순손익'].sum()  # 음수
         fee = g['수수료'].sum()
+        fund = g['펀딩비'].sum() if '펀딩비' in g.columns else 0.0
         net = g['순손익'].sum()
         cum += net
         rows.append({
             '년-월': ym, '거래수': len(g), '승': wins, '패': losses,
             '승률%': round(wins / len(g) * 100, 1) if len(g) else 0,
             '수익(USDT)': round(profit, 2), '손실(USDT)': round(loss, 2),
-            '수수료(USDT)': round(fee, 2), '순손익(USDT)': round(net, 2),
-            '누적순손익': round(cum, 2),
+            '수수료(USDT)': round(fee, 2), '펀딩비(USDT)': round(fund, 2),
+            '순손익(USDT)': round(net, 2), '누적순손익': round(cum, 2),
         })
     df = pd.DataFrame(rows)
     # 합계 행
@@ -729,6 +821,7 @@ def monthly_table(trades):
         '수익(USDT)': round(df['수익(USDT)'].sum(), 2),
         '손실(USDT)': round(df['손실(USDT)'].sum(), 2),
         '수수료(USDT)': round(df['수수료(USDT)'].sum(), 2),
+        '펀딩비(USDT)': round(df['펀딩비(USDT)'].sum(), 2),
         '순손익(USDT)': round(df['순손익(USDT)'].sum(), 2),
         '누적순손익': round(cum, 2),
     }
@@ -837,6 +930,15 @@ def run_all(symbols, p, compare, log=print, on_row=None):
     log(f"🔬 백테스트: {len(symbols)}개 심볼 | {period} | 매매 {p['interval']}봉"
         f" | ADX {p.get('adx_interval', p['interval'])}봉")
     log(f"   설정 {len(configs)}종: {', '.join(c['name'] for c in configs)}")
+    if p.get('funding_on', True) and float(p.get('funding_pct', 0)) > 0:
+        log(f"   💸 펀딩비 {p['funding_pct']:g}% / {int(p.get('funding_hours', 8))}시간마다 반영")
+    else:
+        log("   ⚠️ 펀딩비 미반영 — 실제보다 수익이 높게 나옵니다")
+    cap = float(p.get('capital', 0) or 0)
+    if cap > 0:
+        log(f"   🏦 계좌 잔고 {cap:,.0f} USDT (코인당) — 잔고 소진 시 매매 중단")
+    else:
+        log("   ⚠️ 잔고 무제한 모드 — 실제로는 중간에 청산당할 수 있습니다")
     log("=" * 50)
 
     base = get_workdir(log)
@@ -875,8 +977,21 @@ def run_all(symbols, p, compare, log=print, on_row=None):
                 all_trades.append((sym, cfg['name'], trades))
                 if on_row:
                     on_row(row)
-                log(f"  ▶ [{cfg['name']}] {row['거래수']}회 | 승률 {row['승률%']}% "
-                    f"| 순손익 {row['순손익']:+,.2f} | 수수료 -{row['수수료']:,.2f}")
+                msg = (f"  ▶ [{cfg['name']}] {row['거래수']}회 | 승률 {row['승률%']}% "
+                       f"| 순손익 {row['순손익']:+,.2f} | 수수료 -{row['수수료']:,.2f}")
+                if '펀딩비' in row:
+                    msg += f" | 펀딩비 -{row['펀딩비']:,.2f}"
+                log(msg)
+                need = row.get('필요잔고') or 0
+                if need > p['amount'] * 1.2:
+                    log(f"     🏦 이 코인은 계좌에 최소 {need:,.0f} USDT 있어야 "
+                        f"중간에 안 끊깁니다 (진입금 {p['amount']:g})")
+                if trades.attrs.get('bankrupt'):
+                    log(f"     💀 파산! {trades.attrs['bankrupt_at']} 에 잔고 소진 → 매매 중단")
+                    log("        (여기서 멈췄으니 '필요잔고'는 최소값 — 잔고 0으로 다시 돌려 실제 필요액 확인)")
+                elif row.get('잔고부족'):
+                    log(f"     ⚠️ 잔고 부족으로 매매가 {row['잔고부족']}번 멈췄습니다 "
+                        f"(최종잔고 {row.get('최종잔고', 0):,.2f}) — 잔고를 늘리거나 진입금을 줄이세요")
                 safe = cfg['name'].replace('/', '-')
                 save_csv(trades, f"backtest_trades_{sym}_{safe}.csv")
 
@@ -897,10 +1012,14 @@ def run_all(symbols, p, compare, log=print, on_row=None):
             trades = grp['거래수'].sum()
             wr = (grp['승률%'] * grp['거래수']).sum() / trades if trades else 0
             dd = grp['최대낙폭'].min()
+            fund = grp['펀딩비'].sum() if '펀딩비' in grp.columns else 0.0
             agg.append({'설정': name, '순손익': net, '수수료': fee,
-                        '승률': wr, '낙폭': dd})
-            log(f"   {name:20s}: 순손익 {net:+10,.2f} | 승률 {wr:4.1f}%"
-                f" | 최대낙폭 {dd:+.2f} | 수수료 -{fee:,.2f}")
+                        '펀딩비': fund, '승률': wr, '낙폭': dd})
+            line = (f"   {name:20s}: 순손익 {net:+10,.2f} | 승률 {wr:4.1f}%"
+                    f" | 최대낙폭 {dd:+.2f} | 수수료 -{fee:,.2f}")
+            if fund:
+                line += f" | 펀딩비 -{fund:,.2f}"
+            log(line)
         log("=" * 50)
 
         agg.sort(key=lambda x: x['순손익'], reverse=True)
@@ -1143,16 +1262,58 @@ def launch_gui():
     tk.Label(left, text="(현재봉 거래량 ≥ 평균 × 배수일 때만 진입)", bg=PANEL,
              fg='#888888', font=('Arial', 8)).pack(anchor='w', padx=22)
 
+    # 💸 펀딩비 (선물 보유 비용)
+    tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
+    funding_on_var = tk.BooleanVar(value=DEFAULTS['funding_on'])
+    tk.Checkbutton(left, text="펀딩비 반영 (권장: 켜기)", variable=funding_on_var,
+                   bg=PANEL, fg='#ffaa00', selectcolor=BG, font=('Arial', 10, 'bold'),
+                   activebackground=PANEL).pack(anchor='w', padx=10)
+    fform = tk.Frame(left, bg=PANEL)
+    fform.pack(padx=10)
+    ffields = [('펀딩비 % (1회당)', 'funding_pct'), ('펀딩 주기 (시간)', 'funding_hours')]
+    for r, (label, key) in enumerate(ffields):
+        tk.Label(fform, text=label, bg=PANEL, fg='#aaaaaa', font=('Arial', 9),
+                 anchor='w').grid(row=r, column=0, sticky='w', pady=1)
+        v = tk.StringVar(value=str(DEFAULTS[key]))
+        tk.Entry(fform, textvariable=v, width=10, font=('Arial', 9),
+                 justify='center').grid(row=r, column=1, padx=6, pady=1)
+        vars_[key] = v
+    for ex in ["포지션을 들고만 있어도 8시간마다 내는 돈.",
+               "  0.01 = 평온한 장 (BTC 평상시)",
+               "  0.03 = 보통 / 0.05~0.10 = 과열장·알트",
+               "※ 끄면 실제보다 수익이 부풀려집니다"]:
+        tk.Label(left, text=ex, bg=PANEL, fg='#888888',
+                 font=('Arial', 8)).pack(anchor='w', padx=22)
+
+    # 🏦 계좌 잔고 한도 (현실 모드)
+    tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
+    tk.Label(left, text="🏦 계좌 잔고 한도", bg=PANEL, fg='#ff6666',
+             font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
+    cform = tk.Frame(left, bg=PANEL)
+    cform.pack(padx=10)
+    tk.Label(cform, text='코인당 잔고 (0=무제한)', bg=PANEL, fg='#aaaaaa',
+             font=('Arial', 9), anchor='w').grid(row=0, column=0, sticky='w', pady=1)
+    v = tk.StringVar(value=str(DEFAULTS['capital']))
+    tk.Entry(cform, textvariable=v, width=10, font=('Arial', 9),
+             justify='center').grid(row=0, column=1, padx=6, pady=1)
+    vars_['capital'] = v
+    for ex in ["0 = 돈이 안 떨어진다고 가정 (낙관적)",
+               "값 입력 시: 잔고<진입금이면 진입 못 하고,",
+               "  잔고 0 이하면 파산 처리 후 매매 중단",
+               "※ 10코인 계좌 2000이면 코인당 200 입력"]:
+        tk.Label(left, text=ex, bg=PANEL, fg='#888888',
+                 font=('Arial', 8)).pack(anchor='w', padx=22)
+
     # 익절(TP) 방식
     tk.Label(left, text="─" * 30, bg=PANEL, fg='#555555').pack()
     tk.Label(left, text="🎯 익절(TP) 방식", bg=PANEL, fg='#00ffff',
              font=('Arial', 10, 'bold')).pack(anchor='w', padx=10)
     TP_MODE_OPTS = {
-        '지금 방식 (ADX 고정 1.2/1.0%)': 'adx',
+        '지금 방식 (ADX 고정 1.5/1.2%)': 'adx',
         'ATR (변동성 기반)': 'atr',
         '스위칭만 (TP 없음)': 'switch',
     }
-    tp_mode_label_var = tk.StringVar(value='지금 방식 (ADX 고정 1.2/1.0%)')
+    tp_mode_label_var = tk.StringVar(value='지금 방식 (ADX 고정 1.5/1.2%)')
     ttk.Combobox(left, textvariable=tp_mode_label_var,
                  values=list(TP_MODE_OPTS.keys()), width=26,
                  state='readonly').pack(anchor='w', padx=22, pady=2)
@@ -1210,7 +1371,8 @@ def launch_gui():
         adx_interval_var.set(DEFAULTS['adx_interval'])
         hybrid_var.set(DEFAULTS['hybrid'])
         vol_filter_var.set(DEFAULTS['vol_filter'])
-        tp_mode_label_var.set('지금 방식 (ADX 고정 1.2/1.0%)')
+        funding_on_var.set(DEFAULTS['funding_on'])
+        tp_mode_label_var.set('지금 방식 (ADX 고정 1.5/1.2%)')
         strategy_label_var.set('기본 (UT+EMA + 스위칭)')
         days_var.set(str(DEFAULTS['days']))
         start_var.set('')
@@ -1292,7 +1454,8 @@ def launch_gui():
              font=('Arial', 12, 'bold')).pack(anchor='w')
 
     cols = ['심볼', '설정', '거래수', '승률%', 'TP익절', '스위칭', '손절', '조기청산',
-            '강제청산', '총수익', '수수료', '순손익', '최대낙폭', '최저ROI%']
+            '강제청산', '총수익', '수수료', '펀딩비', '순손익', '최대낙폭', '최저ROI%',
+            '필요잔고', '최종잔고', '잔고부족', '파산']
     style = ttk.Style()
     try:
         style.theme_use('clam')
@@ -1356,7 +1519,8 @@ def launch_gui():
         """빈칸/공백/쉼표 등 관대하게 처리 — 이상하면 기본값으로 대체(안 죽음)"""
         p = dict(DEFAULTS)
         int_keys = {'leverage', 'adx_period', 'ut_atr', 'ema_fast', 'ema_slow',
-                    'days', 'hybrid_fast', 'hybrid_slow', 'vol_ma', 'atr_tp_period'}
+                    'days', 'hybrid_fast', 'hybrid_slow', 'vol_ma', 'atr_tp_period',
+                    'funding_hours'}
         fixed = []
         for key, v in vars_.items():
             raw = (v.get() or '').strip().replace(',', '')
@@ -1390,6 +1554,13 @@ def launch_gui():
         p['adx_interval'] = adx_interval_var.get()
         p['hybrid'] = hybrid_var.get()
         p['vol_filter'] = vol_filter_var.get()
+        p['funding_on'] = funding_on_var.get()
+        p['funding_pct'] = max(0.0, float(p.get('funding_pct', 0.0)))
+        p['funding_hours'] = max(1, int(p.get('funding_hours', 8)))
+        p['capital'] = max(0.0, float(p.get('capital', 0.0)))
+        if p['capital'] > 0 and p['capital'] < p['amount']:
+            gui_log(f"⚠️ 잔고({p['capital']:g})가 진입금({p['amount']:g})보다 적어 "
+                    f"거래가 아예 안 됩니다 — 잔고를 늘리거나 진입금을 줄이세요")
         p['vol_ma'] = max(1, int(p['vol_ma']))
         p['tp_mode'] = TP_MODE_OPTS.get(tp_mode_label_var.get(), 'adx')
         p['atr_tp_period'] = max(1, int(p['atr_tp_period']))
@@ -1487,6 +1658,12 @@ def run_cli():
                     help='진입 전략: base(기본)/goldfib(황금피보)/bollinger(볼린저)')
     ap.add_argument('--sl', type=float, default=DEFAULTS['sl_pct'],
                     help='손절 %% (0=끔, 롱전용 전략에 권장)')
+    ap.add_argument('--funding', type=float, default=DEFAULTS['funding_pct'],
+                    help='펀딩비 %% (1회당, 기본 0.01). 0=끔')
+    ap.add_argument('--funding-hours', type=int, default=DEFAULTS['funding_hours'],
+                    help='펀딩 주기 시간 (기본 8)')
+    ap.add_argument('--capital', type=float, default=DEFAULTS['capital'],
+                    help='코인당 계좌 잔고 USDT (0=무제한). 잔고 소진 시 매매 중단')
     ap.add_argument('--all', action='store_true', help='바이낸스 전체 코인')
     args = ap.parse_args()
 
@@ -1506,6 +1683,10 @@ def run_cli():
     if p['strategy'] in ('goldfib', 'bollinger') and p['sl_pct'] <= 0:
         p['sl_pct'] = 2.0
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
+    p['funding_pct'] = max(0.0, args.funding)
+    p['funding_on'] = p['funding_pct'] > 0
+    p['funding_hours'] = max(1, args.funding_hours)
+    p['capital'] = max(0.0, args.capital)
 
     symbols = fetch_symbols() if args.all else \
         [s.strip().upper() for s in args.symbols.split(',')]
