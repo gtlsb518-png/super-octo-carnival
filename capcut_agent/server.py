@@ -666,6 +666,11 @@ def transcribe_clip_words(video_path: Path, start: float, end: float,
 
 
 MAX_CHARS_PER_SEC = 14.0    # 한국어 빠른 말이 초당 6~7자. 그 두 배를 넘으면 환각으로 본다
+# 자막 한 조각이 화면에 떠 있어야 하는 최소 속도. 손편집본(5ec41315) 실측 최대가
+# 11.1자/초라 그걸 상한으로 쓴다. 이보다 빠르면 읽지도 못하고 깜빡이며 지나간다.
+READ_CHARS_PER_SEC = 11.0
+MIN_DUR_US = 66_667        # 자막 최소 길이 (2프레임)
+MIN_SHOW_US = 300_000      # 한 조각이 최소 이만큼은 떠 있어야 읽힌다 (0.3초)
 
 # Whisper가 조용한 구간에 습관적으로 넣는 유튜브 상투 문구 (실제로 말한 적 없음)
 HALLUCINATION_LINES = [
@@ -679,7 +684,8 @@ HALLUCINATION_LINES = [
 _SHORT_ONLY_LINES = {"감사합니다", "고맙습니다", "안녕하세요", "네", "아멘"}
 # 클립 전체가 아니라 일부만 겹쳐도 환각으로 보는 마무리 인사
 _HALLUC_CONTAINS = ("다음영상에서", "다음시간에", "시청해주셔서", "구독과좋아요",
-                    "구독좋아요", "봐주셔서감사", "영상에서만나")
+                    "구독좋아요", "봐주셔서감사", "영상에서만나",
+                    "영상편집및자막", "자막및영상편집")   # 유튜브 자막 크레딧 환각
 
 
 def _is_number_babble(text: str) -> bool:
@@ -1694,6 +1700,52 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     return _rebalance_tail(groups, hard + 2)
 
 
+def fit_chunk_durations(chunks: list[dict], clip_start: int, clip_end: int) -> list[dict]:
+    """
+    한 영상 클립 안에서 자막 조각들의 표시 시간을 다시 나눈다.
+
+    Whisper 가 준 단어 시각은 클립 앞쪽에서 자주 뭉쳐서, 글자가 많은 조각이
+    0.3초만 스쳐 지나가는 일이 생긴다.
+      실측(C4001): 4.63초 클립인데 '놓친 사람 스톱!'(7자)이 0.30초 = 23자/초.
+      손편집본의 최대는 11.1자/초 — 사람이 낼 수 있는 한계다.
+
+    그래서 조각마다 '최소한 이만큼은 떠 있어야 읽힌다'(글자 수 ÷ READ_CHARS_PER_SEC)를
+    보장하고, 남는 시간은 원래 시각에서 여유가 있던 조각에 비례해 돌려준다.
+    → 말한 순서·시각은 최대한 지키면서 눈에 띄는 '깜빡 자막'만 없어진다.
+    """
+    n = len(chunks)
+    if n <= 1:
+        return chunks
+    span = clip_end - clip_start
+    if span <= 0:
+        return chunks
+    need = [max(MIN_SHOW_US, int(len(re.sub(r"\s", "", c["text"])) * 1_000_000 / READ_CHARS_PER_SEC))
+            for c in chunks]
+    cur = [c["end_us"] - c["start_us"] for c in chunks]
+    if all(d >= nd for d, nd in zip(cur, need)):
+        return chunks                       # 이미 다 충분히 떠 있다
+
+    total_need = sum(need)
+    if total_need >= span:
+        # 클립 자체가 짧다 → 글자 수 비례로 공평하게 나눈다
+        durs = [span * nd / total_need for nd in need]
+    else:
+        extra = span - total_need
+        slack = [max(0, d - nd) for d, nd in zip(cur, need)]
+        tot = sum(slack)
+        durs = [nd + (extra * sl / tot if tot else extra / n)
+                for nd, sl in zip(need, slack)]
+
+    t = clip_start
+    for i, c in enumerate(chunks):
+        c["start_us"] = t
+        t = clip_end if i == n - 1 else min(snap_us_to_frame(int(t + durs[i])), clip_end)
+        c["end_us"] = max(t, c["start_us"] + FRAME_US)
+        t = c["end_us"]
+    chunks[-1]["end_us"] = clip_end
+    return chunks
+
+
 def subtitle_chunks_for_timeline(segments: list[dict],
                                  keep_ranges: list[tuple[float, float, int, int]],
                                  max_chars: int = MAX_SUBTITLE_CHARS,
@@ -1720,9 +1772,6 @@ def subtitle_chunks_for_timeline(segments: list[dict],
       철자 교정 + 인식이 놓친 말을 대본대로 채움 (엔지컷은 부풀리지 않음)
     반환: [{"start_us": int, "end_us": int, "text": str}, ...]
     """
-    MIN_DUR_US = 66_667      # 자막 최소 길이 (2프레임)
-    MIN_SHOW_US = 300_000    # 한 조각이 최소 이만큼은 떠 있어야 읽힌다 (0.3초)
-    # 완성본 자막 기준: 조각 길이 평균 0.93초 / 최대 1.53초, 조각 사이 간격 ~0.03초
 
     stream = build_word_stream(segments)
     mapped = map_words_to_timeline(stream, keep_ranges)
@@ -1835,6 +1884,8 @@ def subtitle_chunks_for_timeline(segments: list[dict],
         for a, b in zip(clip_out, clip_out[1:]):
             a["end_us"] = b["start_us"]
         clip_out[-1]["end_us"] = clip_end
+        # ★ 글자 수에 비해 너무 짧게 스쳐 지나가는 조각을 늘려준다
+        clip_out = fit_chunk_durations(clip_out, first_start, clip_end)
         out.extend(clip_out)
 
     if stats is not None:
