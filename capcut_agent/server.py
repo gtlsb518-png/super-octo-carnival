@@ -1316,6 +1316,37 @@ def map_words_to_timeline(stream: list[dict],
     return mapped
 
 
+# 어미처럼 생겼지만 실제로는 명사인 말 — 여기서 문장이 끝났다고 보면 안 된다.
+# ('아쉬워할 필요 / 없어' 처럼 서술어가 떨어져 나가는 원인이었다)
+_NOT_FINAL_WORDS = {
+    "필요", "중요", "주요", "수요", "소요", "강요", "개요", "동요", "고요",   # -요
+    "캐나다", "바다",                                                        # -다
+    "분야", "시야",                                                          # -야
+    "에너지", "이미지", "페이지", "메시지", "복지", "단지", "반지", "아버지",  # -지
+    "올해", "이해", "오해", "견해",                                          # -해
+}
+
+
+def _is_verb_final_eo(core: str) -> bool:
+    """
+    '했어/왔어/없어/있어' 처럼 -어로 끝나는 서술형인지.
+    ('단어/영어/용어' 같은 명사는 제외 — 과거형은 앞 글자에 ㅆ받침이 온다)
+    """
+    if len(core) < 2 or not core.endswith("어"):
+        return False
+    if core.endswith(("있어", "없어")):
+        return True
+    c = core[-2]
+    return "가" <= c <= "힣" and (ord(c) - 0xAC00) % 28 == 20      # ㅆ 받침 (-았/었/였)
+
+
+def _is_final_form(core: str) -> bool:
+    """구두점을 뺀 어절이 문장을 끝내는 형태인지."""
+    if not core or core in _NOT_FINAL_WORDS:
+        return False
+    return core.endswith(_FINAL_ENDINGS) or _is_verb_final_eo(core)
+
+
 def _ends_clause(word: str) -> bool:
     """
     한국어 구절/문장 끝인지 — 여기서 끊으면 자연스럽다.
@@ -1326,7 +1357,7 @@ def _ends_clause(word: str) -> bool:
     if word[-1:] in ",.?!…\"”)":
         return True
     core = word.strip().rstrip("\"'”’)]}").rstrip(",.?!…")
-    return bool(core) and core.endswith(_FINAL_ENDINGS)
+    return _is_final_form(core)
 
 
 def _same_word(a: str, b: str) -> bool:
@@ -1346,7 +1377,7 @@ def _is_final_ending(word: str) -> bool:
         return False
     if core.endswith(_CONNECTIVE_ENDINGS):   # "-는지/-면서/-니까/-거나" 등은 문장이 안 끝남
         return False                         # (예: "되는지"는 종결이 아니라 연결)
-    return core.endswith(_FINAL_ENDINGS)
+    return _is_final_form(core)
 
 
 # 끊기 좋은 자리를 판단하는 한국어 어미·조사 목록.
@@ -1478,7 +1509,7 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
         return 55                        # "~할 때 / ~한 뒤 / ~한 다음" → 절이 끝나는 자리
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
-    if core.endswith(_FINAL_ENDINGS):
+    if _is_final_form(core):
         return 50                        # 종결어미
     if core.endswith(_PARTICLES):
         return 30                        # 조사
@@ -1559,8 +1590,9 @@ def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
     prev, last = groups[-2], groups[-1]
     if _group_len(last) > 4 or len(prev) < 2:
         return groups
-    if _ends_clause(last[-1]["word"]):
-        return groups                    # 꼬리가 그 자체로 한 문장이면(오케이?) 그대로 둔다
+    if last[-1]["word"][-1:] in ".?!…":
+        return groups                    # 꼬리가 구두점으로 끝난 완결된 문장이면(오케이?) 그대로
+                                         # ('있어/없어/아니야'처럼 앞말을 받는 서술어는 끌어온다)
     if _ends_clause(prev[-1]["word"]):
         return groups                    # 앞 조각이 문장으로 끝나면(꼬리는 새 문장 시작)
                                          # 앞 문장 끝말을 꼬리로 끌어오지 않는다
