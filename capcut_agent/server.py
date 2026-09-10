@@ -1347,17 +1347,26 @@ def _is_final_form(core: str) -> bool:
     return core.endswith(_FINAL_ENDINGS) or _is_verb_final_eo(core)
 
 
+def _is_nun_ji(core: str) -> bool:
+    """'뭔지/어떤지/큰지' 처럼 -ㄴ지(연결어미)로 끝나는지 — 문장이 안 끝난다."""
+    if len(core) < 2 or not core.endswith("지"):
+        return False
+    c = core[-2]
+    return "가" <= c <= "힣" and (ord(c) - 0xAC00) % 28 == 4      # ㄴ 받침
+
+
 def _ends_clause(word: str) -> bool:
     """
-    한국어 구절/문장 끝인지 — 여기서 끊으면 자연스럽다.
-    구두점(. ? ! ,)뿐 아니라 종결어미(-야/-어/-지/-거야/-잖아 …)로 끝나도 문장 끝으로 본다.
-    → 문장이 끝났는데 다음 문장 첫 단어가 꼬리 합치기로 도로 붙는 것을 막는다.
+    한국어 문장 끝인지 — 구두점이거나 종결어미로 끝나는 말.
+    → 문장이 끝났는데 다음 문장 첫 단어를 꼬리 합치기로 도로 붙이는 것을 막는다.
       (예: "골드만삭스야" + "다들…" 을 한 줄로 합치지 않는다)
+    ★ 연결어미(-까지/-는지/-면서)와 의존명사는 문장 끝이 아니다.
+      예전엔 '오만해까지'가 '지'로 끝난다고 문장 끝으로 봐서
+      '오만해까지 / 넓혔어' 처럼 서술어가 떨어져 나갔다.
     """
     if word[-1:] in ",.?!…\"”)":
         return True
-    core = word.strip().rstrip("\"'”’)]}").rstrip(",.?!…")
-    return _is_final_form(core)
+    return _is_final_ending(word)
 
 
 def _same_word(a: str, b: str) -> bool:
@@ -1375,8 +1384,9 @@ def _is_final_ending(word: str) -> bool:
     core = word.strip().rstrip("\"'”’)]}")
     if not core or core in _BOUND_NOUNS:     # "거야/거지/중이야" 등은 문맥상 이어질 수 있어 제외
         return False
-    if core.endswith(_CONNECTIVE_ENDINGS):   # "-는지/-면서/-니까/-거나" 등은 문장이 안 끝남
-        return False                         # (예: "되는지"는 종결이 아니라 연결)
+    if core.endswith(_CONNECTIVE_ENDINGS) or _is_nun_ji(core):
+        return False                         # "-는지/-면서/-니까/-거나/-ㄴ지" 는 연결어미
+                                             # (예: "되는지" "뭔지" 는 종결이 아니라 연결)
     return _is_final_form(core)
 
 
@@ -1430,6 +1440,8 @@ _NO_END_WORDS = {
     "같은", "다른", "남은", "좋은", "나쁜", "큰", "작은", "많은", "적은", "높은",
     "낮은", "빠른", "느린", "새로운", "짧은", "긴", "어린", "젊은", "진짜", "완전",
 }
+# 앞말에 붙어 다니는 말 — 이 말 앞에서 끊으면 "단비 / 같은 수익" 처럼 덩어리가 쪼개진다.
+_BINDS_BACK = {"같은", "같은데", "처럼", "마냥", "따위"}
 # 뒷말을 꾸미는 동사형 어미 — 다음 말이 이걸로 끝나면 그 앞에서 끊는 게 낫다
 _ADNOMINAL_TAILS = ("린", "던", "운", "난", "킨", "친", "된", "한", "인", "는", "울")
 
@@ -1496,6 +1508,8 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
         return 0
     if next_word and next_word.strip().rstrip(",.?!") in _BOUND_NOUNS:
         return 0
+    if next_word and next_word.strip().rstrip(",.?!") in _BINDS_BACK:
+        return 0                         # '단비 / 같은' 처럼 앞말에 붙는 말은 떼지 않는다
     if _is_adnominal_word(core):
         return 5                         # 꾸미는 말 — 뒤 명사와 붙어야 한다
     if core.endswith(_STANDALONE_RISK) and len(core) < 5:
@@ -1531,8 +1545,16 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
     목표 길이보다 조금 짧은 자리라도 훨씬 자연스러우면 그쪽을 쓴다.
       '그래서 오늘 하이닉스 / 물린 사람들' → '그래서 오늘 / 하이닉스 물린 사람들'
     """
+    # 끊을 자리를 알려주는 문법 신호가 전혀 없을 때(점수 10 이하)는
+    # 두 조각이 고르게 나뉘는 쪽을 고른다.
+    #   '반도체 빠지는 날 계좌 / 전체가 빠져'  →  '반도체 빠지는 날 / 계좌 전체가 빠져'
+    total = _group_len(cur) + (1 + len(after) if after else 0)
+    bal = lambda a: -abs(a - (total - a))
+
     late = (-1, len(cur) - 1)            # (점수, 위치)
+    late_bal = -10_000
     early = (-1, -1)
+    early_bal = -10_000
     early_min = max(6, soft_min - 4)     # 너무 짧은 조각이 생기지 않는 선까지만 앞당김
     acc = 0
     for i, x in enumerate(cur):
@@ -1543,11 +1565,18 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
             # prefer_early: 뒤에 붙을 말이 쉼표로 끝나면, 그 말이 앞말과 함께
             # 한 조각이 되도록 동점일 때 앞쪽에서 끊는다
             if (sc > late[0]) if prefer_early else (sc >= late[0]):
-                late = (sc, i)
+                late, late_bal = (sc, i), bal(acc)
         elif acc >= early_min:
             if sc > early[0]:
-                early = (sc, i)
-    return early[1] if early[0] > late[0] else late[1]
+                early, early_bal = (sc, i), bal(acc)
+            elif sc == early[0] and sc <= 10 and bal(acc) > early_bal:
+                early_bal, early = bal(acc), (sc, i)   # 문법 신호 없음 → 고른 쪽
+    if early[0] > late[0]:
+        return early[1]
+    # 점수가 같고 둘 다 '문법 신호 없음'이면 고르게 나뉘는 쪽
+    if early[0] == late[0] and late[0] <= 10 and early_bal > late_bal:
+        return early[1]
+    return late[1]
 
 
 def _good_break_ahead(words: list[dict], i: int, budget: int) -> bool:
@@ -1590,12 +1619,11 @@ def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
     prev, last = groups[-2], groups[-1]
     if _group_len(last) > 4 or len(prev) < 2:
         return groups
-    if last[-1]["word"][-1:] in ".?!…":
-        return groups                    # 꼬리가 구두점으로 끝난 완결된 문장이면(오케이?) 그대로
-                                         # ('있어/없어/아니야'처럼 앞말을 받는 서술어는 끌어온다)
     if _ends_clause(prev[-1]["word"]):
-        return groups                    # 앞 조각이 문장으로 끝나면(꼬리는 새 문장 시작)
-                                         # 앞 문장 끝말을 꼬리로 끌어오지 않는다
+        return groups                    # 앞 조각이 문장으로 끝났으면 꼬리는 새 문장이다
+                                         # ('우리 반이야' + '오케이?' → 그대로 둔다)
+                                         # 반대로 앞이 문장 중간이면 꼬리는 그 문장의 서술어라
+                                         # 반드시 끌어온다 ('반도체는 어떻게' + '되냐?')
     best = None
     for k in range(1, len(prev)):
         new_prev, new_last = prev[:-k], prev[-k:] + last
