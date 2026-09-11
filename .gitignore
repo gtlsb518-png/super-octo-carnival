@@ -17,3 +17,8 @@ backtest_월별집계*.xlsx
 backtest_월별집계*.csv
 goldfib_settings.json
 goldfib_trades.csv
+
+# 주식 종가 신호 알림 산출물
+stock_data_cache/
+stock_alerts.log
+stock_signal_report.csv
