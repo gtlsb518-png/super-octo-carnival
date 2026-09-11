@@ -110,7 +110,69 @@ GOLD_RULES = [
     # 쉼표 뒤 다음 구의 첫말을 앞 조각 끝에 매달지 않기
     ("정부24 AI를 실제로 깐 집이고, 국가 보안 AI 사업자야",
      ["정부24 AI를 실제로", "깐 집이고,", "국가 보안 AI 사업자야"]),
+
+    # ── C4023 기준 ────────────────────────────────────────────
+    # 한 숫자를 쪼개지 않기 ('10만' / '9천을' 방지)
+    ("그때 삼화콘덴서가 영업이익 810억에 사상 최고가 10만 9천을 찍었어",
+     ["그때 삼화콘덴서가", "영업이익 810억에", "사상 최고가", "10만 9천을 찍었어"]),
+    # ㄹ관형형 + 명사를 붙여 두기 ('받을' / '기업' 방지)
+    ("같은 판에서 같이 수혜 받을 기업 지금부터 메모해",
+     ["같은 판에서", "같이 수혜 받을 기업", "지금부터 메모해"]),
 ]
+
+
+# 같은 말이 반복되면 영상 클립을 자른다 / 클립 끝 잡음을 뗀다
+# (원문, 클립 길이(초), 기대 자르기 횟수)
+GOLD_SPLIT = [
+    ("이 어마어마한 주문서 받아 받아", 4.0, 1),
+    ("올해 예상은 올해 이상은", 3.0, 1),
+    ("잠깐, MLCC 세계 1위 무라타가 잠깐, MLCC 세계 1위 무라타가", 7.0, 1),
+    ("실시간 매도타점까지 실시간 매도타점까지", 3.0, 1),
+    ("그때 삼화콘덴서가 영업이익 810억에 사상 최고가 10만 9천을 찍었어", 5.0, 0),
+    ("이 흐름 이 종목 이 자리", 3.0, 0),
+    ("아모텍이 상한가로 미친 듯이 달리고 있어", 4.0, 0),
+]
+
+GOLD_TRIM = [
+    ("대주전자재료 아우", "", "대주전자재료"),
+    ("말고 골", "", "말고"),
+    ("차트 봐봐 으", "", "차트 봐봐"),
+    ("맛집이 네", "", "맛집이 네"),          # '네'는 실제 말이라 남긴다
+    ("자 근데", "", "자 근데"),
+    ("놉 빵", "", "놉 빵"),
+    ("삼화 부품이 들어가 뜨거워", "삼화 부품이 들어가", "삼화 부품이 들어가"),
+]
+
+
+def run_split():
+    ok = 0
+    for src, dur, want in GOLD_SPLIT:
+        ws = src.split()
+        step = dur / len(ws)
+        sg = [{"start": 0.0, "end": dur, "text": src,
+               "words": [{"start": i * step, "end": (i + 1) * step, "word": w}
+                         for i, w in enumerate(ws)]}]
+        _new, n = S.split_clips_at_repeats([(0.0, dur, 0, int(dur * 1e6))], sg)
+        if n == want:
+            ok += 1
+        else:
+            print(f"  X  {src!r} → {n}번 자름 (기준 {want})")
+    print(f"  반복 자르기: {ok}/{len(GOLD_SPLIT)} 통과")
+    return ok == len(GOLD_SPLIT)
+
+
+def run_trim():
+    ok = 0
+    for src, script, want in GOLD_TRIM:
+        ws = [{"word": w, "start": 0.0, "end": 0.0} for w in src.split()]
+        st = {S._norm_token(w).lower() for w in script.split()} if script else None
+        got = " ".join(w["word"] for w in S.trim_trailing_noise(ws, st))
+        if got == want:
+            ok += 1
+        else:
+            print(f"  X  {src!r} → {got!r} (기준 {want!r})")
+    print(f"  꼬리 잡음 제거: {ok}/{len(GOLD_TRIM)} 통과")
+    return ok == len(GOLD_TRIM)
 
 
 # ── 3) 잡음 구간 환각 (C3870 사례) ──
@@ -158,7 +220,10 @@ if __name__ == "__main__":
     a = run("알테오젠 원고", GOLD_SCRIPT)
     b = run("개별 규칙", GOLD_RULES)
     c = run_noise()
+    d = run_split()
+    e = run_trim()
     n_lines = sum(len(w) for _s, w in GOLD_SCRIPT)
+    all_ok = a and b and c and d and e
     print(f"\n원고 기준 총 {n_lines}줄")
-    print("전부 통과 ✓" if a and b and c else "기준과 다름 ✗")
-    sys.exit(0 if (a and b and c) else 1)
+    print("전부 통과 ✓" if all_ok else "기준과 다름 ✗")
+    sys.exit(0 if all_ok else 1)

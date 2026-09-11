@@ -429,6 +429,74 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
     return ranges
 
 
+def split_clips_at_repeats(keep_ranges: list[tuple[float, float, int, int]],
+                           segments: list[dict],
+                           min_part_sec: float = 0.30
+                           ) -> tuple[list[tuple[float, float, int, int]], int]:
+    """
+    한 영상 클립 안에서 같은 말이 바로 이어서 반복되면(= 엔지 재촬영),
+    그 사이에서 **영상 클립을 잘라** 둘로 만든다.
+      "이 어마어마한 주문서 받아 받아"  →  "… 주문서 받아" / "받아 …"
+    사용자 요청: "같은 단어 2개 나오면 영상이랑 자막클립 잘라줘".
+
+    자막은 따로 손댈 필요가 없다 — 단어는 원본 시각을 들고 있고
+    `map_words_to_timeline` 이 겹치는 클립으로 다시 배정하므로 같이 나뉜다.
+    반환: (새 keep_ranges, 자른 횟수)
+    """
+    cut_src: list[tuple[float, float]] = []
+    n_split = 0
+    for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
+        words = (segments[i].get("words") or []) if i < len(segments) else []
+        nz = [_norm_token(w["word"]) for w in words]
+        cuts = []
+        p = 0
+        while p < len(words):
+            hit = None
+            # ① 두 어절 이상이 통째로 다시 나오면 = 테이크를 다시 찍은 것
+            #    '잠깐 MLCC 세계 1위 무라타가 | 잠깐 MLCC 세계 1위 무라타가'
+            for k in range(min(6, (len(words) - p) // 2), 1, -1):
+                seq = nz[p:p + k]
+                if not all(seq):
+                    continue
+                for q in range(p + k, min(p + k + 7, len(words) - k + 1)):
+                    if nz[q:q + k] == seq:
+                        hit = q
+                        break
+                if hit is not None:
+                    break
+            # ② 같은 말이 바로 뒤/두세 어절 안에 다시 나오는 경우
+            #    '받아 | 받아',  '올해 예상은 | 올해 이상은'
+            if hit is None and len(nz[p]) >= 2:   # 1글자('이','다')는 우연히 겹쳐서 제외
+                for q in range(p + 1, min(p + 4, len(words))):
+                    if _same_word(words[p]["word"], words[q]["word"]):
+                        hit = q
+                        break
+            if hit is None:
+                p += 1
+                continue
+            t = snap_to_frame((words[hit - 1].get("end", ks) + words[hit].get("start", ke)) / 2)
+            if ks + min_part_sec <= t <= ke - min_part_sec:
+                cuts.append(t)
+            p = hit                     # 반복 구간 안에서 또 자르지 않게 건너뛴다
+        prev = ks
+        for t in sorted(set(cuts)):
+            if t - prev >= min_part_sec and ke - t >= min_part_sec:
+                cut_src.append((prev, t))
+                prev = t
+                n_split += 1
+        cut_src.append((prev, ke))
+
+    out: list[tuple[float, float, int, int]] = []
+    tl = 0
+    for a, b in cut_src:
+        dur = sec_to_us(snap_to_frame(b)) - sec_to_us(snap_to_frame(a))
+        if dur <= 0:
+            continue
+        out.append((a, b, tl, tl + dur))
+        tl += dur
+    return out, n_split
+
+
 def _same_line(a: str, b: str, sim: float = 0.9) -> bool:
     """두 클립이 '같은 말'인지 (엔지컷 판정). 띄어쓰기·문장부호는 무시."""
     a = re.sub(r"[^0-9A-Za-z가-힣]", "", a)
@@ -700,6 +768,39 @@ def _is_number_babble(text: str) -> bool:
     return bool(nums) and all(len(n) == 1 for n in nums)
 
 
+# 클립 끝에 붙는 '말 아닌 소리' — 헛기침·감탄·입소리가 한두 글자로 인식된 것.
+# ('자/네/놉/빵' 처럼 실제로 쓰는 말은 절대 넣지 말 것)
+_TRAILING_NOISE = {
+    "아", "어", "오", "우", "으", "음", "흠", "헉", "윽", "악", "억", "응",
+    "아아", "어어", "오오", "우우", "으으", "음음", "흠흠", "아우", "어우", "에휴",
+    "휴", "쩝", "크", "끄", "흐", "하", "허", "호", "히", "후", "푸",
+    "뿅", "뿜", "삐", "꺅", "골", "컥", "쉿", "칫", "쯧", "쓰", "츠",
+}
+
+
+def trim_trailing_noise(words: list[dict], script_tokens: set[str] | None = None) -> list[dict]:
+    """
+    클립 **끝**에 붙은 말 아닌 소리를 떼어낸다.
+    사용자 요청: "뒤에 간혹가다 말하는 내용이 아닌 것들이 자꾸 붙어, 2·3글자들이".
+      '대주전자재료 아우' → '대주전자재료',  '말고 골!' → '말고'
+    - 헛기침·감탄 목록(`_TRAILING_NOISE`)에 있으면 계속 떼어낸다.
+    - 대본이 있으면, 대본에 없는 3글자 이하 꼬리를 한 번 더 떼어낸다
+      (대본에 있는 말은 절대 건드리지 않는다).
+    말이 통째로 사라지지 않게 최소 한 단어는 남긴다.
+    """
+    while len(words) >= 2:
+        core = _norm_token(words[-1]["word"])
+        if not core or (len(core) <= 2 and core in _TRAILING_NOISE):
+            words.pop()
+            continue
+        break
+    if script_tokens and len(words) >= 2:
+        core = _norm_token(words[-1]["word"]).lower()
+        if core and len(core) <= 3 and not core.isdigit() and core not in script_tokens:
+            words.pop()
+    return words
+
+
 def is_hallucinated_line(text: str, clip_sec: float) -> bool:
     """클립 전체가 Whisper 상투 문구면 실제 발화가 아니라고 본다."""
     if _is_number_babble(text):
@@ -903,6 +1004,8 @@ def transcribe_all_clips(video_path: Path,
                               "end": min(max(w["end"], ks), ke), "word": piece})
         words = cap_by_speech_rate(
             collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
+        # 클립 끝에 붙은 헛기침·감탄 같은 '말 아닌 소리'를 떼어낸다
+        words = trim_trailing_noise(words, script_tokens)
         # ★ 실제로 한 말은 최대한 다 살린다.
         #   예전엔 '음절 수프'(멘 탈 흔) 판정으로 클립을 통째로 버렸는데,
         #   말을 더듬거나 짧게 끊어 말한 진짜 발화까지 사라져서 그 판정은 쓰지 않는다.
@@ -1368,6 +1471,14 @@ def _is_obligation(core: str) -> bool:
     return core[:-1] not in _NOUN_EO     # '소프트웨어 + 야' 는 제외
 
 
+def _ends_rieul(core: str) -> bool:
+    """'받을/올렸을/만들' 처럼 ㄹ관형형으로 끝나는지 (목적격 '-를'은 제외)."""
+    if len(core) < 2 or core.endswith("를"):
+        return False
+    c = core[-1]
+    return "가" <= c <= "힣" and (ord(c) - 0xAC00) % 28 == 8
+
+
 def _is_nun_ji(core: str) -> bool:
     """'뭔지/어떤지/큰지' 처럼 -ㄴ지(연결어미)로 끝나는지 — 문장이 안 끝난다."""
     if len(core) < 2 or not core.endswith("지"):
@@ -1531,6 +1642,11 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
         return 0
     if next_word and next_word.strip().rstrip(",.?!") in _BINDS_BACK:
         return 0                         # '단비 / 같은' 처럼 앞말에 붙는 말은 떼지 않는다
+    nx = next_word.strip().lstrip("\"'“‘([{") if next_word else ""
+    if nx and nx[:1].isdigit() and core.endswith(("만", "천", "억", "조", "백", "십")):
+        return 0                         # '10만 / 9천을' 처럼 한 숫자를 쪼개지 않는다
+    if nx and _ends_rieul(core) and _break_score(nx) <= 10:
+        return 5                         # '받을 / 기업' 처럼 ㄹ관형형+명사는 붙여 둔다
     if _is_adnominal_word(core):
         return 5                         # 꾸미는 말 — 뒤 명사와 붙어야 한다
     if core.endswith(_STANDALONE_RISK) and len(core) < 5:
@@ -3398,6 +3514,11 @@ async def process_video(
                         yield f"data: {json.dumps({'step': 'asr', 'msg': f'반복 엔지컷 {len(dropped)}개 삭제 → 클립 {len(keep_ranges)}개'})}\n\n"
                     else:
                         yield f"data: {json.dumps({'step': 'asr', 'msg': '반복 엔지컷: 삭제할 짧은 중복 없음'})}\n\n"
+
+                # ── 같은 말이 바로 반복되면 그 자리에서 영상 클립을 자른다 ──
+                keep_ranges, n_cut = split_clips_at_repeats(keep_ranges, raw_subs)
+                if n_cut:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'같은 말이 반복된 자리에서 클립 {n_cut}번 잘랐습니다 → 클립 {len(keep_ranges)}개'})}\n\n"
 
                 if script_text:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'대본 {len(script_text)}자 수신 → 문맥 대조 교정 중...'})}\n\n"
