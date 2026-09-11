@@ -784,6 +784,11 @@ _TRAILING_NOISE = {
 }
 
 
+# 말끝에 흐리며 붙는 한 글자 — 다음 말을 꺼내려다 만 소리다.
+# ('35%는 기본이고, 그' / '그리고 그' → 뒤의 '그'를 뗀다)
+_TRAILING_FILLER = {"그", "이", "저", "뭐", "막", "좀", "딱", "또"}
+
+
 def trim_trailing_noise(words: list[dict], script_tokens: set[str] | None = None) -> list[dict]:
     """
     클립 **끝**에 붙은 말 아닌 소리를 떼어낸다.
@@ -797,6 +802,10 @@ def trim_trailing_noise(words: list[dict], script_tokens: set[str] | None = None
     while len(words) >= 2:
         core = _norm_token(words[-1]["word"])
         if not core or (len(core) <= 2 and core in _TRAILING_NOISE):
+            words.pop()
+            continue
+        # 말끝을 흐리며 남긴 한 글자('…기본이고, 그' / '그리고 그')
+        if core in _TRAILING_FILLER and len(_norm_token(words[-2]["word"])) >= 2:
             words.pop()
             continue
         break
@@ -3379,7 +3388,7 @@ async def index():
 async def process_video(
     request: Request,
     video_path: str,
-    noise_db: float = -32.0,
+    noise_db: float = -30.0,
     min_silence: float = 0.2,   # 손편집본은 0.13초 쉼도 자름 → 0.3보다 0.2가 맞다
     head_trim: float = 0.0,      # 클립 앞을 더 깎는 양 (ms)
     tail_trim: float = 0.0,      # 클립 뒤를 더 깎는 양 (ms)

@@ -301,9 +301,9 @@
               자동
             </label>
           </span>
-          <span id="db-val">-32 dB</span>
+          <span id="db-val">-30 dB</span>
         </label>
-        <input type="range" id="noise-db" min="-60" max="-20" value="-32" step="1"
+        <input type="range" id="noise-db" min="-60" max="-20" value="-30" step="1"
                oninput="document.getElementById('db-val').textContent = this.value + ' dB'" />
         <span style="font-size:11px; color:var(--muted); margin-top:4px; display:block;">
           숫자를 0에 가깝게(-30·-25) 올릴수록 더 많이 잘림 / -40·-50 쪽이면 거의 안 잘림</span>
@@ -325,13 +325,13 @@
       </div>
       <div class="settings-grid">
         <div class="setting-item">
-          <label>클립 앞 여유 <span id="head-val">+60 ms</span></label>
-          <input type="range" id="head-pad" min="-400" max="400" value="60" step="10"
+          <label>클립 앞 여유 <span id="head-val">+20 ms</span></label>
+          <input type="range" id="head-pad" min="-400" max="400" value="20" step="10"
                  oninput="document.getElementById('head-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
         <div class="setting-item">
-          <label>클립 뒤 여유 <span id="tail-val">+20 ms</span></label>
-          <input type="range" id="tail-pad" min="-400" max="400" value="20" step="10"
+          <label>클립 뒤 여유 <span id="tail-val">-10 ms</span></label>
+          <input type="range" id="tail-pad" min="-400" max="400" value="-10" step="10"
                  oninput="document.getElementById('tail-val').textContent = (this.value > 0 ? '+' : '') + this.value + ' ms'" />
         </div>
       </div>
@@ -737,7 +737,7 @@
     setProgress('upload');
 
     const autoNoise = chk('auto-noise', true);
-    const noiseDb = val('noise-db', -40);
+    const noiseDb = val('noise-db', -30);
     const minSil  = val('min-silence', 0.2);
     const useSub  = chk('use-subtitle', true) ? 'true' : 'false';
     const ratioSel = document.querySelector('input[name="ratio"]:checked');
@@ -747,8 +747,8 @@
     const encoded = encodeURIComponent(videoPath);
 
     // 컷 여유: 화면은 "여유(+ 면 더 남김)", 서버는 "깎는 양" 이라 부호를 뒤집는다
-    const headTrim = -num('head-pad', 60);
-    const tailTrim = -num('tail-pad', 20);
+    const headTrim = -num('head-pad', 20);
+    const tailTrim = -num('tail-pad', -10);
     const minClip  = chk('drop-short') ? num('min-clip', 0.7) : 0;
 
     // 같은 말 반복(엔지컷) 정리
