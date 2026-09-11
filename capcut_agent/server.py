@@ -1342,9 +1342,30 @@ def _is_verb_final_eo(core: str) -> bool:
 
 def _is_final_form(core: str) -> bool:
     """구두점을 뺀 어절이 문장을 끝내는 형태인지."""
-    if not core or core in _NOT_FINAL_WORDS:
-        return False
+    if not core or core in _NOT_FINAL_WORDS or core in _NO_END_WORDS:
+        return False                     # 뒷말을 꾸미는 말('다/이/저/두')은 문장 끝이 아니다
+    if _is_obligation(core):
+        return False                     # '막아야' 뒤엔 '돼'가 온다
     return core.endswith(_FINAL_ENDINGS) or _is_verb_final_eo(core)
+
+
+# '-아야/-어야/-해야' (당위) — 문장이 끝난 게 아니라 뒤에 '돼/한다'가 이어진다.
+# ('막아야' 가 '야'로 끝난다고 문장 끝이 돼서 'AI로 막아야 / 돼' 로 갈라졌다)
+_OBLIGATION_ENDINGS = ("아야", "어야", "여야", "해야", "돼야", "되야", "봐야", "가야",
+                       "와야", "줘야", "둬야", "써야", "켜야", "펴야", "사야",
+                       "빼야", "내야", "타야")
+
+
+# '-어'로 끝나는 명사 — '소프트웨어야'는 당위가 아니라 문장 끝이다
+_NOUN_EO = {"단어", "영어", "국어", "용어", "언어", "소프트웨어", "하드웨어", "미디어",
+            "제어", "표어", "명령어", "커리어", "시니어", "주니어", "엔지니어"}
+
+
+def _is_obligation(core: str) -> bool:
+    """'막아야/해야/가야' 처럼 뒤에 '돼/한다'가 와야 끝나는 형태인지."""
+    if len(core) < 2 or not core.endswith(_OBLIGATION_ENDINGS):
+        return False
+    return core[:-1] not in _NOUN_EO     # '소프트웨어 + 야' 는 제외
 
 
 def _is_nun_ji(core: str) -> bool:
@@ -1523,6 +1544,8 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
         return 55                        # "~할 때 / ~한 뒤 / ~한 다음" → 절이 끝나는 자리
     if core.endswith(_CONNECTIVE_ENDINGS):
         return 60                        # 연결어미
+    if _is_obligation(core):
+        return 5                         # '막아야 / 돼' 처럼 뒤 서술어와 떨어지면 안 된다
     if _is_final_form(core):
         return 50                        # 종결어미
     if core.endswith(_PARTICLES):
