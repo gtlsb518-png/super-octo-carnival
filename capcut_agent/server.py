@@ -448,23 +448,29 @@ def split_clips_at_repeats(keep_ranges: list[tuple[float, float, int, int]],
     for i, (ks, ke, _s, _e) in enumerate(keep_ranges):
         words = (segments[i].get("words") or []) if i < len(segments) else []
         nz = [_norm_token(w["word"]) for w in words]
+        # 띄어쓰기가 달라도 같은 말로 보려면 글자를 이어붙여 비교해야 한다.
+        #   '같은 판에서' 와 '같은판에서' 는 붙이면 둘 다 '같은판에서'
+        at = [0]
+        for z in nz:
+            at.append(at[-1] + len(z))
+        flat = "".join(nz)
         cuts = []
         p = 0
         while p < len(words):
             hit = None
-            # ① 두 어절 이상이 통째로 다시 나오면 = 테이크를 다시 찍은 것
-            #    '잠깐 MLCC 세계 1위 무라타가 | 잠깐 MLCC 세계 1위 무라타가'
-            for k in range(min(6, (len(words) - p) // 2), 1, -1):
-                seq = nz[p:p + k]
-                if not all(seq):
+            # ① 앞의 말이 글자 그대로 다시 나오면 = 말을 다시 시작한 것(테이크 재촬영)
+            #    '잠깐 MLCC 세계 1위 무라타가 | 잠깐 …',  '같은 판에서 | 같은판에서'
+            for q in range(len(words) - 1, p, -1):       # 긴 반복부터
+                a, b = at[p], at[q]
+                k = b - a
+                if k < 3 or b + k > len(flat):           # 3글자 미만은 우연일 수 있다
                     continue
-                for q in range(p + k, min(p + k + 7, len(words) - k + 1)):
-                    if nz[q:q + k] == seq:
-                        hit = q
-                        break
-                if hit is not None:
+                if q - p > 8:                            # 한참 뒤는 자연스러운 반복
+                    continue
+                if flat[a:b] == flat[b:b + k]:
+                    hit = q
                     break
-            # ② 같은 말이 바로 뒤/두세 어절 안에 다시 나오는 경우
+            # ② 같은 어절이 바로 뒤/두세 어절 안에 다시 나오는 경우
             #    '받아 | 받아',  '올해 예상은 | 올해 이상은'
             if hit is None and len(nz[p]) >= 2:   # 1글자('이','다')는 우연히 겹쳐서 제외
                 for q in range(p + 1, min(p + 4, len(words))):
@@ -1747,6 +1753,46 @@ def _rest_len(words: list[dict], i: int, cap: int = 40) -> int:
     return total
 
 
+def _absorb_tiny_groups(groups: list[list[dict]], limit: int) -> list[list[dict]]:
+    """
+    2~3글자짜리 조각이 혼자 남으면 옆 조각에 붙인다.
+    ★ 글자 수는 '12자 내외'지 딱 맞춰야 하는 값이 아니다 (사용자 요청:
+      "무조건 맞추게 하지마, 12자 내외인 거지").
+      '같은 판에서 같이 수혜 받을 / 기업' 처럼 억지로 잘려 2글자만 남는 걸 막는다.
+    단 구두점으로 끝난 진짜 한 문장('놉!', '오케이?')은 그대로 둔다.
+    """
+    if len(groups) < 2:
+        return groups
+    out = list(groups)
+    i = 0
+    while i < len(out):
+        g = out[i]
+        if _group_len(g) > 3 or g[-1]["word"][-1:] in ".?!…":
+            i += 1
+            continue
+        prev = out[i - 1] if i else None
+        nxt = out[i + 1] if i + 1 < len(out) else None
+        # 붙일 수 있는 이웃 중 더 짧은 쪽으로 (구두점으로 끝난 앞 조각은 건드리지 않음)
+        cand = []
+        if prev is not None and not _ends_clause(prev[-1]["word"]) \
+                and _group_len(prev) + 1 + _group_len(g) <= limit:
+            cand.append((_group_len(prev), "prev"))
+        if nxt is not None and not _ends_clause(g[-1]["word"]) \
+                and _group_len(g) + 1 + _group_len(nxt) <= limit:
+            cand.append((_group_len(nxt), "next"))
+        if not cand:
+            i += 1
+            continue
+        where = min(cand)[1]
+        if where == "prev":
+            out[i - 1] = prev + g
+            del out[i]
+        else:
+            out[i + 1] = g + nxt
+            del out[i]
+    return out
+
+
 def _rebalance_tail(groups: list[list[dict]], hard: int) -> list[list[dict]]:
     """
     마지막 조각이 "아니야", "1위야" 처럼 혼자 덩그러니 남으면,
@@ -1896,7 +1942,7 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
                 cur = []
         if cur:
             groups.append(cur)
-    return _rebalance_tail(groups, hard + 2)
+    return _absorb_tiny_groups(_rebalance_tail(groups, hard + 2), hard + 3)
 
 
 def fit_chunk_durations(chunks: list[dict], clip_start: int, clip_end: int) -> list[dict]:
