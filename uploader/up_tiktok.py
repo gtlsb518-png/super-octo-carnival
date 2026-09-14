@@ -203,8 +203,8 @@ def upload(page, cfg, log):
         log("[4/7] 커버 이미지 설정 시도 중...")
         try:
             _click_if(page, [
-                "div:has-text('커버 편집')", "button:has-text('커버 편집')",
-                "div:has-text('Edit cover')", "button:has-text('Edit cover')",
+                "button:has-text('커버 편집')", "text='커버 편집'",
+                "button:has-text('Edit cover')", "text='Edit cover'",
             ], timeout=8000)
             time.sleep(2)
             _click_if(page, [
@@ -236,14 +236,14 @@ def upload(page, cfg, log):
     log(f"[5/7] 공개 범위 설정: {label}")
     try:
         _click_if(page, [
-            "div[class*='select-container']",
             "div[class*='visibility'] div[class*='select']",
-            "div:has-text('공개 범위') + div",
+            "div[class*='select-container']",
         ], timeout=6000)
         time.sleep(1)
         if not _click_if(page, [
             f"div[role='option']:has-text('{label}')",
             f"li:has-text('{label}')",
+            f"text='{label}'",
         ], timeout=6000):
             log("  ! 공개 범위 항목을 못 찾음 (기본값 사용)")
             page.keyboard.press("Escape")
@@ -289,46 +289,60 @@ def upload(page, cfg, log):
 
 # ==================== 예약 설정 ====================
 
-def _set_schedule(page, when, log):
-    """'예약 게시'를 켜고 날짜·시간을 지정한다. 실패하면 예외를 던진다."""
-
-    # --- 예약 스위치 켜기 ---
-    log("  - '예약 게시' 켜는 중...")
-    turned_on = _click_if(page, [
-        "[data-e2e='schedule_switch']",
-        "div[class*='schedule'] input[type='checkbox']",
-        "div[class*='switch'][class*='schedule']",
-        "input[type='radio'][value='schedule']",
-        "div[class*='radio']:has-text('예약')",
-        "label:has-text('예약 게시')",
-        "div:has-text('예약 게시') input",
-    ], timeout=15000)
-    if not turned_on:
-        raise RuntimeError(
-            "'예약 게시' 스위치를 찾지 못했습니다.\n"
-            "틱톡 화면이 바뀌었을 수 있습니다. 영상은 게시되지 않았습니다."
-        )
-    time.sleep(3)
-
-    # --- 날짜·시간 입력칸 찾기 ---
+def _schedule_inputs(page, timeout=10000):
+    """예약 날짜/시간 입력칸을 찾는다. 없으면 None (=예약이 아직 꺼져 있음)."""
     try:
         date_in, _ = _find_any(page, [
             "div[class*='date-picker'] input",
             "div[class*='DatePicker'] input",
             "input[class*='date']",
             "div[class*='schedule'] input[placeholder*='-']",
-        ], timeout=15000)
+        ], timeout=timeout)
         time_in, _ = _find_any(page, [
             "div[class*='time-picker'] input",
             "div[class*='TimePicker'] input",
             "input[class*='time']",
             "div[class*='schedule'] input[placeholder*=':']",
+        ], timeout=timeout)
+        return date_in, time_in
+    except Exception:
+        return None
+
+
+def _set_schedule(page, when, log):
+    """'예약 게시'를 켜고 날짜·시간을 지정한다. 실패하면 예외를 던진다."""
+
+    # --- 예약 스위치 켜기 ---
+    # 이미 켜져 있는데 또 누르면 꺼지므로, 날짜/시간칸이 이미 보이는지 먼저 확인한다.
+    found = _schedule_inputs(page, timeout=3000)
+
+    if found:
+        log("  - '예약 게시'가 이미 켜져 있습니다")
+    else:
+        log("  - '예약 게시' 켜는 중...")
+        turned_on = _click_if(page, [
+            "[data-e2e='schedule_switch']",
+            "div[class*='schedule'] input[type='checkbox']",
+            "div[class*='switch'][class*='schedule']",
+            "input[type='radio'][value='schedule']",
+            "text='예약 게시'",
+            "text='Schedule'",
+            "text='예약'",
         ], timeout=15000)
-    except Exception as e:
+        if not turned_on:
+            raise RuntimeError(
+                "'예약 게시' 스위치를 찾지 못했습니다.\n"
+                "틱톡 화면이 바뀌었을 수 있습니다. 영상은 게시되지 않았습니다."
+            )
+        time.sleep(3)
+        found = _schedule_inputs(page, timeout=15000)
+
+    if not found:
         raise RuntimeError(
-            f"예약 날짜/시간 입력칸을 찾지 못했습니다: {e}\n"
-            "영상은 게시되지 않았습니다."
+            "예약 날짜/시간 입력칸을 찾지 못했습니다.\n"
+            "'예약 게시'가 켜지지 않았을 수 있습니다. 영상은 게시되지 않았습니다."
         )
+    date_in, time_in = found
 
     # --- 시간 먼저 (날짜를 바꾸면 시간 선택지가 달라질 수 있음) ---
     log(f"  - 시간 선택: {when:%H:%M}")
@@ -507,13 +521,18 @@ def _wait_upload(page, log, max_wait=3600):
 
     while time.time() < end:
         txt = ""
+        # 'text=A, text=B' 는 한 덩어리로 취급되어 동작하지 않으므로 따로 시도한다
         for fr in _frames(page):
-            try:
-                el = fr.locator("div:has-text('업로드 중'), div:has-text('Uploading')").last
-                txt = " ".join(el.inner_text(timeout=1500).split())[:60]
+            for sel in ("text=업로드 중", "text=Uploading"):
+                try:
+                    el = fr.locator(sel).last
+                    txt = " ".join(el.inner_text(timeout=1500).split())[:60]
+                    if txt:
+                        break
+                except Exception:
+                    continue
+            if txt:
                 break
-            except Exception:
-                continue
 
         if not txt:
             blank += 1
