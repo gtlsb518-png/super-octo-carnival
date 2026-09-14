@@ -19,6 +19,7 @@
 """
 
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -71,6 +72,28 @@ JS_INPUTS = """
 """
 
 
+def _count(fr, sel, cap=20):
+    """선택자에 걸리는 요소 개수 (전체, 화면에 보이는 것).
+
+    숨어 있는 요소도 DOM 에는 잡히므로 둘을 나눠 센다.
+    (파일 입력칸처럼 원래 숨어 있는 게 정상인 것도 있다)
+    """
+    try:
+        loc = fr.locator(sel)
+        n = loc.count()
+    except Exception:
+        return 0, 0
+
+    vis = 0
+    for i in range(min(n, cap)):
+        try:
+            if loc.nth(i).is_visible(timeout=300):
+                vis += 1
+        except Exception:
+            pass
+    return n, vis
+
+
 def _site_of(url):
     u = (url or "").lower()
     if "tiktok.com" in u:
@@ -80,7 +103,7 @@ def _site_of(url):
     return None
 
 
-def check_page(page, log=print):
+def check_page(page, log=print, label=None):
     """열려 있는 탭 하나를 진단해서 파일 3개를 만든다."""
     site = _site_of(page.url)
     if not site:
@@ -89,12 +112,12 @@ def check_page(page, log=print):
 
     os.makedirs(OUT_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%m%d_%H%M%S")
-    base = f"{site}_{stamp}"
+    base = f"{site}_{label}_{stamp}" if label else f"{site}_{stamp}"
 
     lines = []
     lines.append("=" * 70)
     lines.append(f"진단 시각 : {datetime.now():%Y-%m-%d %H:%M:%S}")
-    lines.append(f"대상      : {site}")
+    lines.append(f"대상      : {site}" + (f"  ({label})" if label else ""))
     lines.append(f"주소      : {page.url}")
     lines.append("=" * 70)
 
@@ -103,29 +126,37 @@ def check_page(page, log=print):
     frames = [page] + [f for f in page.frames if f is not page.main_frame]
 
     lines.append("")
-    lines.append("[ 선택자 점검 ]  ✔=찾음  ✘=못찾음")
+    lines.append("[ 선택자 점검 ]  ✔=화면에 보임  △=있지만 안 보임  ✘=아예 없음")
     lines.append("")
 
-    missing = []
+    missing = []       # 아예 없는 항목
+    hidden_only = []   # DOM 에는 있는데 화면에 안 보이는 항목
+
     for name, selectors in sel_map.items():
-        found_any = False
+        tot_all, vis_all = 0, 0
         rows = []
         for sel in selectors:
-            total = 0
+            n, v = 0, 0
             for fr in frames:
-                try:
-                    total += fr.locator(sel).count()
-                except Exception:
-                    pass
-            if total:
-                found_any = True
-            rows.append(f"    {'✔' if total else '✘'} {total:>3}개  {sel}")
+                a, b = _count(fr, sel)
+                n += a
+                v += b
+            tot_all += n
+            vis_all += v
+            mark = "✔" if v else ("△" if n else "✘")
+            rows.append(f"    {mark} {n:>3}개(보임 {v})  {sel}")
 
-        lines.append(f"  {'✔' if found_any else '✘'} {name}")
+        mark = "✔" if vis_all else ("△" if tot_all else "✘")
+        note = ""
+        if not tot_all:
+            missing.append(name)
+        elif not vis_all:
+            hidden_only.append(name)
+            note = "   ← 있긴 한데 화면에 안 보임 (이 화면이 아닐 수 있음)"
+
+        lines.append(f"  {mark} {name}{note}")
         lines.extend(rows)
         lines.append("")
-        if not found_any:
-            missing.append(name)
 
     # ---------- 2. 후보 요소 ----------
     lines.append("=" * 70)
@@ -168,14 +199,17 @@ def check_page(page, log=print):
         html_path = None
 
     # ---------- 4. 요약 ----------
-    log(f"  [{site}] {page.url[:60]}")
+    log(f"  [{label or site}] {page.url[:60]}")
     if missing:
-        log(f"    ✘ 못 찾은 항목 {len(missing)}개: {', '.join(missing)}")
-    else:
+        log(f"    ✘ 없는 항목 {len(missing)}개: {', '.join(missing)}")
+    if hidden_only:
+        log(f"    △ 안 보이는 항목 {len(hidden_only)}개: {', '.join(hidden_only)}")
+    if not missing and not hidden_only:
         log("    ✔ 모든 항목을 찾았습니다")
     log(f"    저장: {os.path.basename(txt_path)}")
 
-    return {"site": site, "missing": missing, "txt": txt_path,
+    return {"site": site, "label": label, "missing": missing,
+            "hidden_only": hidden_only, "txt": txt_path,
             "png": png_path, "html": html_path}
 
 
@@ -212,6 +246,213 @@ def run(log=print):
     log("")
     log("=" * 60)
     log(f"완료! '{os.path.basename(OUT_DIR)}' 폴더의 파일을 전달해주세요.")
+    log("=" * 60)
+    return results
+
+
+
+
+# ==================== 연습 진단 (자동으로 여러 화면 돌기) ====================
+#
+# 화면마다 있는 요소가 다르므로, 원래는 화면을 하나씩 띄워놓고 진단해야 한다.
+# 아래 기능은 실제 업로드 과정을 그대로 따라가되
+# **게시/저장 버튼만 누르지 않고** 각 화면을 자동으로 진단한다.
+
+def dryrun_tiktok(page, video, log=print):
+    """틱톡 업로드 화면들을 순서대로 돌며 진단 (게시는 하지 않음)."""
+    results = []
+    log("")
+    log("─" * 50)
+    log("틱톡 연습 진단 (게시하지 않습니다)")
+    log("─" * 50)
+
+    page.goto(up_tiktok.UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
+    time.sleep(4)
+    if "/login" in page.url:
+        log("  ❌ 틱톡 로그인이 안 되어 있습니다")
+        return results
+    results.append(check_page(page, log, "1_업로드화면"))
+
+    if not video or not os.path.exists(video):
+        log("  ! 영상 파일이 없어 여기까지만 진단합니다")
+        return [r for r in results if r]
+
+    log("  영상 올리는 중... (게시는 안 함)")
+    try:
+        fin, _ = up_tiktok._find_any(page, up_tiktok.SEL["영상 파일 입력칸"],
+                                     timeout=40000, state="attached")
+        fin.set_input_files(video)
+        time.sleep(8)
+    except Exception as e:
+        log(f"  ❌ 영상 선택 실패: {e}")
+        return [r for r in results if r]
+
+    results.append(check_page(page, log, "2_캡션화면"))
+
+    # 예약 켜보기
+    log("  '예약 게시' 켜보는 중...")
+    if not up_tiktok._schedule_inputs(page, timeout=3000):
+        up_tiktok._click_if(page, up_tiktok.SEL["예약 게시 스위치"], timeout=10000)
+        time.sleep(3)
+    results.append(check_page(page, log, "3_예약켜짐"))
+
+    found = up_tiktok._schedule_inputs(page, timeout=5000)
+    if found:
+        date_in, time_in = found
+        try:
+            time_in.click()
+            time.sleep(2)
+            results.append(check_page(page, log, "4_시간선택창"))
+            page.keyboard.press("Escape")
+            time.sleep(1)
+        except Exception as e:
+            log(f"  ! 시간 선택창 열기 실패: {e}")
+        try:
+            date_in.click()
+            time.sleep(2)
+            results.append(check_page(page, log, "5_달력"))
+            page.keyboard.press("Escape")
+        except Exception as e:
+            log(f"  ! 달력 열기 실패: {e}")
+    else:
+        log("  ! 예약 날짜/시간 칸이 안 나타남 (3_예약켜짐 파일을 확인해주세요)")
+
+    log("  ✔ 틱톡 연습 진단 끝 — 게시 버튼은 누르지 않았습니다")
+    return [r for r in results if r]
+
+
+def dryrun_youtube(page, video, existing_url=None, log=print):
+    """유튜브 업로드 화면들을 순서대로 돌며 진단 (게시/저장은 하지 않음)."""
+    results = []
+    log("")
+    log("─" * 50)
+    log("유튜브 연습 진단 (게시하지 않습니다)")
+    log("─" * 50)
+
+    page.goto("https://studio.youtube.com/", wait_until="domcontentloaded", timeout=90000)
+    time.sleep(3)
+    if "accounts.google.com" in page.url or "signin" in page.url:
+        log("  ❌ 구글 로그인이 안 되어 있습니다")
+        return results
+
+    if video and os.path.exists(video):
+        log("  업로드 창 여는 중...")
+        try:
+            page.locator("#create-icon").first.click(timeout=15000)
+            time.sleep(1)
+            page.locator("tp-yt-paper-item#text-item-0, ytcp-text-menu-item#text-item-0").first.click(timeout=8000)
+        except Exception:
+            page.goto("https://www.youtube.com/upload", wait_until="domcontentloaded", timeout=90000)
+        time.sleep(2)
+        results.append(check_page(page, log, "1_업로드창"))
+
+        log("  영상 올리는 중... (게시는 안 함)")
+        try:
+            fin = up_youtube._first(page, up_youtube.SEL["영상 파일 입력칸"],
+                                    timeout=30000, state="attached")
+            fin.set_input_files(video)
+            up_youtube._first(page, up_youtube.SEL["제목 입력칸"], timeout=120000)
+            time.sleep(2)
+        except Exception as e:
+            log(f"  ❌ 영상 선택 실패: {e}")
+            return [r for r in results if r]
+
+        results.append(check_page(page, log, "2_세부정보"))
+
+        up_youtube._click_if(page, up_youtube.SEL["자세히 보기 버튼"], timeout=8000)
+        time.sleep(1.5)
+        results.append(check_page(page, log, "3_태그"))
+
+        log("  공개 설정 단계로 이동 중...")
+        for _ in range(4):
+            try:
+                nxt = page.locator("#next-button").first
+                if nxt.is_visible(timeout=3000):
+                    nxt.click()
+                    time.sleep(1.5)
+            except Exception:
+                break
+        results.append(check_page(page, log, "4_공개설정"))
+
+        log("  ⚠ 스튜디오에 '임시저장' 영상이 하나 생깁니다. 나중에 삭제하세요.")
+    else:
+        log("  ! 영상 파일이 없어 업로드 화면들은 건너뜁니다")
+
+    # ---- 댓글·예약 화면은 '이미 올려둔 영상'이 있어야 볼 수 있다 ----
+    if not existing_url:
+        log("  ! 이미 올려둔 영상 주소를 안 줘서 댓글·예약 화면은 건너뜁니다")
+        return [r for r in results if r]
+
+    m = re.search(r"(?:youtu\.be/|v=|video/)([A-Za-z0-9_-]{11})", existing_url)
+    if not m:
+        log(f"  ! 영상 주소에서 ID를 못 찾음: {existing_url}")
+        return [r for r in results if r]
+    vid = m.group(1)
+
+    log(f"  댓글 화면 확인 중... (영상 {vid})")
+    try:
+        page.goto(f"https://www.youtube.com/watch?v={vid}",
+                  wait_until="domcontentloaded", timeout=90000)
+        time.sleep(5)
+        for _ in range(8):
+            page.mouse.wheel(0, 900)
+            time.sleep(1.0)
+            if page.locator("#simplebox-placeholder").count():
+                break
+        results.append(check_page(page, log, "5_댓글"))
+    except Exception as e:
+        log(f"  ! 댓글 화면 진단 실패: {e}")
+
+    log("  예약 설정 화면 확인 중... (저장은 안 함)")
+    try:
+        page.goto(f"https://studio.youtube.com/video/{vid}/edit",
+                  wait_until="domcontentloaded", timeout=90000)
+        time.sleep(5)
+        up_youtube._click_if(page, up_youtube.SEL["공개 상태 드롭다운"], timeout=20000)
+        time.sleep(2.5)
+        up_youtube._click_if(page, up_youtube.SEL["예약 라디오"], timeout=10000)
+        time.sleep(2)
+        results.append(check_page(page, log, "6_예약설정"))
+        page.keyboard.press("Escape")
+        log("  ✔ 저장 버튼은 누르지 않았습니다 (공개 상태 그대로)")
+    except Exception as e:
+        log(f"  ! 예약 화면 진단 실패: {e}")
+
+    return [r for r in results if r]
+
+
+def run_dryrun(yt_video=None, tt_video=None, yt_existing=None, log=print):
+    """연습 진단을 실행한다. 게시/저장은 절대 하지 않는다."""
+    from playwright.sync_api import sync_playwright
+
+    log("=" * 60)
+    log("🧪 연습 진단 시작 — 게시/저장은 하지 않습니다")
+    log("=" * 60)
+
+    results = []
+    with sync_playwright() as p:
+        browser, context = up_browser.attach(p, log=log)
+        page = up_browser.get_page(context, log=log)
+
+        if yt_video or yt_existing:
+            try:
+                results += dryrun_youtube(page, yt_video, yt_existing, log=log)
+            except Exception as e:
+                log(f"❌ 유튜브 연습 진단 중단: {e}")
+
+        if tt_video:
+            try:
+                results += dryrun_tiktok(page, tt_video, log=log)
+            except Exception as e:
+                log(f"❌ 틱톡 연습 진단 중단: {e}")
+
+    bad = [r for r in results if r and r["missing"]]
+    log("")
+    log("=" * 60)
+    log(f"진단한 화면 {len(results)}개 / 문제 있는 화면 {len(bad)}개")
+    for r in bad:
+        log(f"  ✘ {r['label']}: {', '.join(r['missing'])}")
+    log(f"'{os.path.basename(OUT_DIR)}' 폴더를 통째로 전달해주세요.")
     log("=" * 60)
     return results
 

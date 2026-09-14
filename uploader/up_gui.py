@@ -15,7 +15,7 @@ import threading
 import traceback
 import tkinter as tk
 from datetime import datetime, timedelta
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import up_browser
 import up_youtube
@@ -66,12 +66,14 @@ class App(tk.Tk):
                    command=self.on_open_chrome).pack(side="left", padx=4)
         ttk.Button(top, text="③ 화면 진단하기",
                    command=self.on_check).pack(side="left", padx=4)
+        ttk.Button(top, text="④ 연습 진단(자동)",
+                   command=self.on_dryrun).pack(side="left", padx=4)
         ttk.Label(
             top,
             text="  ※ ①은 크롬을 완전히 종료한 뒤 한 번만 누르면 됩니다. "
                  "이후 ②로 연 창에서 로그인이 유지됩니다.\n"
-                 "  ※ ③은 업로드가 중간에 멈출 때, 그 화면을 열어둔 채 누르면 "
-                 "원인을 찾을 수 있는 파일을 만들어 줍니다.",
+                 "  ※ ③은 지금 열려 있는 화면 하나를, ④는 업로드 과정을 따라가며 "
+                 "여러 화면을 자동으로 진단합니다 (게시는 하지 않음).",
             foreground="#555",
             justify="left",
         ).pack(side="left", padx=8)
@@ -380,6 +382,55 @@ class App(tk.Tk):
                         f"'진단결과' 폴더에 파일이 만들어졌습니다.\n\n{up_check.OUT_DIR}"))
             except Exception as e:
                 self.log(f"❌ 진단 실패: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_dryrun(self):
+        """업로드 과정을 따라가며 여러 화면을 자동 진단 (게시/저장은 안 함)."""
+        if self.busy:
+            messagebox.showwarning("대기", "업로드가 진행 중입니다. 끝난 뒤에 눌러주세요.")
+            return
+
+        yt_video = self.yt["video"].get().strip()
+        tt_video = self.tt["video"].get().strip()
+        if not yt_video and not tt_video:
+            messagebox.showerror("입력 오류",
+                                 "연습용 영상 파일을 먼저 선택하세요.\n"
+                                 "(실제로 게시되지는 않습니다)")
+            return
+
+        if not messagebox.askyesno(
+            "연습 진단",
+            "업로드 과정을 따라가며 화면들을 자동으로 진단합니다.\n\n"
+            "· 게시/저장 버튼은 절대 누르지 않습니다\n"
+            "· 다만 유튜브에 '임시저장' 영상이 하나 생깁니다\n"
+            "  (스튜디오에서 직접 삭제하세요)\n\n"
+            "진행할까요?",
+        ):
+            return
+
+        yt_existing = ""
+        if yt_video:
+            yt_existing = simpledialog.askstring(
+                "유튜브 - 이미 올려둔 영상",
+                "댓글·예약 화면도 진단하려면\n"
+                "이미 올려둔 아무 영상 주소나 넣어주세요 (선택).\n\n"
+                "예: https://youtu.be/XXXXXXXXXXX\n"
+                "비워두면 그 두 화면은 건너뜁니다.",
+                parent=self,
+            ) or ""
+
+        def work():
+            try:
+                up_check.run_dryrun(yt_video=yt_video or None,
+                                    tt_video=tt_video or None,
+                                    yt_existing=yt_existing.strip() or None,
+                                    log=self.log)
+                self.after(0, lambda: messagebox.showinfo(
+                    "연습 진단 완료",
+                    f"'진단결과' 폴더를 통째로 전달해주세요.\n\n{up_check.OUT_DIR}"))
+            except Exception as e:
+                self.log(f"❌ 연습 진단 실패: {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
