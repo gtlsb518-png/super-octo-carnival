@@ -21,3 +21,4 @@ goldfib_trades.csv
 # 유튜브/틱톡 업로더 실행 산출물
 uploader/chrome_profile/
 uploader/uploader_settings.json
+uploader/진단결과/

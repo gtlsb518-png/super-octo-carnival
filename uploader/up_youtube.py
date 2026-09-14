@@ -63,6 +63,95 @@ def _time_candidates(dt):
     return out
 
 
+# ==================== 화면 요소 선택자 ====================
+# 유튜브가 화면을 바꾸면 여기만 고치면 된다.
+# up_check.py 로 어떤 선택자가 실제로 잡히는지 확인할 수 있다.
+
+SEL = {
+    "영상 파일 입력칸": [
+        "ytcp-uploads-file-picker input[type=file]",
+        "input[type=file]#content-file-picker",
+        "input[type=file]",
+    ],
+    "제목 입력칸": [
+        "ytcp-social-suggestions-textbox#title-textarea #textbox",
+        "#title-textarea #textbox",
+        "ytcp-mention-textbox#title-textarea div#textbox",
+        "div#textbox[contenteditable='true']",
+    ],
+    "설명 입력칸": [
+        "ytcp-social-suggestions-textbox#description-textarea #textbox",
+        "#description-textarea #textbox",
+    ],
+    "썸네일 입력칸": [
+        "ytcp-thumbnail-uploader input[type=file]",
+        "input#file-loader",
+        "input[type=file][accept*='image']",
+    ],
+    "자세히 보기 버튼": [
+        "ytcp-button#toggle-button", "#toggle-button",
+        "button:has-text('자세히 보기')", "button:has-text('SHOW MORE')",
+    ],
+    "태그 입력칸": [
+        "ytcp-form-input-container#tags-container input#text-input",
+        "#tags-container input",
+        "input[aria-label*='태그']", "input[aria-label*='tag']",
+    ],
+    "일부공개 라디오": [
+        "tp-yt-paper-radio-button[name='UNLISTED']", "[name='UNLISTED']",
+    ],
+    "댓글 입력창(닫힘)": [
+        "#simplebox-placeholder",
+    ],
+    "댓글 입력창(열림)": [
+        "#contenteditable-root",
+        "ytd-commentbox #contenteditable-root",
+        "div#contenteditable-root[contenteditable='true']",
+    ],
+    "댓글 등록 버튼": [
+        "ytd-commentbox #submit-button button",
+        "ytd-commentbox #submit-button",
+        "#submit-button button",
+    ],
+    "댓글 메뉴(⋮)": [
+        "ytd-comment-thread-renderer #action-menu button",
+        "ytd-comment-thread-renderer ytd-menu-renderer #button",
+    ],
+    "공개 상태 드롭다운": [
+        "ytcp-video-metadata-visibility ytcp-dropdown-trigger",
+        "ytcp-video-metadata-visibility",
+        "#visibility-container ytcp-dropdown-trigger",
+        "ytcp-form-select#privacy-form",
+        "#privacy-form ytcp-dropdown-trigger",
+    ],
+    "예약 라디오": [
+        "tp-yt-paper-radio-button[name='SCHEDULE']",
+        "ytcp-video-visibility-scheduler tp-yt-paper-radio-button",
+        "#second-container tp-yt-paper-radio-button",
+        "tp-yt-paper-radio-button:has-text('예약')",
+        "tp-yt-paper-radio-button:has-text('Schedule')",
+    ],
+    "예약 날짜 입력칸": [
+        "ytcp-date-picker input",
+        "#datepicker-trigger input",
+        "ytcp-text-dropdown-trigger#datepicker-trigger input",
+        "input[aria-label*='날짜']",
+        "input[aria-label*='date']",
+    ],
+    "예약 시간 입력칸": [
+        "ytcp-time-of-day input",
+        "#time-of-day-container input",
+        "input[aria-label*='시간']",
+        "input[aria-label*='time']",
+    ],
+    "저장 버튼": [
+        "ytcp-button#save-button", "#save-button",
+        "ytcp-button#done-button", "#done-button",
+        "button:has-text('예약')", "button:has-text('저장')",
+    ],
+}
+
+
 # ==================== 공통 도우미 ====================
 
 def _first(page, selectors, timeout=15000, state="visible"):
@@ -210,20 +299,11 @@ def upload(page, cfg, log):
 
     # ---------- 3. 영상 파일 선택 ----------
     log(f"[3/10] 영상 업로드 시작: {os.path.basename(video)}")
-    file_input = _first(page, [
-        "ytcp-uploads-file-picker input[type=file]",
-        "input[type=file]#content-file-picker",
-        "input[type=file]",
-    ], timeout=30000, state="attached")
+    file_input = _first(page, SEL["영상 파일 입력칸"], timeout=30000, state="attached")
     file_input.set_input_files(video)
 
     log("  - 업로드 시작됨, 상세정보 창 대기 중...")
-    title_box = _first(page, [
-        "ytcp-social-suggestions-textbox#title-textarea #textbox",
-        "#title-textarea #textbox",
-        "ytcp-mention-textbox#title-textarea div#textbox",
-        "div#textbox[contenteditable='true']",
-    ], timeout=120000)
+    title_box = _first(page, SEL["제목 입력칸"], timeout=120000)
 
     # ---------- 4. 제목 / 설명 ----------
     log("[4/10] 제목·설명 입력 중...")
@@ -233,10 +313,7 @@ def upload(page, cfg, log):
     desc = cfg.get("desc", "")
     if desc:
         try:
-            desc_box = _first(page, [
-                "ytcp-social-suggestions-textbox#description-textarea #textbox",
-                "#description-textarea #textbox",
-            ], timeout=15000)
+            desc_box = _first(page, SEL["설명 입력칸"], timeout=15000)
             _type_into(page, desc_box, desc, log)
         except Exception as e:
             log(f"  ! 설명 입력 실패 (건너뜀): {e}")
@@ -246,11 +323,7 @@ def upload(page, cfg, log):
     if thumb and os.path.exists(thumb):
         log("[5/10] 썸네일 업로드 중...")
         try:
-            tin = _first(page, [
-                "ytcp-thumbnail-uploader input[type=file]",
-                "input#file-loader",
-                "input[type=file][accept*='image']",
-            ], timeout=20000, state="attached")
+            tin = _first(page, SEL["썸네일 입력칸"], timeout=20000, state="attached")
             tin.set_input_files(thumb)
             time.sleep(3)
             log("  - 썸네일 등록 완료")
@@ -274,16 +347,9 @@ def upload(page, cfg, log):
     if tags:
         log("[7/10] 태그 입력 중...")
         try:
-            _click_if(page, [
-                "ytcp-button#toggle-button", "#toggle-button",
-                "button:has-text('자세히 보기')", "button:has-text('SHOW MORE')",
-            ], timeout=8000)
+            _click_if(page, SEL["자세히 보기 버튼"], timeout=8000)
             time.sleep(1)
-            tag_input = _first(page, [
-                "ytcp-form-input-container#tags-container input#text-input",
-                "#tags-container input",
-                "input[aria-label*='태그']", "input[aria-label*='tag']",
-            ], timeout=15000)
+            tag_input = _first(page, SEL["태그 입력칸"], timeout=15000)
             tag_input.click()
             for t in [x.strip() for x in tags.split(",") if x.strip()]:
                 page.keyboard.type(t, delay=10)
@@ -307,9 +373,7 @@ def upload(page, cfg, log):
             break
 
     log("  - 공개 설정: 일부공개 (댓글 작성용)")
-    if not _click_if(page, [
-        "tp-yt-paper-radio-button[name='UNLISTED']", "[name='UNLISTED']",
-    ], timeout=15000):
+    if not _click_if(page, SEL["일부공개 라디오"], timeout=15000):
         raise RuntimeError("'일부공개' 선택에 실패했습니다. 브라우저에서 직접 확인하세요.")
     time.sleep(1)
 
@@ -418,11 +482,7 @@ def _post_and_pin_comment(page, vid, text, log):
     box.click()
     time.sleep(1)
 
-    editor = _first(page, [
-        "#contenteditable-root",
-        "ytd-commentbox #contenteditable-root",
-        "div#contenteditable-root[contenteditable='true']",
-    ], timeout=15000)
+    editor = _first(page, SEL["댓글 입력창(열림)"], timeout=15000)
     editor.click()
     for i, line in enumerate(text.split("\n")):
         if i > 0:
@@ -431,11 +491,7 @@ def _post_and_pin_comment(page, vid, text, log):
     time.sleep(0.5)
 
     log("  - 댓글 등록 중...")
-    if not _click_if(page, [
-        "ytd-commentbox #submit-button button",
-        "ytd-commentbox #submit-button",
-        "#submit-button button",
-    ], timeout=15000):
+    if not _click_if(page, SEL["댓글 등록 버튼"], timeout=15000):
         raise RuntimeError("댓글 등록 버튼을 찾지 못했습니다")
     time.sleep(6)
 
@@ -534,38 +590,20 @@ def _set_schedule(page, vid, when, log):
 
     # 공개 상태 드롭다운 열기
     log("  - 공개 상태 창 여는 중...")
-    opened = _click_if(page, [
-        "ytcp-video-metadata-visibility ytcp-dropdown-trigger",
-        "ytcp-video-metadata-visibility",
-        "#visibility-container ytcp-dropdown-trigger",
-        "ytcp-form-select#privacy-form",
-        "#privacy-form ytcp-dropdown-trigger",
-    ], timeout=20000)
+    opened = _click_if(page, SEL["공개 상태 드롭다운"], timeout=20000)
     if not opened:
         raise RuntimeError("공개 상태 드롭다운을 찾지 못했습니다")
     time.sleep(2.5)
 
     # '예약' 선택
     log("  - '예약' 선택 중...")
-    if not _click_if(page, [
-        "tp-yt-paper-radio-button[name='SCHEDULE']",
-        "ytcp-video-visibility-scheduler tp-yt-paper-radio-button",
-        "#second-container tp-yt-paper-radio-button",
-        "tp-yt-paper-radio-button:has-text('예약')",
-        "tp-yt-paper-radio-button:has-text('Schedule')",
-    ], timeout=15000):
+    if not _click_if(page, SEL["예약 라디오"], timeout=15000):
         raise RuntimeError("'예약' 항목을 찾지 못했습니다")
     time.sleep(2)
 
     # 날짜 입력
     log(f"  - 날짜 입력: {when:%Y-%m-%d}")
-    date_in = _first(page, [
-        "ytcp-date-picker input",
-        "#datepicker-trigger input",
-        "ytcp-text-dropdown-trigger#datepicker-trigger input",
-        "input[aria-label*='날짜']",
-        "input[aria-label*='date']",
-    ], timeout=15000)
+    date_in = _first(page, SEL["예약 날짜 입력칸"], timeout=15000)
 
     ok = False
     for cand in _date_candidates(when):
@@ -582,12 +620,7 @@ def _set_schedule(page, vid, when, log):
     # 시간 입력
     log(f"  - 시간 입력: {when:%H:%M}")
     try:
-        time_in = _first(page, [
-            "ytcp-time-of-day input",
-            "#time-of-day-container input",
-            "input[aria-label*='시간']",
-            "input[aria-label*='time']",
-        ], timeout=10000)
+        time_in = _first(page, SEL["예약 시간 입력칸"], timeout=10000)
 
         ok = False
         for cand in _time_candidates(when):
@@ -609,11 +642,7 @@ def _set_schedule(page, vid, when, log):
 
     # 저장
     log("  - 저장 중...")
-    if not _click_if(page, [
-        "ytcp-button#save-button", "#save-button",
-        "ytcp-button#done-button", "#done-button",
-        "button:has-text('예약')", "button:has-text('저장')",
-    ], timeout=15000):
+    if not _click_if(page, SEL["저장 버튼"], timeout=15000):
         raise RuntimeError("저장 버튼을 찾지 못했습니다")
     time.sleep(4)
 

@@ -20,6 +20,7 @@ from tkinter import ttk, filedialog, messagebox
 import up_browser
 import up_youtube
 import up_tiktok
+import up_check
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "uploader_settings.json")
@@ -63,11 +64,16 @@ class App(tk.Tk):
                    command=self.on_copy_profile).pack(side="left", padx=4)
         ttk.Button(top, text="② 업로드용 크롬 열기",
                    command=self.on_open_chrome).pack(side="left", padx=4)
+        ttk.Button(top, text="③ 화면 진단하기",
+                   command=self.on_check).pack(side="left", padx=4)
         ttk.Label(
             top,
             text="  ※ ①은 크롬을 완전히 종료한 뒤 한 번만 누르면 됩니다. "
-                 "이후 ②로 연 창에서 로그인이 유지됩니다.",
+                 "이후 ②로 연 창에서 로그인이 유지됩니다.\n"
+                 "  ※ ③은 업로드가 중간에 멈출 때, 그 화면을 열어둔 채 누르면 "
+                 "원인을 찾을 수 있는 파일을 만들어 줍니다.",
             foreground="#555",
+            justify="left",
         ).pack(side="left", padx=8)
 
         # ---------- 가운데: 유튜브 / 틱톡 ----------
@@ -356,6 +362,24 @@ class App(tk.Tk):
                 self.log("→ 열린 창에서 유튜브/틱톡 로그인 상태를 확인하세요.")
             except Exception as e:
                 self.log(f"❌ 크롬 실행 실패: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_check(self):
+        """업로드가 멈춘 화면을 진단해서 '진단결과' 폴더에 파일로 남긴다."""
+        if self.busy:
+            messagebox.showwarning("대기", "업로드가 진행 중입니다. 끝난 뒤에 눌러주세요.")
+            return
+
+        def work():
+            try:
+                results = up_check.run(log=self.log)
+                if results:
+                    self.after(0, lambda: messagebox.showinfo(
+                        "진단 완료",
+                        f"'진단결과' 폴더에 파일이 만들어졌습니다.\n\n{up_check.OUT_DIR}"))
+            except Exception as e:
+                self.log(f"❌ 진단 실패: {e}")
 
         threading.Thread(target=work, daemon=True).start()
 

@@ -28,6 +28,76 @@ MIN_AHEAD_MIN = 20
 MAX_AHEAD_DAYS = 10
 
 
+# ==================== 화면 요소 선택자 ====================
+# 틱톡이 화면을 바꾸면 여기만 고치면 된다.
+# up_check.py 로 어떤 선택자가 실제로 잡히는지 확인할 수 있다.
+
+SEL = {
+    "영상 파일 입력칸": [
+        "input[type=file][accept*='video']",
+        "input[type=file]",
+    ],
+    "캡션 입력창": [
+        "div[contenteditable='true'].public-DraftEditor-content",
+        ".public-DraftEditor-content",
+        "div[contenteditable='true'][role='combobox']",
+        "div[contenteditable='true']",
+    ],
+    "커버 편집 버튼": [
+        "button:has-text('커버 편집')", "text='커버 편집'",
+        "button:has-text('Edit cover')", "text='Edit cover'",
+    ],
+    "커버 업로드 탭": [
+        "div[role='tab']:has-text('업로드')",
+        "div[role='tab']:has-text('Upload')",
+        "button:has-text('업로드')",
+    ],
+    "공개 범위 선택": [
+        "div[class*='visibility'] div[class*='select']",
+        "div[class*='select-container']",
+    ],
+    "예약 게시 스위치": [
+        "[data-e2e='schedule_switch']",
+        "div[class*='schedule'] input[type='checkbox']",
+        "div[class*='switch'][class*='schedule']",
+        "input[type='radio'][value='schedule']",
+        "text='예약 게시'",
+        "text='Schedule'",
+        "text='예약'",
+    ],
+    "예약 날짜 입력칸": [
+        "div[class*='date-picker'] input",
+        "div[class*='DatePicker'] input",
+        "input[class*='date']",
+        "div[class*='schedule'] input[placeholder*='-']",
+    ],
+    "예약 시간 입력칸": [
+        "div[class*='time-picker'] input",
+        "div[class*='TimePicker'] input",
+        "input[class*='time']",
+        "div[class*='schedule'] input[placeholder*=':']",
+    ],
+    "시간 선택 패널": [
+        "div[class*='timepicker']",
+        "div[class*='TimePicker'][class*='panel']",
+        "div[class*='time-picker-container']",
+    ],
+    "달력 패널": [
+        "div[class*='calendar']",
+        "div[class*='datepicker']",
+        "div[class*='DatePicker'][class*='panel']",
+    ],
+    "게시 버튼": [
+        "button[data-e2e='post_video_button']",
+        "button:has-text('예약')",
+        "button:has-text('게시')",
+        "button:has-text('Schedule')",
+        "button:has-text('Post')",
+        "div[role='button']:has-text('게시')",
+    ],
+}
+
+
 # ==================== 예약 시간 검사 ====================
 
 def parse_schedule(sched, log=print, now=None):
@@ -148,10 +218,7 @@ def upload(page, cfg, log):
 
     # ---------- 2. 영상 파일 선택 ----------
     log(f"[2/7] 영상 업로드 시작: {os.path.basename(video)}")
-    fin, _ = _find_any(page, [
-        "input[type=file][accept*='video']",
-        "input[type=file]",
-    ], timeout=40000, state="attached")
+    fin, _ = _find_any(page, SEL["영상 파일 입력칸"], timeout=40000, state="attached")
     fin.set_input_files(video)
     time.sleep(5)
 
@@ -166,12 +233,7 @@ def upload(page, cfg, log):
     tags = [t.strip().lstrip("#") for t in cfg.get("tags", "").split(",") if t.strip()]
 
     try:
-        cap, fr = _find_any(page, [
-            "div[contenteditable='true'].public-DraftEditor-content",
-            ".public-DraftEditor-content",
-            "div[contenteditable='true'][role='combobox']",
-            "div[contenteditable='true']",
-        ], timeout=60000)
+        cap, fr = _find_any(page, SEL["캡션 입력창"], timeout=60000)
 
         cap.click()
         time.sleep(0.5)
@@ -202,16 +264,9 @@ def upload(page, cfg, log):
     if cover and os.path.exists(cover):
         log("[4/7] 커버 이미지 설정 시도 중...")
         try:
-            _click_if(page, [
-                "button:has-text('커버 편집')", "text='커버 편집'",
-                "button:has-text('Edit cover')", "text='Edit cover'",
-            ], timeout=8000)
+            _click_if(page, SEL["커버 편집 버튼"], timeout=8000)
             time.sleep(2)
-            _click_if(page, [
-                "div[role='tab']:has-text('업로드')",
-                "div[role='tab']:has-text('Upload')",
-                "button:has-text('업로드')",
-            ], timeout=6000)
+            _click_if(page, SEL["커버 업로드 탭"], timeout=6000)
             time.sleep(1)
 
             cin, _ = _find_any(page, ["input[type=file][accept*='image']"],
@@ -235,10 +290,7 @@ def upload(page, cfg, log):
     label = {"public": "전체 공개", "friends": "친구", "private": "나만 보기"}.get(privacy, "전체 공개")
     log(f"[5/7] 공개 범위 설정: {label}")
     try:
-        _click_if(page, [
-            "div[class*='visibility'] div[class*='select']",
-            "div[class*='select-container']",
-        ], timeout=6000)
+        _click_if(page, SEL["공개 범위 선택"], timeout=6000)
         time.sleep(1)
         if not _click_if(page, [
             f"div[role='option']:has-text('{label}')",
@@ -263,14 +315,7 @@ def upload(page, cfg, log):
     _wait_upload(page, log)
 
     log("  - 게시 버튼 클릭")
-    clicked = _click_if(page, [
-        "button[data-e2e='post_video_button']",
-        "button:has-text('예약')",
-        "button:has-text('게시')",
-        "button:has-text('Schedule')",
-        "button:has-text('Post')",
-        "div[role='button']:has-text('게시')",
-    ], timeout=30000)
+    clicked = _click_if(page, SEL["게시 버튼"], timeout=30000)
 
     if not clicked:
         raise RuntimeError("게시 버튼을 찾지 못했습니다. 브라우저에서 직접 확인하세요.")
@@ -292,18 +337,8 @@ def upload(page, cfg, log):
 def _schedule_inputs(page, timeout=10000):
     """예약 날짜/시간 입력칸을 찾는다. 없으면 None (=예약이 아직 꺼져 있음)."""
     try:
-        date_in, _ = _find_any(page, [
-            "div[class*='date-picker'] input",
-            "div[class*='DatePicker'] input",
-            "input[class*='date']",
-            "div[class*='schedule'] input[placeholder*='-']",
-        ], timeout=timeout)
-        time_in, _ = _find_any(page, [
-            "div[class*='time-picker'] input",
-            "div[class*='TimePicker'] input",
-            "input[class*='time']",
-            "div[class*='schedule'] input[placeholder*=':']",
-        ], timeout=timeout)
+        date_in, _ = _find_any(page, SEL["예약 날짜 입력칸"], timeout=timeout)
+        time_in, _ = _find_any(page, SEL["예약 시간 입력칸"], timeout=timeout)
         return date_in, time_in
     except Exception:
         return None
@@ -320,15 +355,7 @@ def _set_schedule(page, when, log):
         log("  - '예약 게시'가 이미 켜져 있습니다")
     else:
         log("  - '예약 게시' 켜는 중...")
-        turned_on = _click_if(page, [
-            "[data-e2e='schedule_switch']",
-            "div[class*='schedule'] input[type='checkbox']",
-            "div[class*='switch'][class*='schedule']",
-            "input[type='radio'][value='schedule']",
-            "text='예약 게시'",
-            "text='Schedule'",
-            "text='예약'",
-        ], timeout=15000)
+        turned_on = _click_if(page, SEL["예약 게시 스위치"], timeout=15000)
         if not turned_on:
             raise RuntimeError(
                 "'예약 게시' 스위치를 찾지 못했습니다.\n"
@@ -376,11 +403,7 @@ def _pick_time(page, time_in, when, log):
     time_in.click()
     time.sleep(2)
 
-    panel, fr = _find_any(page, [
-        "div[class*='timepicker']",
-        "div[class*='TimePicker'][class*='panel']",
-        "div[class*='time-picker-container']",
-    ], timeout=10000)
+    panel, fr = _find_any(page, SEL["시간 선택 패널"], timeout=10000)
 
     hh, mm = f"{when.hour:02d}", f"{when.minute:02d}"
 
@@ -432,11 +455,7 @@ def _pick_date(page, date_in, when, log):
     date_in.click()
     time.sleep(2)
 
-    cal, fr = _find_any(page, [
-        "div[class*='calendar']",
-        "div[class*='datepicker']",
-        "div[class*='DatePicker'][class*='panel']",
-    ], timeout=10000)
+    cal, fr = _find_any(page, SEL["달력 패널"], timeout=10000)
 
     # 목표 달이 나올 때까지 '다음 달' 화살표 클릭 (최대 12번)
     for _ in range(12):
