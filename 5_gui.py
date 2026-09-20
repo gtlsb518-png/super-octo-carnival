@@ -557,7 +557,12 @@ class TradingBot:
         
         # 🔥 로그 ID (중복 방지)
         self._last_log_id = None
-        
+
+        # 🔥 리페인팅 추적 (즉시진입 모드 전용)
+        #    진행 중인 봉 신호로 들어간 거래를 기록해 두고,
+        #    그 봉이 닫히면 신호가 살아남았는지(리페인팅 여부) 로그로 알려준다.
+        self._pending_repaint = []
+
         # 통계 추적
         self.stats = {
             'total_pnl': 0,
@@ -604,7 +609,98 @@ class TradingBot:
                 return  # 중복이면 무시
             self._last_log_id = log_id
         self.log_callback(message, position_type)
-    
+
+    # ==================== 리페인팅 추적 ====================
+    @staticmethod
+    def _fmt_bar(t):
+        """봉 시각을 보기 좋게"""
+        try:
+            return t.strftime('%m/%d %H:%M')
+        except Exception:
+            return str(t)
+
+    def _trade_seq_snapshot(self):
+        """지금까지 청산 완료된 거래 수 (LONG+SHORT). 조기청산 판단용."""
+        st = self.config.get('stats', {})
+        return st.get('long_count', 0) + st.get('short_count', 0)
+
+    def mark_live_entry(self, pos_type, df_used, entry_price):
+        """진행 중(미확정) 봉 신호로 진입했을 때 기록 + 안내 로그.
+
+        확정봉 모드면 아무것도 하지 않는다.
+        """
+        if self.config.get('signal_mode', 'live') != 'live':
+            return None
+        try:
+            bar_time = df_used.index[-1]
+        except Exception:
+            return None
+        with LOG_LOCK:
+            seq = self.config.get('live_trade_seq', 0) + 1
+            self.config['live_trade_seq'] = seq
+        self._pending_repaint.append({
+            'no': seq, 'side': pos_type, 'bar': bar_time,
+            'price': entry_price, 'closed_snapshot': self._trade_seq_snapshot(),
+        })
+        self.log(f"   ⚡ #{seq}번 거래 — 진행 중인 봉({self._fmt_bar(bar_time)}) 신호로 진입", pos_type)
+        self.log(f"      → 아직 리페인팅 가능. 이 봉이 닫히면 확정 여부를 알려드립니다.", pos_type)
+        print(f"[⚡ 즉시진입] {self.config['symbol']} {pos_type} #{seq} "
+              f"기준봉={self._fmt_bar(bar_time)} (미확정)")
+        return seq
+
+    def check_repaint(self, df_full):
+        """기준봉이 닫혔으면 그 신호가 살아남았는지 확인해 로그로 알린다.
+
+        df_full: 진행 중 봉까지 포함된 원본 캔들 (마지막 행 = 미완성 봉)
+        """
+        if not self._pending_repaint or df_full is None or len(df_full) < 3:
+            return
+        closed_idx = df_full.index[:-1]      # 마지막 봉은 아직 진행 중
+        if len(closed_idx) == 0:
+            return
+        still_pending = []
+        for rec in self._pending_repaint:
+            bar = rec['bar']
+            if bar not in closed_idx:
+                still_pending.append(rec)    # 아직 안 닫힘 → 다음에 다시 확인
+                continue
+            try:
+                pos = df_full.index.get_loc(bar)
+                # 그 봉까지만 잘라서 = 그 봉이 '마지막 완성봉'인 상태로 재계산
+                sig = Indicators.get_signals(
+                    df_full.iloc[:pos + 1],
+                    self.config['ut_sens'], self.config['ut_atr'],
+                    self.config['ema_fast'], self.config['ema_slow'])
+            except Exception as e:
+                print(f"[리페인팅 확인 실패] {self.config['symbol']} #{rec['no']}: {e}")
+                continue
+
+            if rec['side'] == 'LONG':
+                survived = sig.get('ut_position_long', False) and sig.get('ema_long', False)
+            else:
+                survived = sig.get('ut_position_short', False) and sig.get('ema_short', False)
+
+            # 기준봉이 닫히기 전에 이미 청산됐는지
+            closed_early = self._trade_seq_snapshot() > rec['closed_snapshot']
+
+            no, side, bt = rec['no'], rec['side'], self._fmt_bar(bar)
+            if survived:
+                self.log(f"🔍 #{no}번 거래 — 기준봉({bt}) 마감 → ✅ 신호 확정 "
+                         f"(리페인팅 없었음, 확정봉 기준으로도 맞는 진입)", side)
+                print(f"[🔍 확정] {self.config['symbol']} #{no} {side} 신호 유지됨")
+            else:
+                self.log(f"🔍 #{no}번 거래 — 기준봉({bt}) 마감 → ⚠️ 리페인팅 발생! "
+                         f"확정봉 기준으론 없던 신호였습니다", side)
+                print(f"[🔍 리페인팅] {self.config['symbol']} #{no} {side} 신호 사라짐")
+
+            if closed_early:
+                self.log(f"      ↳ 이 거래는 기준봉이 닫히기 전에 이미 청산됐습니다 "
+                         f"({'리페인팅 피함' if not survived else '정상'})", side)
+            else:
+                self.log(f"      ↳ 이 거래는 아직 보유 중입니다", side)
+
+        self._pending_repaint = still_pending
+
     def save_trade_excel(self, pos_type, roi_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, trade_type):
         """엑셀에 거래 기록 저장 - 바이낸스 실제 데이터 우선"""
         if not self.excel_callback:
@@ -958,8 +1054,10 @@ class TradingBot:
                     # 🔥🔥🔥 신호 기준 봉 선택
                     #   'confirmed' = 완성된 봉만 (트레이딩뷰와 동일, 리페인팅 없음)
                     #   'live'      = 진행 중인 봉 포함 (신호 즉시 반응, 리페인팅 가능)
-                    if self.config.get('signal_mode', 'confirmed') == 'live':
+                    if self.config.get('signal_mode', 'live') == 'live':
                         df_closed = df
+                        # 🔍 진행 중이던 기준봉이 닫혔으면 리페인팅 여부 판정 후 로그
+                        self.check_repaint(df)
                     else:
                         df_closed = df[:-1]
                     
@@ -1298,6 +1396,8 @@ class TradingBot:
                                     self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", pos_type)
                                 self.log(f"   💸 예상 수수료: ${entry_fee:.2f} + ${entry_fee:.2f} = ${entry_fee*2:.2f} (0.08%)", pos_type)
                                 self.log(f"   🛡️ SL: AUTO (스위칭)", pos_type)
+                                # 🔍 즉시진입 모드면 리페인팅 추적 시작
+                                self.mark_live_entry(pos_type, df_closed, signals['price'])
                                 
                                 # 🔥 포지션 있음 플래그 설정!
                                 self.config['has_position'] = True
@@ -1692,6 +1792,8 @@ class TradingBot:
                                             self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'SHORT')
                                         self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'SHORT')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'SHORT')
+                                        # 🔍 즉시진입 모드면 리페인팅 추적 시작
+                                        self.mark_live_entry('SHORT', df_closed, signals['price'])
                                         
                                         print(f"[✅ 진입] {self.config['symbol']} SHORT ${signals['price']:.2f} | {qty}개 | {self.config['leverage']}x")
                                         print(f"   💰 목표 USDT: ${target_usdt:.2f} | 💸 진입 수수료: ${entry_fee:.2f}")
@@ -2037,6 +2139,8 @@ class TradingBot:
                                             self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'LONG')
                                         self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'LONG')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'LONG')
+                                        # 🔍 즉시진입 모드면 리페인팅 추적 시작
+                                        self.mark_live_entry('LONG', df_closed, signals['price'])
                                         
                                         print(f"[✅ 진입] {self.config['symbol']} LONG ${signals['price']:.2f} | {qty}개 | {self.config['leverage']}x")
                                         print(f"   💰 목표 USDT: ${target_usdt:.2f} | 💸 진입 수수료: ${entry_fee:.2f}")
@@ -2294,7 +2398,7 @@ class App:
                 'tp': 1.2,  # 기본 TP (동적 TP 비활성화 시)
                 'sl': 0,  # AUTO 고정
                 'ut_sens': 10,  # 🔥 UT Bot Key Value
-                'ut_atr': 2,   # 🔥 UT Bot ATR Period
+                'ut_atr': 5,   # 🔥 UT Bot ATR Period (2→5: 거래·수수료·낙폭 감소, 수익 동등)
                 'ema_fast': 34,
                 'ema_slow': 55,
                 'long_active': False,
@@ -2305,7 +2409,7 @@ class App:
                 # 🔥 청산 방식: 'tp'=TP 도달 시 익절(+스위칭) / 'switch'=반대신호 스위칭만
                 'exit_mode': 'tp',
                 # 🔥 신호 기준: 'confirmed'=완성봉만(안전) / 'live'=진행중 봉 포함(빠름)
-                'signal_mode': 'confirmed',
+                'signal_mode': 'live',
                 'adx_period': 10,  # ADX 기간
                 'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
                 # 🔥 거래량 필터 비활성화
@@ -3475,7 +3579,7 @@ class App:
                 
                 # UT Bot 신호 계산 (코인 설정값 사용)
                 ut_sens = coin.get('ut_sens', 10)
-                ut_atr = coin.get('ut_atr', 2)
+                ut_atr = coin.get('ut_atr', 5)
                 
                 signals_4h = Indicators.get_signals(
                     df_4h_closed, ut_sens, ut_atr,
@@ -3633,7 +3737,7 @@ class App:
             
             coin = {'symbol': symbol, 'timeframe': timeframe, 'amount': float(amount_var.get()),
                    'leverage': lev_var.get(), 'tp': tp_var.get(), 'sl': sl_var.get(),
-                   'ut_sens': 10, 'ut_atr': 2, 'ema_fast': 34, 'ema_slow': 55,
+                   'ut_sens': 10, 'ut_atr': 5, 'ema_fast': 34, 'ema_slow': 55,
                    'long_active': False, 'short_active': False,
                    'tp_trend': tp_trend_var.get(), 'tp_sideways': tp_sideways_var.get(),
                    'adx_period': adx_period_var.get()}
@@ -3886,12 +3990,12 @@ class App:
                 bg='#2d2d2d', fg='#ffaa00' if _sw else '#00ff88',
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
 
-        _lv = coin.get('signal_mode', 'confirmed') == 'live'
+        _lv = coin.get('signal_mode', 'live') == 'live'
         tk.Label(settings_line, text="신호:즉시" if _lv else "신호:확정",
                 bg='#2d2d2d', fg='#ffaa00' if _lv else '#aaaaaa',
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
         
-        tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 2)}", bg='#2d2d2d', fg='#aaaaaa',
+        tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 5)}", bg='#2d2d2d', fg='#aaaaaa',
                 font=('Arial', 9)).pack(side='left', padx=3)
         tk.Label(settings_line, text=f"EMA:{coin.get('ema_fast', 34)},{coin.get('ema_slow', 55)}", bg='#2d2d2d', fg='#aaaaaa',
                 font=('Arial', 9)).pack(side='left', padx=3)
@@ -3988,11 +4092,11 @@ class App:
         # 🔥🔥 신호 기준 봉 선택
         tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
         tk.Label(scrollable_frame, text="⏱️ 신호 기준 봉", bg='#2d2d2d', fg='#00ff88', font=('Arial', 11, 'bold')).pack(pady=5)
-        signal_mode_var = tk.StringVar(value=coin.get('signal_mode', 'confirmed'))
-        tk.Radiobutton(scrollable_frame, text="봉 확정 후 (안전·기본)", variable=signal_mode_var,
+        signal_mode_var = tk.StringVar(value=coin.get('signal_mode', 'live'))
+        tk.Radiobutton(scrollable_frame, text="봉 확정 후 (안전·느림)", variable=signal_mode_var,
                        value='confirmed', bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
                        font=('Arial', 10), activebackground='#2d2d2d').pack(anchor='w', padx=30)
-        tk.Radiobutton(scrollable_frame, text="진행 중 봉 포함 (즉시 반응·리페인팅 가능)",
+        tk.Radiobutton(scrollable_frame, text="진행 중 봉 포함 (즉시 진입·기본)",
                        variable=signal_mode_var, value='live', bg='#2d2d2d', fg='#ffaa00',
                        selectcolor='#1e1e1e', font=('Arial', 10),
                        activebackground='#2d2d2d').pack(anchor='w', padx=30)
@@ -4030,7 +4134,7 @@ class App:
         tk.Entry(scrollable_frame, textvariable=ut_sens_var, font=('Arial', 11)).pack(pady=3)
         
         tk.Label(scrollable_frame, text="ATR Period:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 10)).pack(pady=3)
-        ut_atr_var = tk.IntVar(value=coin.get('ut_atr', 2))
+        ut_atr_var = tk.IntVar(value=coin.get('ut_atr', 5))
         tk.Entry(scrollable_frame, textvariable=ut_atr_var, font=('Arial', 11)).pack(pady=3)
         
         # --- EMA 설정 ---
