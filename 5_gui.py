@@ -322,6 +322,46 @@ class BinanceAPI:
             print(f"[펀딩비 조회 실패] {symbol}: {e}")
             return None, 0
 
+    def get_close_reason(self, symbol, lookback_ms=10 * 60 * 1000):
+        """포지션이 왜 닫혔는지 판별.
+
+        Returns: 'tp'     = 봇이 건 TP 주문 체결 (정상)
+                 'manual' = 사람이 바이낸스에서 직접 청산
+                 'liq'    = 바이낸스 강제청산 / ADL
+                 None     = 판별 실패
+
+        바이낸스 규칙:
+          · 강제청산 주문은 clientOrderId가 'autoclose-'로 시작
+          · ADL(자동디레버리징)은 'adl_autoclose'로 시작
+          · 봇이 건 TP는 type이 'TAKE_PROFIT_MARKET'
+        """
+        try:
+            since = int(time.time() * 1000) - int(lookback_ms)
+            orders = self._request('GET', '/fapi/v1/allOrders',
+                                   params={'symbol': symbol.replace('/', ''),
+                                           'startTime': since, 'limit': 50},
+                                   signed=True)
+            if not orders:
+                return None
+            # 체결된 주문 중 가장 최근 것
+            filled = [o for o in orders
+                      if o.get('status') == 'FILLED' and float(o.get('executedQty', 0) or 0) > 0]
+            if not filled:
+                return None
+            o = max(filled, key=lambda x: int(x.get('updateTime', 0)))
+            cid = str(o.get('clientOrderId', ''))
+            otype = str(o.get('type', ''))
+            if cid.startswith('adl_autoclose') or cid.startswith('autoclose-'):
+                return 'liq'
+            if otype in ('TAKE_PROFIT_MARKET', 'TAKE_PROFIT'):
+                return 'tp'
+            if o.get('reduceOnly') or str(o.get('closePosition', '')).lower() == 'true':
+                return 'manual'
+            return 'manual'
+        except Exception as e:
+            print(f"[청산 원인 조회 실패] {symbol}: {e}")
+            return None
+
     def get_klines(self, symbol, interval, limit=200):
         """차트 데이터는 항상 메인넷에서 가져옴 (정확한 가격)"""
         cache_key = f"{symbol}_{interval}"
@@ -867,9 +907,15 @@ class TradingBot:
         return False
 
     def _handle_external_close(self):
-        """🔥 포지션이 봇 청산 없이 사라짐 = 거래소 TP 주문 체결 (또는 수동 청산)
+        """🔥 포지션이 봇 청산 없이 사라짐.
 
-        바이낸스 실현 손익을 조회해서 통계/로그/엑셀에 기록.
+        세 가지 경우가 있어 원인을 판별한다.
+          · 봇이 건 TP 주문 체결  → 정상. 그대로 재진입 가능
+          · 사람이 수동 청산       → 이 코인 봇을 끈다 (재진입 차단)
+          · 바이낸스 강제청산/ADL  → 이 코인 봇을 끈다 (재진입 차단)
+
+        멈추는 건 '이 코인'만이고, 프로그램과 다른 코인은 계속 돈다.
+        나중에 시작/강제시작 버튼을 누르면 다시 진입한다.
         """
         with CLOSE_LOCK:
             prev = self.config.get('_cached_position')
@@ -882,7 +928,18 @@ class TradingBot:
 
         pos_type = side.upper()
         symbol = self.config['symbol']
-        print(f"[🎯 TP 체결 감지] {symbol} {pos_type} 포지션이 거래소에서 청산됨")
+
+        # 🔍 왜 닫혔는지 판별
+        reason = self.api.get_close_reason(symbol)
+        pnl_peek = prev.get('pnl', 0)
+        if reason is None:
+            # 주문 조회 실패 → 손익 부호로 보수적 추정.
+            # 봇 TP는 +1.5%에서만 체결되므로 손실이면 TP일 수 없다.
+            reason = 'tp' if pnl_peek > 0 else 'manual'
+            print(f"[청산 원인 추정] {symbol}: 주문조회 실패 → 손익 {pnl_peek:+.2f} 기준 '{reason}'")
+
+        label = {'tp': '익절(TP주문)', 'manual': '수동청산', 'liq': '강제청산'}[reason]
+        print(f"[🎯 외부 청산 감지] {symbol} {pos_type} — {label}")
 
         # 잔여 주문 정리
         try:
@@ -924,16 +981,27 @@ class TradingBot:
         profit_sign = '+' if net_profit >= 0 else ''
 
         # 엑셀 저장
-        self.save_trade_excel(pos_type, roi_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '익절(TP주문)')
+        self.save_trade_excel(pos_type, roi_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, label)
 
         # 로그
-        self.log(f"✅ {pos_type} 익절! 거래소 TP 주문 체결 (#{count})", pos_type)
-        self.log(f"   💰 실현 수익: ${pnl_usd:.2f}", pos_type)
-        self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
-        print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
+        if reason == 'tp':
+            self.log(f"✅ {pos_type} 익절! 거래소 TP 주문 체결 (#{count})", pos_type)
+            self.log(f"   💰 실현 수익: ${pnl_usd:.2f}", pos_type)
+            self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
+            print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
+        else:
+            icon = '🛑' if reason == 'manual' else '💀'
+            self.log(f"{icon} {pos_type} {label} 감지! (#{count})", pos_type)
+            self.log(f"   💰 실현 손익: ${pnl_usd:.2f} | 수수료: ${total_fee:.2f} "
+                     f"| 순손익: {profit_sign}${abs(net_profit):.2f}", pos_type)
+            print(f"[{icon} {label}] {symbol} {pos_type} | 순손익 {profit_sign}${abs(net_profit):.2f}")
 
         self.stats_callback()
         self.config['last_close_time'] = time.time()
+
+        # 🛑 봇이 건 TP가 아니면 = 내가 껐거나 바이낸스가 끊은 것 → 이 코인만 정지
+        if reason != 'tp':
+            self.halt_coin(label, pos_type)
 
         # 신호/ROI 초기화 (재진입 대비)
         self.config['prev_signals'] = {
@@ -948,6 +1016,37 @@ class TradingBot:
         self.config['roi'][f'{side}_current'] = 0
         self.config['roi'][f'{side}_max'] = 0
         self.config['roi'][f'{side}_min'] = 0
+
+    def halt_coin(self, why, pos_type):
+        """🛑 이 코인만 매매 정지 (재진입 차단).
+
+        - long_active / short_active 를 끄면 신호가 떠도 진입하지 않는다.
+        - 스레드는 살려둔다 → 프로그램도, 다른 코인도 그대로 돌아간다.
+        - 나중에 시작/강제시작 버튼을 누르면 다시 진입한다.
+        """
+        was_long = self.config.get('long_active')
+        was_short = self.config.get('short_active')
+        self.config['long_active'] = False
+        self.config['short_active'] = False
+        self.config['halted_reason'] = why
+        self.config['halted_at'] = time.time()
+
+        # 남아있는 예약 주문(TP 등) 정리
+        try:
+            self.api.cancel_all_orders(self.config['symbol'])
+        except Exception:
+            pass
+
+        sym = self.config['symbol']
+        for t in ('LONG', 'SHORT'):
+            self.log(f"🛑 {sym} 봇 정지 — {why} 감지", t)
+            self.log(f"   이 코인만 멈췄습니다. 다른 코인·프로그램은 그대로 돌아갑니다.", t)
+            self.log(f"   ▶️ 다시 매매하려면 시작(또는 강제시작) 버튼을 누르세요.", t)
+        print("=" * 60)
+        print(f"🛑 [{sym}] 봇 정지 — {why}")
+        print(f"   LONG {was_long} → False | SHORT {was_short} → False")
+        print(f"   다른 코인은 계속 실행 중. 시작 버튼으로 재개하세요.")
+        print("=" * 60)
 
     def get_htf_adx(self, df_fallback):
         """🔥 ADX를 1시간봉(완성봉)으로 계산 — TP 결정용
@@ -2692,6 +2791,10 @@ class App:
                     print(f"  🔍 [DEBUG] 기존 LONG 봇 없음 (새로 시작)")
             
                 coin['long_active'] = True
+                # 🛑 수동/강제청산으로 정지됐던 상태 해제
+                if coin.pop('halted_reason', None):
+                    coin.pop('halted_at', None)
+                    print(f"  ▶️ {coin['symbol']} 정지 상태 해제 — 다시 진입합니다")
                 coin['last_close_time'] = None
                 coin['is_entering_long'] = False; coin['is_entering_short'] = False
                 coin['is_closing'] = False
@@ -2982,6 +3085,10 @@ class App:
                 coin['warned_position_exists'] = False
                 coin['prev_short_signal_initialized'] = False
                 coin['prev_long_signal_initialized'] = False
+                # 🛑 수동/강제청산으로 정지됐던 상태 해제
+                if coin.pop('halted_reason', None):
+                    coin.pop('halted_at', None)
+                    print(f"  ▶️ {coin['symbol']} 정지 상태 해제 — 다시 진입합니다")
             
                 # 🔥 LONG 봇 시작
                 if not coin['long_active']:
