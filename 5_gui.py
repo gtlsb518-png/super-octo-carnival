@@ -1119,47 +1119,83 @@ class TradingBot:
     def stop(self):
         self.running = False
         
+    def _takeover_position(self, pos):
+        """🔄 바이낸스에 열려 있는 포지션을 청산하지 않고 그대로 이어받는다.
+
+        인터넷이 끊겼다 복구됐거나, 프로그램을 다시 켰거나, 시작 버튼을
+        다시 눌렀을 때 — 멀쩡한 포지션을 시장가로 닫아 손실을 확정짓지
+        않도록 한다. 진입가·ROI·TP를 바이낸스 실제 값으로 복원한다.
+        """
+        side = pos['side']                     # 'long' / 'short'
+        pos_type = side.upper()
+        entry = pos['entry_price']
+        roi = pos.get('roi_pct', 0.0)
+
+        self.config['has_position'] = True
+        self.config['_cached_position'] = pos
+        self.config['roi'][f'{side}_entry'] = entry
+        self.config['roi'][f'{side}_current'] = roi
+        self.config['roi'][f'{side}_max'] = max(self.config['roi'].get(f'{side}_max', 0) or 0, roi)
+        self.config['roi'][f'{side}_min'] = min(self.config['roi'].get(f'{side}_min', 0) or 0, roi)
+        if not self.config.get(f'chart_entry_{side}'):
+            self.config[f'chart_entry_{side}'] = entry
+        if not self.config.get(f'entry_fee_{side}'):
+            self.config[f'entry_fee_{side}'] = self.config['amount'] * self.config['leverage'] * FEE_RATE
+
+        # TP 기준이 없으면 지금 시장 상태로 다시 정한다
+        #   (이게 있어야 폴링 익절과 외부청산 감지가 동작한다)
+        if not self.config.get(f'entry_tp_{side}'):
+            tp = self.config.get('tp_sideways', 1.2)
+            try:
+                df = self.api.get_klines(self.config['symbol'], self.config['timeframe'])
+                if df is not None and len(df) > 60:
+                    tp, _adx, _mt = self.get_dynamic_tp(df[:-1])
+            except Exception:
+                pass
+            self.config[f'entry_tp_{side}'] = tp
+
+        print(f"[🔄 포지션 이어받음] {self.config['symbol']} {pos_type}")
+        print(f"   진입가 ${entry} | 수량 {pos['amount']} | ROI {roi:+.2f}% | PNL ${pos['pnl']:.2f}")
+        print(f"   TP {self.config[f'entry_tp_{side}']}% 기준으로 계속 관리합니다 (청산 안 함)")
+        self.log(f"🔄 기존 {pos_type} 포지션 이어받음 — 진입가 ${entry} | ROI {roi:+.2f}%", pos_type)
+        self.log(f"   청산하지 않고 그대로 관리합니다.", pos_type)
+
+        # 거래소 TP 주문이 사라졌으면 다시 걸어준다
+        try:
+            if self.config.get('exit_mode', 'tp') != 'switch':
+                self.place_exchange_tp(pos_type, entry, self.config[f'entry_tp_{side}'])
+        except Exception as e:
+            print(f"[{self.config['symbol']}] TP 재등록 실패(폴링 익절로 대체): {e}")
+
     def _run(self):
         if self.is_reconnect:
             print(f"[🔄 재연결] {self.config['symbol']} {self.bot_type.upper()} - 포지션/ROI 유지!")
             try:
                 ep = self.api.get_position(self.config['symbol'])
                 if ep:
-                    self.config['has_position'] = True
-                    print(f"[🔄 재연결] {self.config['symbol']} 포지션 이어받음: {ep['side'].upper()}")
+                    self._takeover_position(ep)
                 else:
                     print(f"[🔄 재연결] {self.config['symbol']} 포지션 없음")
             except Exception as e:
                 print(f"[🔄 재연결] {self.config['symbol']} 확인 실패: {e}")
         else:
             print(f"[🔍 시작 체크] {self.config['symbol']} - 기존 포지션 확인 중...")
+            took_over = False
             try:
                 existing_position = self.api.get_position(self.config['symbol'])
                 if existing_position:
-                    print(f"[⚠️ 기존 포지션 발견!] {self.config['symbol']} {existing_position['side'].upper()}")
-                    print(f"   진입가: ${existing_position['entry_price']:.2f}")
-                    print(f"   수량: {existing_position['amount']}")
-                    print(f"   PNL: ${existing_position['pnl']:.2f}")
-                    print(f"")
-                    print(f"[🔥 청산 시작] 깨끗한 시작을 위해 기존 포지션 청산 중...")
-                    for attempt in range(3):
-                        try:
-                            result = self.api.close_position(self.config['symbol'])
-                            if result:
-                                print(f"[✅ 청산 완료] {self.config['symbol']} 기존 포지션 청산 성공!")
-                                print(f"")
-                                time.sleep(2)
-                                break
-                        except Exception as e:
-                            print(f"[재시도 {attempt+1}/3] 청산 실패: {e}")
-                            time.sleep(1)
-                    else:
-                        print(f"[❌ 청산 실패!] {self.config['symbol']} 수동으로 청산해주세요!")
-                        print(f"")
+                    # 🔥 기존 포지션은 절대 청산하지 않는다 — 그대로 이어받는다.
+                    #    (인터넷 끊김/재시작 후 시작 버튼을 눌러도 손실이 확정되지 않도록)
+                    self._takeover_position(existing_position)
+                    took_over = True
+                elif existing_position is None:
+                    # API 실패 — 포지션이 있는지 없는지 모름. 건드리지 않는다.
+                    print(f"[⚠️ 확인 불가] {self.config['symbol']} API 응답 없음 "
+                          f"— 기존 포지션에 손대지 않고 시작합니다")
                 else:
                     print(f"[✅ 포지션 없음] {self.config['symbol']} 깨끗한 상태로 시작!")
                     print(f"")
-                    # 🔥 이전 세션의 잔여 TP 주문 정리
+                    # 🔥 이전 세션의 잔여 TP 주문 정리 (포지션이 확실히 없을 때만)
                     try:
                         self.api.cancel_all_orders(self.config['symbol'])
                     except Exception:
@@ -1167,22 +1203,24 @@ class TradingBot:
             except Exception as e:
                 print(f"[⚠️ 체크 실패] {self.config['symbol']} 포지션 확인 실패: {e}")
                 print(f"")
-            
-            print(f"[🔄 초기화] {self.config['symbol']} ROI 및 진입가 초기화 중...")
-            self.config['roi'] = {
-                'long_entry': None, 'long_current': 0, 'long_max': 0, 'long_min': 0,
-                'short_entry': None, 'short_current': 0, 'short_max': 0, 'short_min': 0,
-            }
-            self.config['chart_entry_long'] = None
-            self.config['chart_entry_short'] = None
-            self.config['restart_entry_long'] = None
-            self.config['restart_entry_short'] = None
-            self.config['entry_fee_long'] = 0
-            self.config['entry_fee_short'] = 0
-            self.config['entry_tp_long'] = None
-            self.config['entry_tp_short'] = None
-            print(f"[✅ 초기화 완료] {self.config['symbol']} 모든 데이터 리셋!")
-            print(f"")
+
+            # 🔥 포지션을 이어받았으면 진입가·ROI를 지우면 안 된다
+            if not took_over:
+                print(f"[🔄 초기화] {self.config['symbol']} ROI 및 진입가 초기화 중...")
+                self.config['roi'] = {
+                    'long_entry': None, 'long_current': 0, 'long_max': 0, 'long_min': 0,
+                    'short_entry': None, 'short_current': 0, 'short_max': 0, 'short_min': 0,
+                }
+                self.config['chart_entry_long'] = None
+                self.config['chart_entry_short'] = None
+                self.config['restart_entry_long'] = None
+                self.config['restart_entry_short'] = None
+                self.config['entry_fee_long'] = 0
+                self.config['entry_fee_short'] = 0
+                self.config['entry_tp_long'] = None
+                self.config['entry_tp_short'] = None
+                print(f"[✅ 초기화 완료] {self.config['symbol']} 모든 데이터 리셋!")
+                print(f"")
         
         # 시작하자마자 즉시 체크 (0초 대기)
         first_check = True
@@ -2711,7 +2749,10 @@ class App:
             print("[4H UT 필터] OFF - 모든 방향 진입 허용!")
     
     def start_all(self):
-        """전체 롱숏 시작 - 포지션 무시하고 새로 시작"""
+        """전체 롱숏 시작 — 기존 포지션은 청산하지 않고 이어받는다.
+
+        이미 실행 중인 코인은 건드리지 않는다 (ROI·진입가 초기화 방지).
+        """
         
         # 🔥🔥🔥 디버그: 이 로그가 안 나오면 다른 파일이 실행 중!
         print("\n" + "=" * 80)
@@ -2725,8 +2766,8 @@ class App:
             f"{prog_info}모든 코인의 롱과 숏을 시작하시겠습니까?\n\n"
             f"대상: {len(self.coins)}개 코인\n"
             f"총 {len(self.coins) * 2}개 봇 시작\n\n"
-            f"⚠️ 기존 포지션은 무시하고 새로 시작합니다.\n"
-            f"⚠️ 포지션 재연결은 '재연결' 버튼을 사용하세요.\n\n"
+            f"✅ 기존 포지션은 청산하지 않고 그대로 이어받습니다.\n"
+            f"✅ 이미 실행 중인 코인은 건드리지 않습니다.\n\n"
             f"💡 순차적으로 시작되므로 약 {len(self.coins)}초 소요됩니다."):
             
             # 🔥 스레드에서 실행 (GUI 멈춤 방지!)
@@ -2739,8 +2780,20 @@ class App:
         self._is_starting = True
         try:
             count = 0
+            skipped = 0
             for i, coin in enumerate(self.coins, 1):
                 print(f"\n[전체 시작] {i}/{len(self.coins)}: {coin['symbol']}")
+
+                # 🛑 이미 돌고 있는 코인은 건드리지 않는다 (ROI·진입가 초기화 방지)
+                already = coin.get('long_active') and coin.get('short_active')
+                running = (id(coin) in self.bots
+                           and self.bots[id(coin)].get('long')
+                           and getattr(self.bots[id(coin)].get('long'), 'running', False))
+                if already and running:
+                    skipped += 1
+                    print(f"  ⏭️ {coin['symbol']} 이미 실행 중 — 아무것도 하지 않음")
+                    continue
+
                 print(f"  🔍 [DEBUG] 코인 처리 시작: {coin['symbol']}")
             
                 # 🔥🔥🔥 LONG 완전 초기화! (active 상태 무관)
@@ -2910,7 +2963,7 @@ class App:
                 self.add_log(coin, 'SHORT', "=" * 40)
                 self.add_log(coin, 'SHORT', "✅ SHORT 봇 시작!")
                 self.add_log(coin, 'SHORT', f"💰 잔고: ${self.api.get_balance():,.2f}")
-                self.add_log(coin, 'SHORT', "📭 새로 시작 (포지션 무시)")
+                self.add_log(coin, 'SHORT', "📭 시작 (기존 포지션은 이어받음)")
             
                 # 통계 정보
                 s = coin['stats']
@@ -2987,9 +3040,10 @@ class App:
             # 🔥 실행 상태 저장 (자동 재연결용)
             self._save_running_state()
         
-            self.root.after(0, lambda: CustomMessageBox.showinfo("전체 시작", 
-                f"✅ {count}개 봇을 시작했습니다!\n\n"
-                f"📊 기존 포지션이 있으면 바이낸스 실시간 ROI를 표시합니다.\n"
+            self.root.after(0, lambda: CustomMessageBox.showinfo("전체 시작",
+                f"✅ {count}개 봇을 시작했습니다!"
+                + (f"\n⏭️ {skipped}개 코인은 이미 실행 중이라 건드리지 않았습니다." if skipped else "")
+                + f"\n\n📊 기존 포지션은 청산하지 않고 그대로 이어받습니다.\n"
                 f"🎯 신호 발생 시 자동으로 진입합니다."))
         finally:
             self._is_starting = False
