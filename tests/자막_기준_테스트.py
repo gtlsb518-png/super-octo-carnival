@@ -161,6 +161,33 @@ GOLD_TRIM = [
 ]
 
 
+def run_boundary():
+    """경계에 걸친 말이 앞뒤 클립에 둘 다 들어가지 않는지 (자막이 다음 내용을 가져오던 문제)."""
+    def w(t0, t1, txt):
+        return {"start": t0, "end": t1, "word": txt}
+    cases = [
+        # (raw, ks, ke, first, last, 기대 결과)
+        ([w(10.1, 10.8, "그리고"), w(10.8, 11.4, "같은"), w(11.4, 11.9, "날"),
+          w(11.9, 12.2, "전")], 10.0, 12.0, False, False, ["그리고", "같은", "날"]),
+        ([w(11.9, 12.2, "전"), w(12.2, 12.8, "세계"), w(12.8, 13.5, "보안")],
+         12.0, 14.0, False, True, ["전", "세계", "보안"]),
+        # 살짝만 걸친 말은 버린다 / 절반 넘게 걸친 말은 살린다
+        ([w(20.35, 20.75, "기업")], 20.0, 20.4, False, False, []),
+        ([w(19.90, 20.30, "기업")], 20.0, 20.4, False, False, ["기업"]),
+        # 첫 클립 앞 / 마지막 클립 뒤는 줄 이웃이 없으니 그대로 둔다
+        ([w(-0.05, 0.40, "잠깐")], 0.0, 1.0, True, False, ["잠깐"]),
+    ]
+    ok = 0
+    for raw, ks, ke, first, last, want in cases:
+        got = [x["word"] for x in S.keep_words_in_clip(raw, ks, ke, first, last)]
+        if got == want:
+            ok += 1
+        else:
+            print(f"  X  {[x['word'] for x in raw]} @{ks}~{ke} → {got} (기준 {want})")
+    print(f"  클립 경계 겹침: {ok}/{len(cases)} 통과")
+    return ok == len(cases)
+
+
 def run_split():
     ok = 0
     for src, dur, want in GOLD_SPLIT:
@@ -239,8 +266,9 @@ if __name__ == "__main__":
     c = run_noise()
     d = run_split()
     e = run_trim()
+    f = run_boundary()
     n_lines = sum(len(w) for _s, w in GOLD_SCRIPT)
-    all_ok = a and b and c and d and e
+    all_ok = a and b and c and d and e and f
     print(f"\n원고 기준 총 {n_lines}줄")
     print("전부 통과 ✓" if all_ok else "기준과 다름 ✗")
     sys.exit(0 if all_ok else 1)

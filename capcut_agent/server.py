@@ -981,6 +981,34 @@ def _transcribe_array(audio, time_offset: float = 0.0, initial_prompt: str = "",
     return words
 
 
+def keep_words_in_clip(raw: list[dict], ks: float, ke: float,
+                       first: bool = False, last: bool = False) -> list[dict]:
+    """
+    클립 인식 결과에서 **여유 구간(CLIP_PAD_SEC)에서 들린 말을 버린다.**
+
+    클립마다 앞뒤로 0.1초씩 여유를 주고 인식하는데, 경계에 걸친 말은
+    앞 클립과 뒤 클립에서 **둘 다** 인식된다. 그래서 자막이 다음 자막의
+    앞 몇 글자를 그대로 가져가 보였다 (C4023 실측: 자막 228개 중 23개, 10%).
+      '…오픈AI도 전' / '전 세계 보안',  '깐 집이고, 국가' / '국가 보안 AI 사업자야'
+
+    말의 **가운데가 들어 있는 클립** 하나에만 배정한다.
+    첫 클립 앞 / 마지막 클립 뒤는 옆에 줄 클립이 없으니 그대로 둔다.
+    다 걸러지면, 이 클립과 실제로 겹치는 말 하나는 살려서 자막이 비지 않게 한다.
+    """
+    lo = -1e9 if first else ks
+    hi = 1e9 if last else ke
+    kept = [w for w in raw if lo <= (w["start"] + w["end"]) / 2 <= hi]
+    if kept or not raw:
+        return kept
+    # 이 클립 안에 절반 이상 걸쳐 있는 말이면 살린다 (짧은 클립이 통째로 비는 것 방지)
+    def ov(w):
+        return min(w["end"], ke) - max(w["start"], ks)
+    best = max(raw, key=ov)
+    if ov(best) >= 0.5 * max(best["end"] - best["start"], 0.01):
+        return [best]
+    return []
+
+
 def transcribe_all_clips(video_path: Path,
                          keep_ranges: list[tuple[float, float, int, int]],
                          script_text: str = "",
@@ -1059,7 +1087,9 @@ def transcribe_all_clips(video_path: Path,
         e = min(ke + min(CLIP_PAD_SEC, max(room_hi, 0.0)), audio_end)
         a0, a1 = int(s * WHISPER_SR), min(int(e * WHISPER_SR), len(audio))
         if a1 - a0 >= 800:                    # 0.05초 미만이면 인식할 게 없다
-            buckets[i] = _transcribe_array(audio[a0:a1], s, script_text)
+            buckets[i] = keep_words_in_clip(
+                _transcribe_array(audio[a0:a1], s, script_text),
+                ks, ke, first=(i == 0), last=(i + 1 >= total))
         with lock:
             n_done["n"] += 1
             if progress is not None:
