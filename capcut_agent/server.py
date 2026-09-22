@@ -1516,6 +1516,14 @@ def _is_obligation(core: str) -> bool:
     return core[:-1] not in _NOUN_EO     # '소프트웨어 + 야' 는 제외
 
 
+_NUM_TOKEN_RE = re.compile(r"^[+\-]?\d")
+
+
+def _is_number_token(word: str) -> bool:
+    """'+26%', '28%', '810억에', '10만' 처럼 숫자로 시작하는 말인지."""
+    return bool(_NUM_TOKEN_RE.match(word.strip().lstrip("\"'\u201c\u2018([{")))
+
+
 def _ends_rieul(core: str) -> bool:
     """'받을/올렸을/만들' 처럼 ㄹ관형형으로 끝나는지 (목적격 '-를'은 제외)."""
     if len(core) < 2 or core.endswith("를"):
@@ -1714,6 +1722,9 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
     # 다음 말이 뒷말을 꾸미는 형태면("하이닉스 / 물린 사람들") 조금 미룬다
     if _ends_adnominal(next_word):
         return 5
+    if next_word and _is_number_token(next_word):
+        return 0                         # '삼화콘덴서 / +26%' 처럼 이름과 수치를 안 뗀다
+                                         # (조사·어미로 끝나는 말은 위에서 이미 걸러졌다)
     return 10                            # 그 밖 (관형형 등 — 끊으면 어색)
 
 
@@ -1755,6 +1766,19 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
                 early, early_bal = (sc, i), bal(acc)
             elif sc == early[0] and sc <= 10 and bal(acc) > early_bal:
                 early_bal, early = bal(acc), (sc, i)   # 문법 신호 없음 → 고른 쪽
+    if late[0] <= 0 and late[1] > 0:
+        # 끊으면 안 되는 자리(점수 0)밖에 없다 → 조금 앞에서라도 괜찮은 자리를 쓴다.
+        #   '그리고 오늘 삼화콘덴서 / +26%' → '그리고 오늘 / 삼화콘덴서 +26%'
+        acc2, alt = 0, None
+        for i, x in enumerate(cur):
+            acc2 += len(x["word"]) + (1 if i else 0)
+            if acc2 < 4 or i >= late[1]:
+                continue
+            nx = cur[i + 1]["word"] if i + 1 < len(cur) else after
+            if _break_score(x["word"], nx, cur[i - 1]["word"] if i else "") > 0:
+                alt = i                  # 가장 늦은(고르게 나뉘는) 자리
+        if alt is not None:
+            return alt
     if early[0] > late[0]:
         return early[1]
     # 점수가 같고 둘 다 '문법 신호 없음'이면 고르게 나뉘는 쪽
