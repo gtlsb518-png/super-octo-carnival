@@ -282,7 +282,46 @@ class BinanceAPI:
         if account:
             return float(account.get('totalWalletBalance', 0))
         return 0.0
-    
+
+    # ==================== 💸 펀딩비 ====================
+    def get_funding_rate(self, symbol):
+        """현재 펀딩비율 + 다음 정산 시각.
+
+        펀딩비율은 시장 데이터라 항상 메인넷 기준으로 조회한다
+        (테스트넷은 펀딩비율이 실제와 달라서 참고가 안 됨).
+
+        Returns: (비율%, 다음정산시각ms) — 실패 시 (None, None)
+        """
+        try:
+            r = self.session.get(f"{self.chart_url}/fapi/v1/premiumIndex",
+                                 params={'symbol': symbol.replace('/', '')}, timeout=10)
+            d = r.json()
+            return float(d['lastFundingRate']) * 100, int(d['nextFundingTime'])
+        except Exception as e:
+            print(f"[펀딩비율 조회 실패] {symbol}: {e}")
+            return None, None
+
+    def get_funding_paid(self, symbol, start_ms=None):
+        """실제로 낸/받은 펀딩비 합계 (USDT). 내 계좌 기록 기준.
+
+        음수 = 낸 돈, 양수 = 받은 돈.
+        주문 서버(테스트넷/메인넷)를 그대로 따른다.
+
+        Returns: (합계, 정산횟수) — 실패 시 (None, 0)
+        """
+        try:
+            params = {'symbol': symbol.replace('/', ''),
+                      'incomeType': 'FUNDING_FEE', 'limit': 1000}
+            if start_ms:
+                params['startTime'] = int(start_ms)
+            rows = self._request('GET', '/fapi/v1/income', params=params, signed=True)
+            if not rows:
+                return 0.0, 0
+            return sum(float(x['income']) for x in rows), len(rows)
+        except Exception as e:
+            print(f"[펀딩비 조회 실패] {symbol}: {e}")
+            return None, 0
+
     def get_klines(self, symbol, interval, limit=200):
         """차트 데이터는 항상 메인넷에서 가져옴 (정확한 가격)"""
         cache_key = f"{symbol}_{interval}"
@@ -344,7 +383,7 @@ class BinanceAPI:
         # 전체 코인 precision 맵
         precision_map = {
             'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'SOLUSDT': 1, 'XRPUSDT': 1,
-            'ADAUSDT': 1, 'DOGEUSDT': 0, 'TRXUSDT': 0, 'TONUSDT': 1, 'LINKUSDT': 2,
+            'ADAUSDT': 1, 'DOGEUSDT': 0, 'TRXUSDT': 0, 'SUIUSDT': 1, 'LINKUSDT': 2,
         }
         
         # precision 가져오기 (기본값: 2)
@@ -403,7 +442,7 @@ class BinanceAPI:
     _TICK_FALLBACK = {
         'BTCUSDT': '0.10', 'ETHUSDT': '0.01', 'BNBUSDT': '0.010', 'SOLUSDT': '0.0100',
         'XRPUSDT': '0.0001', 'ADAUSDT': '0.00010', 'DOGEUSDT': '0.000010',
-        'TRXUSDT': '0.00001', 'TONUSDT': '0.0001', 'LINKUSDT': '0.001',
+        'TRXUSDT': '0.00001', 'SUIUSDT': '0.0001', 'LINKUSDT': '0.001',
     }
 
     def round_price(self, symbol, price):
@@ -647,6 +686,70 @@ class TradingBot:
         print(f"[⚡ 즉시진입] {self.config['symbol']} {pos_type} #{seq} "
               f"기준봉={self._fmt_bar(bar_time)} (미확정)")
         return seq
+
+    # ==================== 💸 펀딩비 로그 ====================
+    def log_funding_rate(self, pos_type):
+        """진입 시점: 지금 펀딩비율이 얼마고 다음 정산이 언제인지 알려준다."""
+        rate, nxt = self.api.get_funding_rate(self.config['symbol'])
+        if rate is None:
+            return
+        notional = self.config['amount'] * self.config['leverage']
+        cost = notional * rate / 100.0
+        # LONG은 비율이 양수일 때 내고, SHORT은 그때 받는다
+        pays = (rate > 0) if pos_type == 'LONG' else (rate < 0)
+        word = '낼 돈' if pays else '받을 돈'
+        try:
+            mins = max(0, int((nxt - time.time() * 1000) / 60000))
+            when = f"{mins//60}시간 {mins%60}분 뒤" if mins >= 60 else f"{mins}분 뒤"
+        except Exception:
+            when = '?'
+        self.log(f"   💸 펀딩비율 {rate:+.4f}% → 1회당 {word} ${abs(cost):.3f} "
+                 f"(다음 정산 {when})", pos_type)
+        if abs(rate) >= 0.05:
+            self.log(f"      ⚠️ 펀딩비가 높습니다({abs(rate):.3f}%). 오래 들고 있으면 손해가 큽니다.",
+                     pos_type)
+
+    def report_funding(self, pos_type=None, force=False):
+        """보유 중 주기적으로 '이 코인 펀딩비 지금까지 얼마 나갔는지' 로그.
+
+        바이낸스 계좌 기록(income)을 읽으므로 추정이 아니라 실제 금액.
+        10분에 한 번만 조회 (API 부하 최소화).
+        """
+        # 로그를 어느 쪽(LONG/SHORT)에 찍을지 — 실제 보유 방향을 따른다
+        if pos_type is None:
+            try:
+                pos_type = ('LONG' if float(self.config['_cached_position']['positionAmt']) > 0
+                            else 'SHORT')
+            except Exception:
+                pos_type = self.bot_type.upper()
+        now = time.time()
+        last = self.config.get('_funding_log_time', 0)
+        if not force and (now - last) < 600:
+            return
+        self.config['_funding_log_time'] = now
+
+        since = self.config.get('_funding_since')
+        if since is None:
+            # 봇 시작 시점부터 집계
+            since = int(now * 1000) - 24 * 3600 * 1000
+            self.config['_funding_since'] = since
+
+        total, cnt = self.api.get_funding_paid(self.config['symbol'], since)
+        if total is None:
+            return
+        prev = self.config.get('_funding_last_total')
+        self.config['_funding_last_total'] = total
+        self.config['stats']['funding_total'] = total
+
+        if cnt == 0:
+            return
+        word = '납부' if total < 0 else '수령'
+        msg = f"   💸 {self.config['symbol']} 누적 펀딩비: ${abs(total):.3f} {word} ({cnt}회 정산)"
+        if prev is not None and abs(total - prev) > 1e-9:
+            d = total - prev
+            msg += f"  ← 방금 {'−' if d < 0 else '+'}${abs(d):.3f}"
+        self.log(msg, pos_type)
+        print(f"[💸 펀딩비] {self.config['symbol']} 누적 {total:+.4f} USDT ({cnt}회)")
 
     def check_repaint(self, df_full):
         """기준봉이 닫혔으면 그 신호가 살아남았는지 확인해 로그로 알린다.
@@ -1066,7 +1169,12 @@ class TradingBot:
                     self._cached_signals = Indicators.get_signals(df_closed, self.config['ut_sens'], self.config['ut_atr'],
                                                     self.config['ema_fast'], self.config['ema_slow'])
                     self._cached_dynamic_tp = self.get_dynamic_tp(df_closed)
-                    
+
+                    # 💸 포지션 보유 중이면 10분마다 누적 펀딩비 보고
+                    #    (LONG 봇만 조회 — 코인당 1번이면 충분, API 부하 절감)
+                    if self.config.get('has_position') and self.bot_type == 'long':
+                        self.report_funding()
+
 
                 else:
                     # 캐시된 데이터 사용
@@ -1315,7 +1423,7 @@ class TradingBot:
                             
                             precision_map = {
                                 'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'LINKUSDT': 2,
-                                'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'TONUSDT': 1,
+                                'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'SUIUSDT': 1,
                                 'DOGEUSDT': 0, 'TRXUSDT': 0,
                             }
                             precision = precision_map.get(symbol_clean, 2)
@@ -1398,6 +1506,8 @@ class TradingBot:
                                 self.log(f"   🛡️ SL: AUTO (스위칭)", pos_type)
                                 # 🔍 즉시진입 모드면 리페인팅 추적 시작
                                 self.mark_live_entry(pos_type, df_closed, signals['price'])
+                                # 💸 지금 펀딩비율이 얼마인지 알려주기
+                                self.log_funding_rate(pos_type)
                                 
                                 # 🔥 포지션 있음 플래그 설정!
                                 self.config['has_position'] = True
@@ -1744,7 +1854,7 @@ class TradingBot:
                                     # 소수점 처리 (바이낸스 실제 기준)
                                     symbol_clean = self.config['symbol'].replace('/', '')
                                     p_map = {'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'LINKUSDT': 2,
-                                             'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'TONUSDT': 1,
+                                             'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'SUIUSDT': 1,
                                              'DOGEUSDT': 0, 'TRXUSDT': 0}
                                     p = p_map.get(symbol_clean, 2)
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
@@ -1794,6 +1904,8 @@ class TradingBot:
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'SHORT')
                                         # 🔍 즉시진입 모드면 리페인팅 추적 시작
                                         self.mark_live_entry('SHORT', df_closed, signals['price'])
+                                        # 💸 지금 펀딩비율이 얼마인지 알려주기
+                                        self.log_funding_rate('SHORT')
                                         
                                         print(f"[✅ 진입] {self.config['symbol']} SHORT ${signals['price']:.2f} | {qty}개 | {self.config['leverage']}x")
                                         print(f"   💰 목표 USDT: ${target_usdt:.2f} | 💸 진입 수수료: ${entry_fee:.2f}")
@@ -2091,7 +2203,7 @@ class TradingBot:
                                     # 소수점 처리 (바이낸스 실제 기준)
                                     symbol_clean = self.config['symbol'].replace('/', '')
                                     p_map = {'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'LINKUSDT': 2,
-                                             'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'TONUSDT': 1,
+                                             'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'SUIUSDT': 1,
                                              'DOGEUSDT': 0, 'TRXUSDT': 0}
                                     p = p_map.get(symbol_clean, 2)
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
@@ -2141,6 +2253,8 @@ class TradingBot:
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'LONG')
                                         # 🔍 즉시진입 모드면 리페인팅 추적 시작
                                         self.mark_live_entry('LONG', df_closed, signals['price'])
+                                        # 💸 지금 펀딩비율이 얼마인지 알려주기
+                                        self.log_funding_rate('LONG')
                                         
                                         print(f"[✅ 진입] {self.config['symbol']} LONG ${signals['price']:.2f} | {qty}개 | {self.config['leverage']}x")
                                         print(f"   💰 목표 USDT: ${target_usdt:.2f} | 💸 진입 수수료: ${entry_fee:.2f}")
@@ -2374,7 +2488,7 @@ class App:
             {'symbol': 'ADA/USDT', 'name': 'Cardano'},
             {'symbol': 'DOGE/USDT', 'name': 'Dogecoin'},
             {'symbol': 'TRX/USDT', 'name': 'TRON'},
-            {'symbol': 'TON/USDT', 'name': 'Toncoin'},
+            {'symbol': 'SUI/USDT', 'name': 'Sui'},
             {'symbol': 'LINK/USDT', 'name': 'Chainlink'},
         ]
         
