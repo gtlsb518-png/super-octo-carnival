@@ -520,6 +520,22 @@ class BinanceAPI:
         params = {'symbol': symbol.replace('/', '')}
         return self._request('DELETE', '/fapi/v1/allOpenOrders', params=params, signed=True)
 
+    def has_open_tp(self, symbol):
+        """이미 걸려 있는 TP(익절) 대기 주문이 있는지.
+
+        포지션을 이어받을 때 중복 등록을 막는 용도.
+        Returns: True=있음 / False=없음 / None=조회 실패(모름)
+        """
+        try:
+            orders = self._request('GET', '/fapi/v1/openOrders',
+                                   params={'symbol': symbol.replace('/', '')}, signed=True)
+            if orders is None:
+                return None
+            return any(str(o.get('type', '')).startswith('TAKE_PROFIT') for o in orders)
+        except Exception as e:
+            print(f"[대기주문 조회 실패] {symbol}: {e}")
+            return None
+
     def get_position(self, symbol):
         # 🔥 캐시된 positionRisk 사용 (3초 TTL)
         with self._position_cache_lock:
@@ -1131,6 +1147,17 @@ class TradingBot:
         entry = pos['entry_price']
         roi = pos.get('roi_pct', 0.0)
 
+        # 🔒 코인당 LONG/SHORT 봇 2개가 동시에 시작하므로 한 번만 실행되게 막는다
+        #    (안 막으면 TP 주문이 두 번 걸리고 로그도 두 번 찍힌다)
+        with CLOSE_LOCK:
+            last = self.config.get('_takeover_at', 0)
+            if time.time() - last < 60:
+                self.config['has_position'] = True
+                print(f"[🔄 이어받기 생략] {self.config['symbol']} {self.bot_type.upper()} "
+                      f"— 다른 봇이 이미 처리함")
+                return
+            self.config['_takeover_at'] = time.time()
+
         self.config['has_position'] = True
         self.config['_cached_position'] = pos
         self.config['roi'][f'{side}_entry'] = entry
@@ -1160,10 +1187,14 @@ class TradingBot:
         self.log(f"🔄 기존 {pos_type} 포지션 이어받음 — 진입가 ${entry} | ROI {roi:+.2f}%", pos_type)
         self.log(f"   청산하지 않고 그대로 관리합니다.", pos_type)
 
-        # 거래소 TP 주문이 사라졌으면 다시 걸어준다
+        # 거래소 TP 주문이 사라졌으면 다시 걸어준다 (이미 있으면 그대로 둔다)
         try:
             if self.config.get('exit_mode', 'tp') != 'switch':
-                self.place_exchange_tp(pos_type, entry, self.config[f'entry_tp_{side}'])
+                existing = self.api.has_open_tp(self.config['symbol'])
+                if existing is True:
+                    print(f"   기존 TP 주문이 살아 있어 그대로 둡니다")
+                else:
+                    self.place_exchange_tp(pos_type, entry, self.config[f'entry_tp_{side}'])
         except Exception as e:
             print(f"[{self.config['symbol']}] TP 재등록 실패(폴링 익절로 대체): {e}")
 
