@@ -355,9 +355,9 @@ class BinanceAPI:
                 return 'liq'
             if otype in ('TAKE_PROFIT_MARKET', 'TAKE_PROFIT'):
                 return 'tp'
-            if o.get('reduceOnly') or str(o.get('closePosition', '')).lower() == 'true':
-                return 'manual'
-            return 'manual'
+            if otype in ('STOP_MARKET', 'STOP'):
+                return 'tp'      # 봇이 건 손절 주문 — 사람이 끈 게 아니므로 정지 안 함
+            return 'manual'      # 그 외 체결(MARKET/LIMIT) = 사람이 직접 청산
         except Exception as e:
             print(f"[청산 원인 조회 실패] {symbol}: {e}")
             return None
@@ -929,14 +929,33 @@ class TradingBot:
         pos_type = side.upper()
         symbol = self.config['symbol']
 
+        # 바이낸스 실현 손익 조회 (원인 판별 폴백에도 쓰이므로 먼저 한다)
+        pnl_usd = prev.get('pnl', 0)
+        position_size = self.config['amount'] * self.config['leverage']
+        entry_fee = self.config.get(f'entry_fee_{side}', position_size * FEE_RATE)
+        close_fee = position_size * FEE_RATE
+        total_fee = entry_fee + close_fee
+        realized_ok = False
+        try:
+            time.sleep(1)
+            info = self.api.get_last_trade_info(symbol)
+            if info and info.get('realized_pnl', 0) != 0:
+                pnl_usd = info['realized_pnl']
+                realized_ok = True
+                if info.get('commission', 0) > 0:
+                    total_fee = info['commission']
+        except Exception as e:
+            print(f"[{symbol}] 실현 손익 조회 실패: {e}")
+
         # 🔍 왜 닫혔는지 판별
         reason = self.api.get_close_reason(symbol)
-        pnl_peek = prev.get('pnl', 0)
         if reason is None:
             # 주문 조회 실패 → 손익 부호로 보수적 추정.
             # 봇 TP는 +1.5%에서만 체결되므로 손실이면 TP일 수 없다.
-            reason = 'tp' if pnl_peek > 0 else 'manual'
-            print(f"[청산 원인 추정] {symbol}: 주문조회 실패 → 손익 {pnl_peek:+.2f} 기준 '{reason}'")
+            # 실현 손익을 우선 쓰고, 그것도 없으면 마지막 미실현 손익으로 본다.
+            reason = 'tp' if pnl_usd > 0 else 'manual'
+            src = '실현손익' if realized_ok else '미실현손익(추정)'
+            print(f"[청산 원인 추정] {symbol}: 주문조회 실패 → {src} {pnl_usd:+.2f} 기준 '{reason}'")
 
         label = {'tp': '익절(TP주문)', 'manual': '수동청산', 'liq': '강제청산'}[reason]
         print(f"[🎯 외부 청산 감지] {symbol} {pos_type} — {label}")
@@ -946,22 +965,6 @@ class TradingBot:
             self.api.cancel_all_orders(symbol)
         except Exception:
             pass
-
-        # 바이낸스 실현 손익 조회
-        pnl_usd = prev.get('pnl', 0)
-        position_size = self.config['amount'] * self.config['leverage']
-        entry_fee = self.config.get(f'entry_fee_{side}', position_size * FEE_RATE)
-        close_fee = position_size * FEE_RATE
-        total_fee = entry_fee + close_fee
-        try:
-            time.sleep(1)
-            info = self.api.get_last_trade_info(symbol)
-            if info and info.get('realized_pnl', 0) != 0:
-                pnl_usd = info['realized_pnl']
-                if info.get('commission', 0) > 0:
-                    total_fee = info['commission']
-        except Exception as e:
-            print(f"[{symbol}] 실현 손익 조회 실패: {e}")
 
         net_profit = pnl_usd - total_fee
         roi_pct = (pnl_usd / self.config['amount']) * 100 if self.config['amount'] > 0 else 0
