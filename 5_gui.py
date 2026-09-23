@@ -610,16 +610,104 @@ class BinanceAPI:
             params['incomeType'] = income_type
         return self._request('GET', '/fapi/v1/income', params=params, signed=True)
     
+    # ==================== 📒 바이낸스 체결 내역 ====================
+    def get_user_trades(self, symbol, from_id=None, start_ms=None, limit=1000):
+        """바이낸스 '거래 내역'과 같은 원본 체결 기록 (/fapi/v1/userTrades).
+
+        Returns: 체결 목록(시간순) / 조회 실패 시 None
+        """
+        params = {'symbol': symbol.replace('/', ''), 'limit': limit}
+        if from_id is not None:
+            params['fromId'] = int(from_id)
+        elif start_ms is not None:
+            params['startTime'] = int(start_ms)
+        rows = self._request('GET', '/fapi/v1/userTrades', params=params, signed=True)
+        if rows is None:
+            return None
+        return sorted(rows, key=lambda t: (int(t['time']), int(t['id'])))
+
+    def get_fee_usdt(self, trades):
+        """체결들의 수수료를 USDT로 합산. BNB로 낸 수수료는 BNB 시세로 환산."""
+        usdt, other = 0.0, {}
+        for t in trades:
+            fee = abs(float(t.get('commission', 0) or 0))
+            asset = t.get('commissionAsset', 'USDT')
+            if asset in ('USDT', 'USDC', 'FDUSD'):
+                usdt += fee
+            else:
+                other[asset] = other.get(asset, 0.0) + fee
+        for asset, amt in other.items():
+            try:
+                r = self.session.get(f"{self.chart_url}/fapi/v1/premiumIndex",
+                                     params={'symbol': f'{asset}USDT'}, timeout=10)
+                usdt += amt * float(r.json()['markPrice'])
+            except Exception:
+                print(f"[수수료 환산 실패] {asset} {amt} — USDT 합계에서 빠짐")
+        return usdt
+
+    def get_round_trip(self, symbol):
+        """방금 청산된 포지션 한 건을 바이낸스 체결 기록에서 그대로 복원.
+
+        마지막 체결부터 거꾸로 수량을 더해 0이 되는 지점까지가
+        '진입 → 청산' 한 바퀴다. 부분 체결이 여러 조각이어도 전부 잡힌다.
+        Returns: dict / 복원 실패 시 None
+        """
+        trades = self.get_user_trades(symbol, start_ms=int(time.time() * 1000) - 7 * 86400 * 1000)
+        if not trades:
+            return None
+        # 끝에 붙은 '새 진입' 체결(실현손익 0)은 이번 청산 건이 아니므로 제외
+        while trades and float(trades[-1].get('realizedPnl', 0) or 0) == 0:
+            trades.pop()
+        if not trades:
+            return None
+        net, got = 0.0, []
+        for t in reversed(trades):
+            q = float(t['qty'])
+            net += q if t['side'] == 'BUY' else -q
+            got.append(t)
+            if len(got) >= 2 and abs(net) < 1e-9 * max(1.0, q) + 1e-12:
+                break
+        else:
+            return None  # 7일 안에 진입 체결을 못 찾음
+        got.reverse()
+        close_side = got[-1]['side']
+        opens = [t for t in got if t['side'] != close_side]
+        closes = [t for t in got if t['side'] == close_side]
+        def vwap(ts):
+            q = sum(float(t['qty']) for t in ts)
+            return sum(float(t['price']) * float(t['qty']) for t in ts) / q if q else 0.0
+        realized = sum(float(t.get('realizedPnl', 0) or 0) for t in got)
+        fee = self.get_fee_usdt(got)
+        return {
+            'realized_pnl': realized, 'commission': fee, 'net_pnl': realized - fee,
+            'entry_fee': self.get_fee_usdt(opens), 'close_fee': self.get_fee_usdt(closes),
+            'entry_price': vwap(opens), 'exit_price': vwap(closes),
+            'qty': sum(float(t['qty']) for t in opens),
+            'open_time': int(got[0]['time']), 'close_time': int(got[-1]['time']),
+            'side': 'LONG' if close_side == 'SELL' else 'SHORT', 'fills': len(got),
+        }
+
     def get_last_trade_info(self, symbol):
+        """방금 청산된 거래의 실현손익·수수료 (바이낸스 체결 기록 기준).
+
+        체결 기록 복원이 안 되면 예전 방식(손익 기록)으로 대체한다.
+        """
+        for attempt in range(3):
+            try:
+                rt = self.get_round_trip(symbol)
+                if rt:
+                    return rt
+            except Exception as e:
+                print(f"[⚠️ 체결 기록 조회 실패] {symbol}: {e}")
+            time.sleep(1)   # 체결 기록이 막 올라오는 중일 수 있음
         try:
-            income = self.get_income_history(symbol, 'REALIZED_PNL', limit=1)
-            realized_pnl = float(income[0]['income']) if income and len(income) > 0 else 0
-            commission = self.get_income_history(symbol, 'COMMISSION', limit=5)
-            total_commission = 0
-            if commission:
-                for c in commission[:2]:
-                    total_commission += abs(float(c['income']))
-            return {'realized_pnl': realized_pnl, 'commission': total_commission, 'net_pnl': realized_pnl - total_commission}
+            since = int(time.time() * 1000) - 10 * 60 * 1000
+            params = {'symbol': symbol.replace('/', ''), 'startTime': since, 'limit': 100}
+            rows = self._request('GET', '/fapi/v1/income', params=params, signed=True) or []
+            realized = sum(float(r['income']) for r in rows if r.get('incomeType') == 'REALIZED_PNL')
+            fee = sum(abs(float(r['income'])) for r in rows if r.get('incomeType') == 'COMMISSION')
+            print(f"[⚠️ 대체 계산] {symbol}: 최근 10분 손익 기록 기준")
+            return {'realized_pnl': realized, 'commission': fee, 'net_pnl': realized - fee}
         except Exception as e:
             print(f"[⚠️ 거래 정보 조회 실패] {symbol}: {e}")
             return None
@@ -633,6 +721,7 @@ import threading
 LOG_LOCK = threading.Lock()
 ENTRY_LOCK = threading.Lock()
 CLOSE_LOCK = threading.Lock()  # 🔥 거래소 TP 체결 감지 중복 방지
+EXCEL_LOCK = threading.RLock()  # 🔥 엑셀 동시 저장 방지 (코인 두 개가 동시에 청산되면 한 줄이 사라지던 문제)
 
 # ==================== 트레이딩 봇 ====================
 class TradingBot:
@@ -869,6 +958,7 @@ class TradingBot:
         if not self.excel_callback:
             return
         a_pnl, a_fee, a_net, a_roi = pnl_usd, total_fee, net_profit, roi_pct
+        a_efee, a_cfee = entry_fee, close_fee
         try:
             time.sleep(1)
             bd = self.api.get_last_trade_info(self.config['symbol'])
@@ -876,6 +966,9 @@ class TradingBot:
                 a_pnl = bd['realized_pnl']
                 a_fee = bd['commission']
                 a_net = bd['net_pnl']
+                # 체결 기록으로 복원된 경우 진입/청산 수수료를 실제 값으로 나눠 적는다
+                a_efee = bd.get('entry_fee', a_fee / 2)
+                a_cfee = bd.get('close_fee', a_fee / 2)
                 if self.config['amount'] > 0:
                     a_roi = (a_pnl / self.config['amount']) * 100
                 print(f"[📊 바이낸스] {self.config['symbol']} {pos_type} 실현:{a_pnl:.4f} 수수료:{a_fee:.4f} 순:{a_net:.4f}")
@@ -892,8 +985,8 @@ class TradingBot:
                 roi_pct=a_roi,
                 profit_usdt=a_pnl if a_pnl > 0 else 0,
                 loss_usdt=abs(a_pnl) if a_pnl < 0 else 0,
-                entry_fee=a_fee/2 if a_fee != total_fee else entry_fee,
-                close_fee=a_fee/2 if a_fee != total_fee else close_fee,
+                entry_fee=a_efee,
+                close_fee=a_cfee,
                 total_fee=a_fee,
                 net_profit=a_net,
                 trade_type=trade_type
@@ -2575,6 +2668,9 @@ class App:
         # 🔥 엑셀 파일 초기화
         self.init_trade_history_excel()
         
+        # 📒 바이낸스 거래내역 시트 자동 동기화 (5분마다 + 청산 직후)
+        self.start_binance_sync()
+        
         self.update_balance()
         
         # 🔥 4H UT 필터 비활성화
@@ -3554,7 +3650,9 @@ class App:
             ]
             
             # 코인 시트 목록 (10개)
-            coin_sheets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'BNB', 'AVAX', 'DOT', 'ETC']
+            coin_sheets = [c['symbol'].replace('/USDT', '').replace('USDT', '')
+                           for c in getattr(self, 'coins', [])] or \
+                          ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'TRX', 'SUI', 'LINK']
             
             if os.path.exists(TRADE_HISTORY_FILE):
                 # 기존 파일이 있으면 시트만 추가
@@ -3623,6 +3721,146 @@ class App:
         except Exception as e:
             print(f"❌ 엑셀 파일 초기화 실패: {e}")
     
+    # ==================== 📒 바이낸스 거래내역 시트 ====================
+    BINANCE_SHEET = '바이낸스 거래내역'
+    BINANCE_HEADERS = ['시간', '심볼', '방향', '가격', '수량', '체결금액(USDT)',
+                       '수수료', '수수료 자산', '역할', '실현 손익', '주문번호', '체결번호']
+
+    def start_binance_sync(self):
+        """바이낸스 체결 기록을 엑셀에 그대로 옮겨 적는 작업을 5분마다 돌린다."""
+        if not OPENPYXL_AVAILABLE:
+            return
+        self._bn_last_id = self._load_binance_last_ids()
+
+        def loop():
+            time.sleep(10)  # 프로그램이 다 뜬 뒤 시작
+            while True:
+                try:
+                    self.sync_binance_trades()
+                except Exception as e:
+                    print(f"[📒 거래내역 동기화 오류] {e}")
+                time.sleep(300)
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _load_binance_last_ids(self):
+        """엑셀에 이미 적힌 체결번호 중 심볼별 최댓값 (다음엔 그 뒤부터만 가져온다)."""
+        last = {}
+        if not os.path.exists(TRADE_HISTORY_FILE):
+            return last
+        try:
+            with EXCEL_LOCK:
+                wb = load_workbook(TRADE_HISTORY_FILE, read_only=True)
+                if self.BINANCE_SHEET in wb.sheetnames:
+                    ws = wb[self.BINANCE_SHEET]
+                    for row in ws.iter_rows(min_row=2, values_only=True):
+                        if not row or row[1] is None or row[11] is None:
+                            continue
+                        sym, tid = str(row[1]), int(row[11])
+                        last[sym] = max(last.get(sym, 0), tid)
+                wb.close()
+        except Exception as e:
+            print(f"[📒 기존 거래내역 읽기 실패] {e}")
+        return last
+
+    def sync_binance_trades(self, symbols=None):
+        """바이낸스 '거래 내역'을 엑셀 '바이낸스 거래내역' 시트에 그대로 옮긴다.
+
+        - 값은 바이낸스가 준 원본 그대로 (봇이 계산한 값 아님)
+        - 바이낸스 화면처럼 최신 체결이 맨 위
+        - 체결번호로 중복 없이 이어 적는다 (처음엔 최근 7일치)
+        """
+        if not OPENPYXL_AVAILABLE:
+            return
+        if not hasattr(self, '_bn_last_id'):
+            self._bn_last_id = self._load_binance_last_ids()
+        if symbols is None:
+            symbols = [c['symbol'] for c in self.coins]
+
+        new_rows = []
+        for sym in symbols:
+            s = sym.replace('/', '')
+            last = self._bn_last_id.get(s)
+            got = []
+            try:
+                if last is None:
+                    batch = self.api.get_user_trades(s, start_ms=int(time.time() * 1000) - 7 * 86400 * 1000)
+                    got = batch or []
+                else:
+                    frm = last + 1
+                    while True:
+                        batch = self.api.get_user_trades(s, from_id=frm)
+                        if not batch:
+                            break
+                        got += batch
+                        if len(batch) < 1000:
+                            break
+                        frm = int(batch[-1]['id']) + 1
+            except Exception as e:
+                print(f"[📒 {s} 체결 조회 실패] {e}")
+                continue
+            if last is not None:
+                got = [t for t in got if int(t['id']) > last]
+            new_rows += got
+
+        if not new_rows:
+            return 0
+
+        def row_of(t):
+            return [
+                datetime.fromtimestamp(int(t['time']) / 1000).strftime('%Y-%m-%d %H:%M:%S'),
+                t['symbol'],
+                '매수' if t['side'] == 'BUY' else '매도',
+                float(t['price']),
+                float(t['qty']),
+                float(t.get('quoteQty', 0) or 0),
+                abs(float(t.get('commission', 0) or 0)),
+                t.get('commissionAsset', 'USDT'),
+                '메이커' if t.get('maker') else '테이커',
+                float(t.get('realizedPnl', 0) or 0),
+                int(t['orderId']),
+                int(t['id']),
+            ]
+
+        try:
+            with EXCEL_LOCK:
+                # 다른 동기화가 먼저 적었을 수 있으니 잠금 안에서 한 번 더 거른다 (중복 방지)
+                new_rows = [t for t in new_rows
+                            if int(t['id']) > self._bn_last_id.get(t['symbol'], -1)]
+                if not new_rows:
+                    return 0
+                new_rows.sort(key=lambda t: (int(t['time']), int(t['id'])), reverse=True)  # 최신이 위
+                wb = load_workbook(TRADE_HISTORY_FILE) if os.path.exists(TRADE_HISTORY_FILE) else Workbook()
+                if self.BINANCE_SHEET in wb.sheetnames:
+                    ws = wb[self.BINANCE_SHEET]
+                else:
+                    ws = wb.create_sheet(title=self.BINANCE_SHEET, index=0)
+                    hf = Font(bold=True, color='FFFFFF')
+                    fill = PatternFill(start_color='F0B90B', end_color='F0B90B', fill_type='solid')
+                    for col, h in enumerate(self.BINANCE_HEADERS, 1):
+                        c = ws.cell(row=1, column=col, value=h)
+                        c.font = hf; c.fill = fill; c.alignment = Alignment(horizontal='center')
+                    for col, w in zip('ABCDEFGHIJKL', (20, 12, 7, 12, 12, 15, 12, 10, 8, 12, 14, 12)):
+                        ws.column_dimensions[col].width = w
+                    ws.freeze_panes = 'A2'
+                ws.insert_rows(2, amount=len(new_rows))
+                for r, t in enumerate(new_rows, 2):
+                    for c, v in enumerate(row_of(t), 1):
+                        ws.cell(row=r, column=c, value=v)
+                wb.save(TRADE_HISTORY_FILE)
+                wb.close()
+                for t in new_rows:
+                    k = t['symbol']
+                    self._bn_last_id[k] = max(self._bn_last_id.get(k, -1), int(t['id']))
+        except PermissionError:
+            print("[📒 거래내역] 엑셀 파일이 열려 있어 이번엔 건너뜀 (5분 뒤 다시 시도)")
+            return 0
+        except Exception as e:
+            print(f"[📒 거래내역 저장 실패] {e}")
+            return 0
+
+        print(f"[📒 거래내역] 바이낸스 체결 {len(new_rows)}건 엑셀에 추가")
+        return len(new_rows)
+
     def save_trade_to_excel(self, coin, position_type, entry_amount, leverage,
                            tp_pct, sl_pct, roi_pct, profit_usdt, loss_usdt,
                            entry_fee, close_fee, total_fee, net_profit, trade_type):
@@ -3662,34 +3900,38 @@ class App:
         # 🔥 파일 잠금 대비 - 최대 3회 재시도
         for attempt in range(3):
             try:
-                wb = load_workbook(TRADE_HISTORY_FILE)
+                with EXCEL_LOCK:
+                    wb = load_workbook(TRADE_HISTORY_FILE)
                 
-                # 🔥 코인별 시트 찾기 또는 생성
-                if symbol in wb.sheetnames:
-                    ws = wb[symbol]
-                else:
-                    # 시트가 없으면 생성
-                    ws = wb.create_sheet(title=symbol)
-                    # 헤더 추가
-                    headers = [
-                        '년도', '월', '일', '시간', '분', '코인', '포지션',
-                        '진입금액', '레버리지', 'TP%', 'SL%', 'ROI%',
-                        '수익(USDT)', '손실(USDT)', '진입수수료', '청산수수료',
-                        '총수수료', '순수익', '거래유형'
-                    ]
-                    header_font = Font(bold=True, color='FFFFFF')
-                    header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
-                    for col, header in enumerate(headers, 1):
-                        cell = ws.cell(row=1, column=col, value=header)
-                        cell.font = header_font
-                        cell.fill = header_fill
-                        cell.alignment = Alignment(horizontal='center')
+                    # 🔥 코인별 시트 찾기 또는 생성
+                    if symbol in wb.sheetnames:
+                        ws = wb[symbol]
+                    else:
+                        # 시트가 없으면 생성
+                        ws = wb.create_sheet(title=symbol)
+                        # 헤더 추가
+                        headers = [
+                            '년도', '월', '일', '시간', '분', '코인', '포지션',
+                            '진입금액', '레버리지', 'TP%', 'SL%', 'ROI%',
+                            '수익(USDT)', '손실(USDT)', '진입수수료', '청산수수료',
+                            '총수수료', '순수익', '거래유형'
+                        ]
+                        header_font = Font(bold=True, color='FFFFFF')
+                        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+                        for col, header in enumerate(headers, 1):
+                            cell = ws.cell(row=1, column=col, value=header)
+                            cell.font = header_font
+                            cell.fill = header_fill
+                            cell.alignment = Alignment(horizontal='center')
                 
-                ws.append(row_data)
-                wb.save(TRADE_HISTORY_FILE)
-                wb.close()
+                    ws.append(row_data)
+                    wb.save(TRADE_HISTORY_FILE)
+                    wb.close()
                 
-                print(f"📝 거래 기록 저장 [{symbol}]: {position_type} {trade_type} - 순수익 ${net_profit:.2f}")
+                    print(f"📝 거래 기록 저장 [{symbol}]: {position_type} {trade_type} - 순수익 ${net_profit:.2f}")
+                # 📒 청산 직후 바이낸스 거래내역 시트도 바로 갱신
+                threading.Thread(target=self.sync_binance_trades, args=([coin['symbol']],),
+                                 daemon=True).start()
                 return  # 성공 시 종료
                 
             except PermissionError:
