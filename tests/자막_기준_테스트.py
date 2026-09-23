@@ -179,6 +179,21 @@ GOLD_TRIM = [
     ("그 위는 실적이 알아서", "", "그 위는 실적이 알아서"),   # 앞의 '그'는 건드리지 않는다
     ("다 같이", "", "다 같이"),
     ("이", "", "이"),                                        # 한 단어뿐이면 남긴다
+    # 말 끝에 붙는 인사 환각 (C4082)
+    ("오늘 이 종목 메모해 안녕히가세요", "", "오늘 이 종목 메모해"),
+    ("여기까지 보면 돼 안녕히 가세요", "", "여기까지 보면 돼"),
+    ("차트 봐 수고하셨습니다", "", "차트 봐"),
+    ("수고하셨습니다", "", "수고하셨습니다"),                  # 한 단어뿐이면 남긴다 (클립 통째 판정은 따로)
+]
+
+
+# 다음 클립 첫말을 미리 한 꼬리 (C4082: '…현대위아 로봇' / '로봇 두뇌')
+GOLD_RESTART = [
+    ("오늘 볼 건 현대위아 로봇", "로봇 두뇌 만드는 회사", "오늘 볼 건 현대위아"),
+    ("그게 이런 뜻이야 지금 5일", "지금 5일 연속 올랐어", "그게 이런 뜻이야"),
+    ("이게 끝났어.", "끝났어. 다음 가자", "이게 끝났어."),     # 문장이 끝나면 되풀이한 말이다
+    ("삼성전자 좋아", "SK하이닉스 좋아", "삼성전자 좋아"),       # 겹치지 않으면 그대로
+    ("로봇", "로봇 두뇌", "로봇"),                               # 한 단어뿐이면 남긴다
 ]
 
 
@@ -240,6 +255,36 @@ def run_trim():
     return ok == len(GOLD_TRIM)
 
 
+def run_restart():
+    ok = 0
+    for a, b, want in GOLD_RESTART:
+        segs = [{"text": t, "words": [{"word": w, "start": 0.0, "end": 0.0} for w in t.split()]}
+                for t in (a, b)]
+        S.drop_restart_tails(segs)
+        got = " ".join(w["word"] for w in segs[0]["words"])
+        if got == want:
+            ok += 1
+        else:
+            print(f"  X  {a!r} + {b!r} → {got!r} (기준 {want!r})")
+    print(f"  다음 클립 첫말 꼬리: {ok}/{len(GOLD_RESTART)} 통과")
+    return ok == len(GOLD_RESTART)
+
+
+def run_number_merge():
+    cases = [("60% %의 확률", "60%의 확률"), ("99, 800원", "99,800원"),
+             ("삼화콘덴서 +26%", "삼화콘덴서 +26%")]
+    ok = 0
+    for src, want in cases:
+        got = " ".join(w["word"] for w in S.merge_number_tokens(
+            [{"word": w, "start": 0.0, "end": 0.0} for w in src.split()]))
+        if got == want:
+            ok += 1
+        else:
+            print(f"  X  {src!r} → {got!r} (기준 {want!r})")
+    print(f"  숫자 붙이기: {ok}/{len(cases)} 통과")
+    return ok == len(cases)
+
+
 # ── 3) 잡음 구간 환각 (C3870 사례) ──
 GOLD_NOISE = [
     ("I", ""), ("I it", ""), ("I I, I I, I", ""), ("E E", ""),
@@ -288,8 +333,10 @@ if __name__ == "__main__":
     d = run_split()
     e = run_trim()
     f = run_boundary()
+    g = run_restart()
+    h = run_number_merge()
     n_lines = sum(len(w) for _s, w in GOLD_SCRIPT)
-    all_ok = a and b and c and d and e and f
+    all_ok = a and b and c and d and e and f and g and h
     print(f"\n원고 기준 총 {n_lines}줄")
     print("전부 통과 ✓" if all_ok else "기준과 다름 ✗")
     sys.exit(0 if all_ok else 1)

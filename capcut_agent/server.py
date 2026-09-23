@@ -429,9 +429,42 @@ def compute_keep_ranges(silences: list[dict], total_duration: float,
     return ranges
 
 
+def drop_restart_tails(segments: list[dict], max_words: int = 2, max_chars: int = 6) -> int:
+    """
+    클립 끝에 남은 짧은 말이 **다음 클립 첫말과 같으면** 떼어낸다.
+    말을 꺼냈다가 멈추고 다음 클립에서 처음부터 다시 말한 것(말 다시 시작)이다.
+      '…공장 자동화는 현대위아 로봇' / '로봇 두뇌 소프트웨어는'
+      '…물량이 안 나갔다는 뜻이야 지금 5일' / '지금 5일, 20일, 60일'
+    사용자 요청: "자막이 다음 자막 내용 몇 글자를 자꾸 가져와".
+    - 두 어절·6글자 이하의 짧은 꼬리만 (긴 문장 반복은 테이크 반복이라 그대로 둔다)
+    - 꼬리가 문장 끝말('거야/했어')이면 건드리지 않는다
+    - 클립에 최소 한 어절은 남긴다
+    반환: 떼어낸 횟수
+    """
+    n = 0
+    for i in range(len(segments) - 1):
+        a = segments[i].get("words") or []
+        b = segments[i + 1].get("words") or []
+        if len(a) < 2 or not b:
+            continue
+        for k in range(min(max_words, len(a) - 1, len(b)), 0, -1):
+            tail = [_norm_token(w["word"]) for w in a[-k:]]
+            head = [_norm_token(w["word"]) for w in b[:k]]
+            if not all(tail) or tail != head or sum(len(t) for t in tail) > max_chars:
+                continue
+            if _ends_clause(a[-1]["word"]):
+                continue
+            del a[-k:]
+            segments[i]["words"] = a
+            segments[i]["text"] = " ".join(w["word"] for w in a)
+            n += 1
+            break
+    return n
+
+
 def split_clips_at_repeats(keep_ranges: list[tuple[float, float, int, int]],
                            segments: list[dict],
-                           min_part_sec: float = 0.30
+                           min_part_sec: float = 0.20
                            ) -> tuple[list[tuple[float, float, int, int]], int]:
     """
     한 영상 클립 안에서 같은 말이 바로 이어서 반복되면(= 엔지 재촬영),
@@ -755,7 +788,12 @@ HALLUCINATION_LINES = [
     "다음영상에서만나요", "다음시간에만나요", "다음영상에서뵙겠습니다",
     "한글자막by", "자막제공", "이덕이", "MBC뉴스",
 ]
-_SHORT_ONLY_LINES = {"감사합니다", "고맙습니다", "안녕하세요", "네", "아멘"}
+_SHORT_ONLY_LINES = {"감사합니다", "고맙습니다", "안녕하세요", "네", "아멘",
+                     "수고하셨습니다", "안녕히가세요", "안녕히계세요", "안녕히"}
+# 조용한 끝부분에서 Whisper 가 지어내 클립 끝에 붙이는 인사말 (C4082 실측:
+#  '…자 지금부터 메모해 안녕히가세요', 단독 '수고하셨습니다')
+_HALLUC_TAILS = {"수고하셨습니다", "안녕히가세요", "안녕히계세요", "안녕히",
+                 "감사합니다", "고맙습니다", "시청해주셔서감사합니다"}
 # 클립 전체가 아니라 일부만 겹쳐도 환각으로 보는 마무리 인사
 _HALLUC_CONTAINS = ("다음영상에서", "다음시간에", "시청해주셔서", "구독과좋아요",
                     "구독좋아요", "봐주셔서감사", "영상에서만나",
@@ -802,6 +840,14 @@ def trim_trailing_noise(words: list[dict], script_tokens: set[str] | None = None
     while len(words) >= 2:
         core = _norm_token(words[-1]["word"])
         if not core or (len(core) <= 2 and core in _TRAILING_NOISE):
+            words.pop()
+            continue
+        # 끝에 붙은 인사말 환각 ('안녕히가세요', '안녕히 가세요')
+        two = _norm_token(words[-2]["word"]) + core
+        if len(words) >= 3 and two in _HALLUC_TAILS:
+            del words[-2:]
+            continue
+        if core in _HALLUC_TAILS:
             words.pop()
             continue
         # 말끝을 흐리며 남긴 한 글자('…기본이고, 그' / '그리고 그')
@@ -905,6 +951,13 @@ def merge_number_tokens(words: list[dict]) -> list[dict]:
     """Whisper가 "4,300억"을 "4," + "300억"으로 쪼갠 것을 다시 붙인다."""
     out: list[dict] = []
     for w in words:
+        if out and out[-1]["word"].endswith("%") and w["word"].startswith("%"):
+            # '60% %의' → '60%의' (Whisper 가 %를 두 번 찍은 것)
+            ek = "tl_end" if "tl_end" in w else "end"
+            rest = w["word"].lstrip("%")
+            out[-1] = {**out[-1], "word": out[-1]["word"] + rest,
+                       ek: w.get(ek, out[-1].get(ek))}
+            continue
         if out and re.fullmatch(r"\d{1,3},", out[-1]["word"]) and re.match(r"^\d", w["word"]):
             ek = "tl_end" if "tl_end" in w else "end"
             out[-1] = {**out[-1], "word": out[-1]["word"] + w["word"],
@@ -3636,6 +3689,10 @@ async def process_video(
                         yield f"data: {json.dumps({'step': 'asr', 'msg': '반복 엔지컷: 삭제할 짧은 중복 없음'})}\n\n"
 
                 # ── 같은 말이 바로 반복되면 그 자리에서 영상 클립을 자른다 ──
+                # ── 다음 클립에서 다시 시작한 말의 앞머리가 이 클립 끝에 남은 것 떼기 ──
+                n_tail = drop_restart_tails(raw_subs)
+                if n_tail:
+                    yield f"data: {json.dumps({'step': 'asr', 'msg': f'다음 클립과 겹치는 말끝 {n_tail}곳 정리'})}\n\n"
                 keep_ranges, n_cut = split_clips_at_repeats(keep_ranges, raw_subs)
                 if n_cut:
                     yield f"data: {json.dumps({'step': 'asr', 'msg': f'같은 말이 반복된 자리에서 클립 {n_cut}번 잘랐습니다 → 클립 {len(keep_ranges)}개'})}\n\n"
