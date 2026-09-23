@@ -799,6 +799,10 @@ class TradingBot:
 
         if cnt == 0:
             return
+        # 새 정산이 없으면(금액 그대로) 로그를 남기지 않는다 — 정산은 8시간에 한 번이라
+        # 10분마다 같은 숫자를 찍으면 로그만 쌓인다
+        if prev is not None and abs(total - prev) <= 1e-9:
+            return
         word = '납부' if total < 0 else '수령'
         msg = f"   💸 {self.config['symbol']} 누적 펀딩비: ${abs(total):.3f} {word} ({cnt}회 정산)"
         if prev is not None and abs(total - prev) > 1e-9:
@@ -2528,6 +2532,7 @@ class TradingBot:
 
 # ==================== GUI ====================
 STATS_FILE = "bot_stats.json"  # 🔥 통계 저장 파일
+MAX_LOG_LINES = 1000  # 🧹 코인별 LONG/SHORT 로그 최대 보관 줄 수 (넘으면 오래된 것부터 삭제)
 
 class App:
     def __init__(self, root):
@@ -5215,13 +5220,20 @@ class App:
         if log_key not in coin:
             coin[log_key] = []
         coin[log_key].append(log_line)
-        
+        # 🧹 오래된 로그 정리 — 몇 주씩 켜둬도 메모리가 계속 늘지 않게
+        #    (거래 기록은 엑셀에 따로 남으므로 화면 로그는 최근 것만 있으면 됨)
+        if len(coin[log_key]) > MAX_LOG_LINES:
+            del coin[log_key][:-MAX_LOG_LINES]
+
         # 🔥 UI가 있으면 실시간 업데이트
         def update_ui():
             if 'labels' in coin and f'{key}_log' in coin['labels']:
                 try:
                     log = coin['labels'][f'{key}_log']
                     log.insert('end', log_line + '\n')
+                    lines = int(log.index('end-1c').split('.')[0])
+                    if lines > MAX_LOG_LINES:
+                        log.delete('1.0', f'{lines - MAX_LOG_LINES}.0')
                     log.see('end')
                 except:
                     pass
