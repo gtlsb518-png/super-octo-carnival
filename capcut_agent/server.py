@@ -967,8 +967,9 @@ def merge_number_tokens(words: list[dict]) -> list[dict]:
     return out
 
 
-# 금액 표기: '10만 원' / '2만 2천 원' / '10000원' → '100,000원' / '22,000원' / '10,000원'
-# (사용자 요청 2026-09: "금액 나올 때 10,000원 이렇게 다 붙여서")
+# 금액 표기: 만 원 단위로 딱 떨어지면 '4만원', 천 원 단위가 있으면 '12,000원'
+# '10만 원' → '10만원', '2만 2천 원' → '22,000원', '10000원' → '1만원'
+# (사용자 요청 2026-09: "만원 이상은 4만원 7만원, 천원 단위부터 12,000원")
 _MONEY_NUM_RE = re.compile(r"[+\-]?(?:\d[\d,]*)?(?:[조억만천백](?:\d[\d,]*)?)*")
 _MONEY_RE = re.compile(r"([+\-]?)((?:\d[\d,]*)?(?:[조억만천백](?:\d[\d,]*)?)*)원(\S*)")
 # '원' 바로 뒤에 올 수 있는 조사·어미 첫 글자 ('원가', '원픽', '원유' 같은 다른 말 제외)
@@ -1008,7 +1009,12 @@ def format_money_tokens(words: list[dict]) -> list[dict]:
                 if (m and m.group(2) and re.search(r"[\d만천]", m.group(2)[:1])
                         and (not m.group(3) or m.group(3)[0] in _MONEY_SUFFIX_HEAD)):
                     val = _money_value(m.group(2))
-                    num = f"{val:,}" if val is not None else m.group(2)
+                    if val is None:
+                        num = m.group(2)                       # 억·조는 붙이기만
+                    elif val >= 10000 and val % 10000 == 0:
+                        num = f"{val // 10000:,}만"            # 4만원, 242만원
+                    else:
+                        num = f"{val:,}"                       # 12,000원, 5,000원
                     merged = {**words[i], "word": f"{m.group(1)}{num}원{m.group(3)}",
                               # 줄 나누기는 말한 길이('242만 원')로 계산해 전과 같게 끊는다
                               "say_len": len(" ".join(w["word"] for w in words[i:j + 1]))}
