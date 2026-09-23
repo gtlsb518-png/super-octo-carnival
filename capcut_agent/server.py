@@ -1043,10 +1043,13 @@ def transcribe_all_clips(video_path: Path,
             if not cleaned:
                 continue
             for piece in cleaned.split():
+                if not re.search(r"[0-9A-Za-z가-힣]", piece):
+                    continue             # ', 800원' 처럼 쉼표만 떨어져 나온 조각은 버린다
                 words.append({"start": min(max(w["start"], ks), ke),
                               "end": min(max(w["end"], ks), ke), "word": piece})
         words = cap_by_speech_rate(
             collapse_repeats(split_inner_commas(merge_number_tokens(words))), ke - ks)
+        words = merge_number_tokens(words)     # 중간에 갈라진 '99,' + '800원에' 재결합
         # 클립 끝에 붙은 헛기침·감탄 같은 '말 아닌 소리'를 떼어낸다
         words = trim_trailing_noise(words, script_tokens)
         # ★ 실제로 한 말은 최대한 다 살린다.
@@ -1517,6 +1520,10 @@ def _is_obligation(core: str) -> bool:
 
 
 _NUM_TOKEN_RE = re.compile(r"^[+\-]?\d")
+# 숫자 바로 뒤에 붙는 단위 — 여기서 끊으면 '242만 / 원' 처럼 한 수치가 갈라진다
+_NUM_UNITS = ("원", "달러", "엔", "위안", "개", "명", "주", "배", "층", "위",
+              "년", "월", "일", "번", "초", "분", "시간", "퍼센트", "프로",
+              "억", "만", "천", "조", "톤", "평", "건", "대", "회", "차")
 
 
 def _is_number_token(word: str) -> bool:
@@ -1620,6 +1627,8 @@ _BOUND_NOUNS = {
 # 뒷말을 꾸미는 말 — 여기서 끊으면 "전 / 세계" 처럼 한 덩어리가 쪼개진다.
 _NO_END_WORDS = {
     "전", "제", "약", "총", "각", "매", "첫", "두", "세", "네", "몇", "여러", "온갖",
+    "석", "넉", "엿", "닷",                      # '석 달', '넉 달' — 세는 말
+
     "다", "더", "잘", "못", "안", "왜", "좀", "딱", "꼭", "또", "새", "온", "막",
     "그", "이", "저", "그런", "이런", "저런", "무슨", "어떤", "어느", "모든", "아무",
     "같은", "다른", "남은", "좋은", "나쁜", "큰", "작은", "많은", "적은", "높은",
@@ -1697,7 +1706,9 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
         return 0                         # '단비 / 같은' 처럼 앞말에 붙는 말은 떼지 않는다
     nx = next_word.strip().lstrip("\"'“‘([{") if next_word else ""
     if nx and nx[:1].isdigit() and core.endswith(("만", "천", "억", "조", "백", "십")):
-        return 0                         # '10만 / 9천을' 처럼 한 숫자를 쪼개지 않는다
+        return -1                        # '10만 / 9천을' — 한 숫자는 절대 안 쪼갠다
+    if nx and nx.startswith(_NUM_UNITS) and re.search(r"\d", core):
+        return -1                        # '242만 / 원 찍고' — 숫자와 단위도 절대 안 뗀다
     if nx and _ends_rieul(core) and _break_score(nx) <= 10:
         return 5                         # '받을 / 기업' 처럼 ㄹ관형형+명사는 붙여 둔다
     if _is_adnominal_word(core):
@@ -1746,9 +1757,9 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
     total = _group_len(cur) + (1 + len(after) if after else 0)
     bal = lambda a: -abs(a - (total - a))
 
-    late = (-1, len(cur) - 1)            # (점수, 위치)
+    late = (-99, len(cur) - 1)           # (점수, 위치) — -1(절대 금지)보다 낮게 시작
     late_bal = -10_000
-    early = (-1, -1)
+    early = (-99, -1)
     early_bal = -10_000
     early_min = max(6, soft_min - 4)     # 너무 짧은 조각이 생기지 않는 선까지만 앞당김
     acc = 0
@@ -1925,7 +1936,7 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     - 단어 사이 시간 간격이 gap_break_us 이상이면(말 사이 쉼) 무조건 끊음
     - 너무 짧은 꼬리 조각은 직전 조각에 합침 (문장부호로 끝난 경우는 유지)
     """
-    words = split_inner_commas(words)
+    words = merge_number_tokens(split_inner_commas(words))
     hard = max_chars + tolerance         # 기본 상한
     soft_min = max(4, max_chars - 2)     # 이 길이부터 어미에서 끊을 수 있음
     groups: list[list[dict]] = []
