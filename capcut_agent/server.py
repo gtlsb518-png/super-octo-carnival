@@ -967,6 +967,66 @@ def merge_number_tokens(words: list[dict]) -> list[dict]:
     return out
 
 
+# 금액 표기: '10만 원' / '2만 2천 원' / '10000원' → '100,000원' / '22,000원' / '10,000원'
+# (사용자 요청 2026-09: "금액 나올 때 10,000원 이렇게 다 붙여서")
+_MONEY_NUM_RE = re.compile(r"[+\-]?(?:\d[\d,]*)?(?:[조억만천백](?:\d[\d,]*)?)*")
+_MONEY_RE = re.compile(r"([+\-]?)((?:\d[\d,]*)?(?:[조억만천백](?:\d[\d,]*)?)*)원(\S*)")
+# '원' 바로 뒤에 올 수 있는 조사·어미 첫 글자 ('원가', '원픽', '원유' 같은 다른 말 제외)
+_MONEY_SUFFIX_HEAD = set("은는이가을를에의도만인까부보으쯤정짜씩대과와밖선어,.?!")
+
+
+def _money_value(num: str) -> int | None:
+    """'2만2천' → 22000, '242만' → 2420000, '99,800' → 99800. 억·조는 None."""
+    if not num or "억" in num or "조" in num or not re.search(r"[\d만천백]", num):
+        return None
+    total = small = 0
+    for digits, unit in re.findall(r"(\d[\d,]*)?([만천백])?", num):
+        if not digits and not unit:
+            continue
+        n = int(digits.replace(",", "")) if digits else None
+        if unit == "만":
+            total += (small + (n or 0) or 1) * 10000
+            small = 0
+        elif unit:
+            small += (1 if n is None else n) * (1000 if unit == "천" else 100)
+        else:
+            small += n
+    return total + small
+
+
+def format_money_tokens(words: list[dict]) -> list[dict]:
+    """금액을 한 어절로 붙이고 '10,000원' 꼴로 쓴다. 억·조 단위는 붙이기만 한다."""
+    out: list[dict] = []
+    i = 0
+    while i < len(words):
+        done = False
+        for j in range(i, min(i + 4, len(words))):
+            tok = words[j]["word"]
+            if "원" in tok:
+                s = "".join(w["word"] for w in words[i:j + 1])
+                m = _MONEY_RE.fullmatch(s)
+                if (m and m.group(2) and re.search(r"[\d만천]", m.group(2)[:1])
+                        and (not m.group(3) or m.group(3)[0] in _MONEY_SUFFIX_HEAD)):
+                    val = _money_value(m.group(2))
+                    num = f"{val:,}" if val is not None else m.group(2)
+                    merged = {**words[i], "word": f"{m.group(1)}{num}원{m.group(3)}",
+                              # 줄 나누기는 말한 길이('242만 원')로 계산해 전과 같게 끊는다
+                              "say_len": len(" ".join(w["word"] for w in words[i:j + 1]))}
+                    for k in ("end", "tl_end"):
+                        if k in words[j]:
+                            merged[k] = words[j][k]
+                    out.append(merged)
+                    i = j + 1
+                    done = True
+                break
+            if not _MONEY_NUM_RE.fullmatch(tok):
+                break
+        if not done:
+            out.append(words[i])
+            i += 1
+    return out
+
+
 def collapse_repeats(words: list[dict]) -> list[dict]:
     """같은 어절이 3번 이상 이어지면 한 번만 남긴다 ("오늘 오늘 오늘" → "오늘")."""
     out: list[dict] = []
@@ -1792,9 +1852,14 @@ def _break_score(word: str, next_word: str = "", prev_word: str = "") -> int:
     return 10                            # 그 밖 (관형형 등 — 끊으면 어색)
 
 
+def _wlen(x: dict) -> int:
+    """어절 글자 수. 금액('2,420,000원')은 말한 그대로('242만 원')의 길이로 센다."""
+    return x.get("say_len") or len(x["word"])
+
+
 def _group_len(ws: list[dict]) -> int:
     """어절 묶음을 이어붙였을 때의 글자 수 (공백 포함)."""
-    return sum(len(x["word"]) for x in ws) + max(0, len(ws) - 1)
+    return sum(_wlen(x) for x in ws) + max(0, len(ws) - 1)
 
 
 def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
@@ -1817,7 +1882,7 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
     early_min = max(6, soft_min - 4)     # 너무 짧은 조각이 생기지 않는 선까지만 앞당김
     acc = 0
     for i, x in enumerate(cur):
-        acc += len(x["word"]) + (1 if i else 0)
+        acc += _wlen(x) + (1 if i else 0)
         nxt = cur[i + 1]["word"] if i + 1 < len(cur) else after
         sc = _break_score(x["word"], nxt, cur[i - 1]["word"] if i else "")
         if acc >= soft_min or i == len(cur) - 1:
@@ -1835,7 +1900,7 @@ def _best_break_index(cur: list[dict], soft_min: int, after: str = "",
         #   '그리고 오늘 삼화콘덴서 / +26%' → '그리고 오늘 / 삼화콘덴서 +26%'
         acc2, alt = 0, None
         for i, x in enumerate(cur):
-            acc2 += len(x["word"]) + (1 if i else 0)
+            acc2 += _wlen(x) + (1 if i else 0)
             if acc2 < 4 or i >= late[1]:
                 continue
             nx = cur[i + 1]["word"] if i + 1 < len(cur) else after
@@ -1874,7 +1939,7 @@ def _rest_len(words: list[dict], i: int, cap: int = 40) -> int:
     total = 0
     for k in range(i, len(words)):
         w = words[k]["word"]
-        total += len(w) + (1 if k > i else 0)
+        total += _wlen(words[k]) + (1 if k > i else 0)
         if w[-1:] in ".?!…" or total > cap:
             break
     return total
@@ -1989,7 +2054,7 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
     - 단어 사이 시간 간격이 gap_break_us 이상이면(말 사이 쉼) 무조건 끊음
     - 너무 짧은 꼬리 조각은 직전 조각에 합침 (문장부호로 끝난 경우는 유지)
     """
-    words = merge_number_tokens(split_inner_commas(words))
+    words = format_money_tokens(merge_number_tokens(split_inner_commas(words)))
     hard = max_chars + tolerance         # 기본 상한
     soft_min = max(4, max_chars - 2)     # 이 길이부터 어미에서 끊을 수 있음
     groups: list[list[dict]] = []
@@ -2042,7 +2107,7 @@ def chunk_words_korean(words: list[dict], max_chars: int, tolerance: int = 3,
         elif cl >= soft_min and 50 <= sc < 80:          # 어미 → 목표 길이 근처에서
             groups.append(cur); cur = []
         elif cl >= max(5, soft_min - 2) and 30 <= sc < 50 and nxt \
-                and cl + 1 + len(nxt) > max_chars \
+                and cl + 1 + _wlen(words[wi + 1]) > max_chars \
                 and cl + 1 + _rest_len(words, wi + 1) > allow \
                 and not _good_break_ahead(words, wi + 1, hard + 2 - cl - 1):
             groups.append(cur); cur = []                # 다음 말까지 넣으면 목표를 넘길 때
