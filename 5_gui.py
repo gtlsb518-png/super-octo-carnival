@@ -3131,7 +3131,8 @@ class App:
                         # 포지션 있으면 실시간 ROI 표시
                         print(f"  🔍 {coin['symbol']} 포지션: {position['side']} entry=${position['entry_price']:.4f} pnl=${position.get('pnl', 0):.4f}")
                         coin['_cached_position'] = position  # 캐시에 저장
-                        self._update_roi_display(coin)
+                        # 화면은 메인 스레드에서만 건드린다 (다른 스레드에서 직접 바꾸면 강제 종료될 수 있음)
+                        self.root.after(0, lambda c=coin: self._update_roi_display(c))
                     else:
                         # 🔥 포지션 없으면 모든 ROI 데이터 초기화 + "-" 표시!
                         coin['roi']['long_entry'] = None
@@ -3955,6 +3956,7 @@ class App:
     
     def on_closing(self):
         """X 버튼 클릭 시 종료 처리"""
+        self._closing_by_user = True   # 9_main.py가 '정상 종료'로 알아보게
         print("=" * 60)
         print("🔚 프로그램 종료 중...")
         print("=" * 60)
