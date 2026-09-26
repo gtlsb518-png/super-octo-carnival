@@ -12,12 +12,14 @@ from urllib.parse import urlencode
 import pandas as pd
 import importlib
 
-# 설정 import
+# ⚠️⚠️ 이 파일은 수정하지 마세요! API 키는 1_config.py 에만 넣습니다. ⚠️⚠️
+#     아래 줄들은 1_config.py 에 적은 키를 '가져오는' 코드입니다.
+#     여기에 키를 직접 붙여넣으면 프로그램이 실행되지 않습니다.
 _config = importlib.import_module('1_config')
-API_KEY = _config.API_KEY
-API_SECRET = _config.API_SECRET
-TESTNET = _config.TESTNET
-MAX_ORDER_RETRY = _config.MAX_ORDER_RETRY
+API_KEY = getattr(_config, 'API_KEY', '')
+API_SECRET = getattr(_config, 'API_SECRET', '')
+TESTNET = getattr(_config, 'TESTNET', True)
+MAX_ORDER_RETRY = getattr(_config, 'MAX_ORDER_RETRY', 3)
 
 
 class BinanceAPI:

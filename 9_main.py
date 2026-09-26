@@ -42,8 +42,16 @@ except Exception:
     _crash_file = None
 
 
+import re
+
+def mask_keys(text):
+    """API 키처럼 긴 영문·숫자 덩어리는 앞뒤만 남기고 가린다 (기록을 남에게 보내도 안전하게)."""
+    return re.sub(r'[A-Za-z0-9]{32,}', lambda m: m.group(0)[:4] + '…(가림)…' + m.group(0)[-3:], str(text))
+
+
 def write_error_log(title, text):
-    """오류 내용을 오류기록.txt에 덧붙인다."""
+    """오류 내용을 오류기록.txt에 덧붙인다. (API 키는 가려서 저장)"""
+    text = mask_keys(text)
     try:
         with open(ERROR_LOG, 'a', encoding='utf-8') as f:
             f.write("\n" + "=" * 70 + "\n")
@@ -64,9 +72,26 @@ def pause_and_exit(code=1):
 
 
 def explain_config_error(exc):
-    """1_config.py 문법 오류를 알아보기 쉽게 설명."""
+    """문법 오류를 알아보기 쉽게 설명. 1_config.py가 아닌 파일이면 원본으로 되돌리라고 안내."""
     lineno = getattr(exc, 'lineno', None)
-    bad = (getattr(exc, 'text', '') or '').rstrip()
+    bad = mask_keys((getattr(exc, 'text', '') or '').rstrip())
+    fname = os.path.basename(str(getattr(exc, 'filename', '') or ''))
+    if fname and fname != '1_config.py':
+        print()
+        print("=" * 60)
+        print(f"❌ {fname} 파일이 수정되어 실행할 수 없습니다")
+        print("=" * 60)
+        if lineno:
+            print(f"   {lineno}번째 줄: {bad}")
+        print(f"   오류: {getattr(exc, 'msg', exc)}")
+        print()
+        print(f"   {fname} 은(는) 고치는 파일이 아닙니다.")
+        print(f"   → 받은 압축파일에서 {fname} 만 꺼내 다시 덮어쓰세요.")
+        print()
+        print("   🔑 API 키는 1_config.py 에만 넣습니다:")
+        print('      API_KEY = "키"')
+        print('      API_SECRET = "시크릿"')
+        return
     print()
     print("=" * 60)
     print("❌ 1_config.py 파일에 문제가 있습니다")
@@ -91,16 +116,16 @@ def on_uncaught(exc_type, exc, tb):
         return
     text = ''.join(traceback.format_exception(exc_type, exc, tb))
     write_error_log("프로그램 오류로 종료", text)
-    fname = getattr(exc, 'filename', '') or ''
-    if issubclass(exc_type, (SyntaxError, UnicodeDecodeError)) and '1_config' in str(fname) + text:
+    fname = str(getattr(exc, 'filename', '') or '')
+    if issubclass(exc_type, SyntaxError) and os.path.dirname(os.path.abspath(fname)) == BASE_DIR:
         explain_config_error(exc)
     else:
         print("\n" + "=" * 60)
         print("❌ 프로그램 실행 중 오류 발생!")
         print("=" * 60)
-        print(text)
+        print(mask_keys(text))
     print(f"📄 오류 내용이 저장됐습니다: {ERROR_LOG}")
-    print("   이 파일 내용을 보내주시면 원인을 찾을 수 있습니다.")
+    print("   이 파일 내용을 보내주시면 원인을 찾을 수 있습니다. (API 키는 가려져 있습니다)")
     try:
         input("\n[엔터]를 누르면 창이 닫힙니다...")
     except Exception:
@@ -226,11 +251,16 @@ except ImportError as e:
     print("  4_bot.py, 5_gui.py, 9_main.py")
     write_error_log("모듈 로딩 실패", traceback.format_exc())
     pause_and_exit(1)
+except SyntaxError as e:
+    write_error_log("모듈 로딩 중 문법 오류", traceback.format_exc())
+    explain_config_error(e)
+    print(f"\n📄 오류 내용: {ERROR_LOG}")
+    pause_and_exit(1)
 except Exception:
     # 파일이 깨졌거나 버전이 섞인 경우 등 — 메시지 보여주고 창 유지
     write_error_log("모듈 로딩 중 오류", traceback.format_exc())
     print("\n❌ 프로그램 파일을 불러오는 중 오류가 났습니다:\n")
-    traceback.print_exc()
+    print(mask_keys(traceback.format_exc()))
     print("\n   압축파일의 모든 파일을 한 폴더에 다시 덮어써 보세요.")
     print(f"📄 오류 내용: {ERROR_LOG}")
     pause_and_exit(1)
