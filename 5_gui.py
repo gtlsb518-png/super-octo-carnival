@@ -943,18 +943,24 @@ class TradingBot:
                      pos_type)
 
     def report_funding(self, pos_type=None, force=False):
-        """보유 중 주기적으로 '이 코인 펀딩비 지금까지 얼마 나갔는지' 로그.
+        """보유 중 펀딩비가 새로 정산되면 '이번에 얼마 냈/받았는지'와 합계를 로그로 남긴다.
 
         바이낸스 계좌 기록(income)을 읽으므로 추정이 아니라 실제 금액.
+        합계는 '프로그램을 켠 뒤' 이 코인에서 정산된 펀딩비다.
         10분에 한 번만 조회 (API 부하 최소화).
         """
         # 로그를 어느 쪽(LONG/SHORT)에 찍을지 — 실제 보유 방향을 따른다
+        #   (봇이 저장하는 포지션 정보는 {'side': 'long'/'short', ...} 형식)
         if pos_type is None:
-            try:
-                pos_type = ('LONG' if float(self.config['_cached_position']['positionAmt']) > 0
-                            else 'SHORT')
-            except Exception:
-                pos_type = self.bot_type.upper()
+            p = self.config.get('_cached_position') or {}
+            side = p.get('side') if isinstance(p, dict) else None
+            if side in ('long', 'short'):
+                pos_type = side.upper()
+            else:
+                try:
+                    pos_type = 'LONG' if float(p['positionAmt']) > 0 else 'SHORT'
+                except Exception:
+                    pos_type = self.bot_type.upper()
         now = time.time()
         last = self.config.get('_funding_log_time', 0)
         if not force and (now - last) < 600:
@@ -963,8 +969,8 @@ class TradingBot:
 
         since = self.config.get('_funding_since')
         if since is None:
-            # 봇 시작 시점부터 집계
-            since = int(now * 1000) - 24 * 3600 * 1000
+            # 프로그램을 켠(처음 조회한) 시점부터 집계 — 그 전 포지션의 펀딩비는 섞지 않는다
+            since = int(now * 1000) - 60 * 1000
             self.config['_funding_since'] = since
 
         total, cnt = self.api.get_funding_paid(self.config['symbol'], since)
@@ -976,17 +982,22 @@ class TradingBot:
 
         if cnt == 0:
             return
-        # 새 정산이 없으면(금액 그대로) 로그를 남기지 않는다 — 정산은 8시간에 한 번이라
-        # 10분마다 같은 숫자를 찍으면 로그만 쌓인다
+        # 새 정산이 없으면(금액 그대로) 로그를 남기지 않는다 — 정산은 8시간에 한 번
         if prev is not None and abs(total - prev) <= 1e-9:
             return
-        word = '납부' if total < 0 else '수령'
-        msg = f"   💸 {self.config['symbol']} 누적 펀딩비: ${abs(total):.3f} {word} ({cnt}회 정산)"
-        if prev is not None and abs(total - prev) > 1e-9:
+
+        def said(x):
+            return f"${abs(x):.3f} {'냄' if x < 0 else '받음'}"
+
+        sym = self.config['symbol']
+        if prev is not None:
             d = total - prev
-            msg += f"  ← 방금 {'−' if d < 0 else '+'}${abs(d):.3f}"
-        self.log(msg, pos_type)
-        print(f"[💸 펀딩비] {self.config['symbol']} 누적 {total:+.4f} USDT ({cnt}회)")
+            self.log(f"💸 {sym} 펀딩비 정산 — 이번에 {said(d)} ({pos_type} 보유 중)", pos_type)
+        else:
+            self.log(f"💸 {sym} 펀딩비 정산 ({pos_type} 보유 중)", pos_type)
+        self.log(f"   프로그램 켠 뒤 이 코인 합계: {said(total)} (정산 {cnt}회)", pos_type)
+        print(f"[💸 펀딩비] {sym} {pos_type} 합계 {total:+.4f} USDT ({cnt}회)"
+              + (f" / 이번 {total - prev:+.4f}" if prev is not None else ""))
 
     def check_repaint(self, df_full):
         """기준봉이 닫혔으면 그 신호가 살아남았는지 확인해 로그로 알린다.
