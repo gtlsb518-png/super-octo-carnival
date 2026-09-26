@@ -261,8 +261,10 @@ class BinanceAPI:
                         time.sleep(3)
                     else:
                         print(f"API 오류: {error_data}")
+                    self._remember_error(error_data)
                 except:
                     print(f"API 오류: {e.response.text}")
+                    self._remember_error({'code': None, 'msg': e.response.text[:200]})
             return None
         except requests.exceptions.ConnectionError:
             print(f"🔌 연결 끊김! 2초 후 재시도...")
@@ -416,31 +418,60 @@ class BinanceAPI:
                 return True
             return False
     
+    # ==================== 주문 거절 사유 (스레드별) ====================
+    def _remember_error(self, err):
+        if not hasattr(self, '_tls'):
+            self._tls = threading.local()
+        self._tls.last_error = err
+
+    def last_order_error(self):
+        """이 스레드에서 마지막으로 바이낸스가 거절한 사유 {'code':…, 'msg':…} / 없으면 None"""
+        return getattr(getattr(self, '_tls', None), 'last_error', None)
+
+    # ==================== 수량 단위 (바이낸스 실제 규칙) ====================
+    # exchangeInfo를 못 받았을 때만 쓰는 예비값. 일부러 '거칠게' 잡았다:
+    # 정수(1) 단위는 실제 단위가 0.1이든 0.01이든 항상 유효한 수량이라 거절되지 않는다.
+    _STEP_FALLBACK = {
+        'BTCUSDT': '0.001', 'ETHUSDT': '0.001', 'BNBUSDT': '0.01', 'LINKUSDT': '0.01',
+        'SOLUSDT': '1', 'XRPUSDT': '1', 'ADAUSDT': '1', 'SUIUSDT': '1',
+        'DOGEUSDT': '1', 'TRXUSDT': '1',
+    }
+
+    def round_qty(self, symbol, qty):
+        """주문 수량을 바이낸스 수량 단위(stepSize)의 배수로 내림 → (문자열, 숫자)
+
+        코드에 적어둔 소수점 표가 실제 규칙과 다르면(예: ADA) 주문이 거절되므로
+        거래소가 알려주는 값을 쓴다. 시장가 주문 단위(MARKET_LOT_SIZE)까지 고려.
+        """
+        from decimal import Decimal, ROUND_DOWN
+        self._load_exchange_info()
+        sc = symbol.replace('/', '')
+        step = Decimal(self._step_cache.get(sc) or self._STEP_FALLBACK.get(sc, '0.001'))
+        q = Decimal(str(qty))
+        q = (q / step).to_integral_value(rounding=ROUND_DOWN) * step
+        q = q.quantize(step) if step < 1 else q.quantize(Decimal('1'))
+        s_ = format(q.normalize(), 'f') if q != 0 else '0'
+        return s_, float(q)
+
+    def min_qty(self, symbol):
+        self._load_exchange_info()
+        sc = symbol.replace('/', '')
+        return float(self._minqty_cache.get(sc) or self._STEP_FALLBACK.get(sc, '0.001'))
+
     def create_order(self, symbol, side, quantity, position_side=None):
-        # 코인별 수량 소수점 자리수 설정 (precision_map)
         symbol_clean = symbol.replace('/', '')
-        
-        # 전체 코인 precision 맵
-        precision_map = {
-            'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'SOLUSDT': 1, 'XRPUSDT': 1,
-            'ADAUSDT': 1, 'DOGEUSDT': 0, 'TRXUSDT': 0, 'SUIUSDT': 1, 'LINKUSDT': 2,
-        }
-        
-        # precision 가져오기 (기본값: 2)
-        precision = precision_map.get(symbol_clean, 2)
-        
-        # 수량 반올림
-        if precision == 0:
-            quantity = int(round(quantity))  # 정수로 반올림
-        else:
-            quantity = round(quantity, precision)
-        
-        # 최소 주문 수량 체크
-        min_qty = 10 ** (-precision) if precision > 0 else 1
-        if quantity < min_qty:
-            print(f"주문 수량 부족: {quantity} < {min_qty}")
+        self._remember_error(None)
+
+        # 🔥 바이낸스 실제 수량 단위로 맞춘다 (코인별 소수점을 코드에 적어두지 않음)
+        qty_str, qty_num = self.round_qty(symbol, quantity)
+        mq = self.min_qty(symbol)
+        if qty_num <= 0 or qty_num < mq:
+            print(f"주문 수량 부족: {quantity} → {qty_str} (최소 {mq})")
+            self._remember_error({'code': 'MIN_QTY',
+                                  'msg': f'수량 {qty_str}이 최소 수량 {mq}보다 작음'})
             return None
-        
+        quantity = qty_str
+
         params = {
             'symbol': symbol_clean,
             'side': side.upper(),
@@ -464,17 +495,38 @@ class BinanceAPI:
     def _load_exchange_info(self):
         """심볼별 가격 tickSize 로드 (최초 1회만 시도, 실패 시 fallback 사용)"""
         if getattr(self, '_tick_cache_loaded', False):
-            return
+            # 성공했으면 끝. 실패했으면(비어 있으면) 5분 뒤 다시 시도
+            if self._tick_cache or time.time() - getattr(self, '_exinfo_try_at', 0) < 300:
+                return
+        self._exinfo_try_at = time.time()
         self._tick_cache_loaded = True
         self._tick_cache = {}
+        self._step_cache = {}     # 수량 단위 (LOT_SIZE / MARKET_LOT_SIZE 중 큰 값)
+        self._minqty_cache = {}   # 최소 주문 수량
         try:
+            from decimal import Decimal
             info = self._request('GET', '/fapi/v1/exchangeInfo')
             if info and 'symbols' in info:
                 for s in info['symbols']:
+                    sym = s['symbol']
                     for f in s.get('filters', []):
-                        if f.get('filterType') == 'PRICE_FILTER':
-                            self._tick_cache[s['symbol']] = f['tickSize']
-                print(f"✅ exchangeInfo 로드: {len(self._tick_cache)}개 심볼 tickSize 캐시")
+                        ft = f.get('filterType')
+                        if ft == 'PRICE_FILTER':
+                            self._tick_cache[sym] = f['tickSize']
+                        elif ft in ('LOT_SIZE', 'MARKET_LOT_SIZE'):
+                            st, mn = f.get('stepSize'), f.get('minQty')
+                            if st and Decimal(st) > 0:
+                                cur = self._step_cache.get(sym)
+                                if cur is None or Decimal(st) > Decimal(cur):
+                                    self._step_cache[sym] = st
+                            if mn and Decimal(mn) > 0:
+                                cur = self._minqty_cache.get(sym)
+                                if cur is None or Decimal(mn) > Decimal(cur):
+                                    self._minqty_cache[sym] = mn
+                print(f"✅ exchangeInfo 로드: {len(self._tick_cache)}개 심볼 (가격·수량 단위)")
+                for c in ('ADAUSDT', 'SUIUSDT', 'SOLUSDT', 'XRPUSDT'):
+                    if c in self._step_cache:
+                        print(f"   {c} 수량 단위 {self._step_cache[c]} / 최소 {self._minqty_cache.get(c)}")
         except Exception as e:
             print(f"⚠️ exchangeInfo 로드 실패 (fallback 사용): {e}")
 
@@ -831,6 +883,42 @@ class TradingBot:
         print(f"[⚡ 즉시진입] {self.config['symbol']} {pos_type} #{seq} "
               f"기준봉={self._fmt_bar(bar_time)} (미확정)")
         return seq
+
+    # ==================== ❌ 주문 거절 사유 표시 ====================
+    ORDER_ERROR_HINTS = {
+        -1111: '수량 소수점 자릿수가 바이낸스 규칙과 다름',
+        -4164: '주문 금액이 최소 금액보다 작음 → 진입금이나 레버리지를 늘리세요',
+        -2019: '증거금(잔고) 부족',
+        -2027: '이 레버리지에서 허용되는 최대 포지션 초과',
+        -4061: '포지션 모드 불일치 → 바이낸스 선물 설정에서 "단방향(One-way) 모드"로 바꾸세요',
+        -1121: '이 서버(테스트넷/메인넷)에 없는 코인',
+        -2015: 'API 키 권한 문제 → 선물 거래 권한, IP 제한 확인',
+        -2014: 'API 키 형식 오류 → 1_config.py의 키 확인',
+        -1021: 'PC 시계가 맞지 않음 → 윈도우 시간 동기화',
+        -4131: '가격 변동이 너무 커서 시장가 주문 제한',
+        'MIN_QTY': '주문 수량이 최소 수량보다 작음 → 진입금이나 레버리지를 늘리세요',
+    }
+
+    def report_order_failure(self, pos_type, qty):
+        """진입 주문이 거절됐을 때 바이낸스가 말한 이유를 봇 로그에 띄운다.
+
+        같은 이유는 5분에 한 번만 표시 (9초마다 재시도하면서 로그가 도배되지 않게).
+        """
+        err = self.api.last_order_error() or {}
+        code = err.get('code')
+        msg = err.get('msg') or '응답 없음 (인터넷 연결 확인)'
+        key = f"{pos_type}:{code}"
+        now = time.time()
+        seen = self.config.setdefault('_order_fail_log', {})
+        if now - seen.get(key, 0) < 300:
+            return
+        seen[key] = now
+        self.log(f"❌ {pos_type} 진입 주문 거절 — 바이낸스: {msg} (코드 {code})", pos_type)
+        hint = self.ORDER_ERROR_HINTS.get(code)
+        if hint:
+            self.log(f"   💡 {hint}", pos_type)
+        self.log(f"   요청 수량 {qty} | 신호가 유지되면 계속 재시도합니다 (같은 오류는 5분마다 표시)", pos_type)
+        print(f"[❌ 주문 거절] {self.config['symbol']} {pos_type} qty={qty} → {code} {msg}")
 
     # ==================== 💸 펀딩비 로그 ====================
     def log_funding_rate(self, pos_type):
@@ -1879,6 +1967,9 @@ class TradingBot:
                                 
                                 # 🔥 진입 성공 시 10초 대기 (중복 완전 차단!)
                                 time.sleep(10)  # 10초 대기
+                            else:
+                                # ❌ 주문 거절 — 이유를 로그로 알린다 (예전엔 조용히 실패했음)
+                                self.report_order_failure(pos_type, qty)
                         
                         except Exception as e:
                             self.log(f"❌ 진입 오류: {str(e)}", pos_type)
@@ -2240,6 +2331,9 @@ class TradingBot:
 
                                         # 10초 대기
                                         time.sleep(10)
+                                    else:
+                                        # ❌ 스위칭 진입 주문 거절 — 이유를 로그로 알린다
+                                        self.report_order_failure('SHORT', qty)
                                     
                                 except Exception as e:
                                     print(f"[{self.config['symbol']}] 스위칭 후 SHORT 진입 실패: {e}")
@@ -2589,6 +2683,9 @@ class TradingBot:
 
                                         # 10초 대기
                                         time.sleep(10)
+                                    else:
+                                        # ❌ 스위칭 진입 주문 거절 — 이유를 로그로 알린다
+                                        self.report_order_failure('LONG', qty)
                                     
                                 except Exception as e:
                                     print(f"[{self.config['symbol']}] 스위칭 후 LONG 진입 실패: {e}")
