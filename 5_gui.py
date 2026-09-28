@@ -1262,7 +1262,7 @@ class BinanceAPI:
 
     TP_CLIENT_PREFIX = 'bottp_'   # 봇이 건 TP 표시 (청산 원인 판별용)
 
-    def create_tp_order(self, symbol, position_side, stop_price, quantity=None):
+    def create_tp_order(self, symbol, position_side, stop_price, quantity=None, client_id=None):
         """🔥 거래소 측 TP 주문 (TAKE_PROFIT_MARKET)
 
         ⚠️ 바이낸스가 2025-12-09 부터 TP/SL 같은 조건부 주문을 '알고 주문'
@@ -1275,7 +1275,7 @@ class BinanceAPI:
         sc = symbol.replace('/', '')
         side = 'SELL' if position_side == 'long' else 'BUY'
         trig = self.round_price(symbol, stop_price)
-        cid = f"{self.TP_CLIENT_PREFIX}{sc[:10]}_{int(time.time() * 1000)}"
+        cid = client_id or f"{self.TP_CLIENT_PREFIX}{sc[:10]}_{int(time.time() * 1000)}"
         base = {'symbol': sc, 'side': side, 'type': 'TAKE_PROFIT_MARKET',
                 'algoType': 'CONDITIONAL', 'triggerPrice': trig,
                 'workingType': 'CONTRACT_PRICE',   # 차트(최종가) 기준 트리거
@@ -1353,6 +1353,7 @@ class BinanceAPI:
             if orders and any(str(o.get('type', '')).startswith('TAKE_PROFIT') for o in orders):
                 return True
             if orders is None or algo is None:
+                self._tp_query_err = self.last_order_error() or {}
                 return None      # 한쪽이라도 조회 실패면 '모름'
             return False
         except Exception as e:
@@ -1999,9 +2000,14 @@ class TradingBot:
             else:
                 tp_price = entry_price * (1 - tp_pct / 100)
             self.config[f'tp_algo_{pos_type.lower()}'] = False
-            result = self.api.create_tp_order(self.config['symbol'], pos_type.lower(), tp_price)
+            # 같은 포지션(방향+진입가)엔 같은 주문번호 → 다시 걸어도 중복으로 쌓이지 않게
+            sc = self.config['symbol'].replace('/', '')
+            cid = f"bottp_{sc[:12]}_{pos_type[0]}{int(round(float(entry_price) * 1e6)) % 10**9}"
+            result = self.api.create_tp_order(self.config['symbol'], pos_type.lower(), tp_price,
+                                              client_id=cid)
             if result:
                 self.config[f'tp_algo_{pos_type.lower()}'] = True
+                self._tp_ok_for = (pos_type, round(float(entry_price), 8))
                 tp_price_str = self.api.round_price(self.config['symbol'], tp_price)
                 self.log(f"   📌 거래소 TP 주문 등록: ${tp_price_str} (도달 시 즉시 청산)", pos_type)
                 print(f"[📌 TP 주문] {self.config['symbol']} {pos_type} → ${tp_price_str}")
@@ -2236,10 +2242,16 @@ class TradingBot:
             return
         side = pos['side']
         existing = self.api.has_open_tp(self.config['symbol'])
-        if existing is not False:          # 있음(True) 또는 조회 실패(None) → 건드리지 않음
-            if existing is True:
-                self._tp_watch_fails = 0
+        if existing is True:
+            self._tp_watch_fails = 0
             return
+        if existing is None:
+            # 대기 주문 조회가 안 됨 → 이 포지션에 이번 실행 중 TP 를 건 적이 있으면 그대로 둔다.
+            # 건 적이 없으면(이어받기 전 포지션 등) 같은 주문번호로 한 번 걸어본다 (중복 방지)
+            if getattr(self, '_tp_ok_for', None) == (side.upper(), round(float(pos['entry_price']), 8)):
+                return
+            err = getattr(self.api, '_tp_query_err', {}) or {}
+            print(f"[🛡️] {self.config['symbol']} 대기 주문 조회 실패 ({err.get('msg', '응답 없음')}) → TP 한 번 걸어봄")
         tp = self.config.get(f'entry_tp_{side}')
         if not tp:
             try:
