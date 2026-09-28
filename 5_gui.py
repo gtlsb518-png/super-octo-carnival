@@ -1632,6 +1632,40 @@ def refund_entry_charge(cfg, side):
         st['total_fee'] = st.get('total_fee', 0) - amt
         st['total_pnl'] = st.get('total_pnl', 0) + amt
 
+# 🪙 프로그램별 코인 (프로그램 1 = 1~10번, 2 = 11~20번 ...)
+# 실제로 돌리는 프로그램 번호 (여기 없는 번호의 코인 포지션은 '관리 안 됨' 경고 대상)
+PROGRAMS_IN_USE = (1, 2)
+PROGRAM_COINS = {
+    1: [  # 1 ~ 10
+        {'symbol': 'BTC/USDT', 'name': 'Bitcoin'},
+        {'symbol': 'ETH/USDT', 'name': 'Ethereum'},
+        {'symbol': 'BNB/USDT', 'name': 'BNB'},
+        {'symbol': 'SOL/USDT', 'name': 'Solana'},
+        {'symbol': 'XRP/USDT', 'name': 'Ripple'},
+        {'symbol': 'ADA/USDT', 'name': 'Cardano'},
+        {'symbol': 'DOGE/USDT', 'name': 'Dogecoin'},
+        {'symbol': 'TRX/USDT', 'name': 'TRON'},
+        {'symbol': 'SUI/USDT', 'name': 'Sui'},
+        {'symbol': 'LINK/USDT', 'name': 'Chainlink'},
+    ],
+    2: [  # 11 ~ 20 — 오래 상장돼 거래량이 많은 무기한 선물
+        {'symbol': 'AVAX/USDT', 'name': 'Avalanche'},
+        {'symbol': 'LTC/USDT', 'name': 'Litecoin'},
+        {'symbol': 'BCH/USDT', 'name': 'Bitcoin Cash'},
+        {'symbol': 'DOT/USDT', 'name': 'Polkadot'},
+        {'symbol': 'XLM/USDT', 'name': 'Stellar'},
+        {'symbol': 'HBAR/USDT', 'name': 'Hedera'},
+        {'symbol': 'ETC/USDT', 'name': 'Ethereum Classic'},  # UNI 대신 (진입 안 돼서 교체)
+        {'symbol': 'NEAR/USDT', 'name': 'NEAR'},
+        {'symbol': 'AAVE/USDT', 'name': 'Aave'},
+        {'symbol': 'ATOM/USDT', 'name': 'Cosmos'},
+    ],
+    3: [  # 21 ~ 30 — 🚧 준비 중 (아직 배포 안 함). 코인 정해지면 여기에 추가
+        {'symbol': 'UNI/USDT', 'name': 'Uniswap'},
+    ],
+}
+
+
 # ==================== 트레이딩 봇 ====================
 class TradingBot:
     def __init__(self, api, coin_config, log_callback, stats_callback, excel_callback=None, bot_type='long', app=None, is_reconnect=False):
@@ -2192,6 +2226,33 @@ class TradingBot:
     def stop(self):
         self.running = False
         
+    def _tp_watch_interval(self):
+        # 다시 걸기가 계속 실패하면 간격을 늘린다 (3분 → 최대 15분)
+        return 180 * min(5, 1 + getattr(self, '_tp_watch_fails', 0))
+
+    def _ensure_exchange_tp(self, pos):
+        """포지션이 있는데 거래소 TP 주문이 없으면 다시 건다 (프로그램이 꺼져도 익절되게)"""
+        if self.config.get('exit_mode', 'tp') == 'switch':
+            return
+        side = pos['side']
+        existing = self.api.has_open_tp(self.config['symbol'])
+        if existing is not False:          # 있음(True) 또는 조회 실패(None) → 건드리지 않음
+            if existing is True:
+                self._tp_watch_fails = 0
+            return
+        tp = self.config.get(f'entry_tp_{side}')
+        if not tp:
+            try:
+                df = self.api.get_klines(self.config['symbol'], self.config['timeframe'])
+                tp = self.get_dynamic_tp(df) if df is not None else None
+            except Exception:
+                tp = None
+            tp = tp or self.config.get('tp', 1.2)
+            self.config[f'entry_tp_{side}'] = tp
+        self.log(f"🛡️ 거래소 익절 주문이 없어서 다시 겁니다 (TP {tp}%)", side.upper())
+        ok = self.place_exchange_tp(side.upper(), pos['entry_price'], tp)
+        self._tp_watch_fails = 0 if ok else getattr(self, '_tp_watch_fails', 0) + 1
+
     def _takeover_position(self, pos):
         """🔄 바이낸스에 열려 있는 포지션을 청산하지 않고 그대로 이어받는다.
 
@@ -2452,6 +2513,17 @@ class TradingBot:
                     self.config['_cached_position'] = current_position
                 elif current_position is False:
                     self.config['_cached_position'] = None
+
+                # 🛡️ 거래소 익절 주문 감시: 포지션이 있는데 TP 주문이 없으면 다시 건다 (3분마다)
+                if (current_position and isinstance(current_position, dict)
+                        and current_position.get('side') == self.bot_type
+                        and not self.config.get('is_closing')
+                        and time.time() - getattr(self, '_tp_watch_at', 0) > self._tp_watch_interval()):
+                    self._tp_watch_at = time.time()
+                    try:
+                        self._ensure_exchange_tp(current_position)
+                    except Exception as e:
+                        print(f"[🛡️ TP 감시 오류] {self.config['symbol']}: {e}")
                 
                 # 🔥 신호는 항상 업데이트 (포지션 유무 무관!)
                 # 📊 현재 신호 - ut_position 사용 (현재 UT Bot 상태)
@@ -3719,35 +3791,7 @@ class App:
         """프로그램 번호에 따라 10개 코인 자동 추가"""
         
         # 🪙 프로그램별 담당 코인 (서로 겹치지 않게 — 한 계정에서 동시에 돌리기 때문)
-        program_coins = {
-            1: [  # 1 ~ 10
-                {'symbol': 'BTC/USDT', 'name': 'Bitcoin'},
-                {'symbol': 'ETH/USDT', 'name': 'Ethereum'},
-                {'symbol': 'BNB/USDT', 'name': 'BNB'},
-                {'symbol': 'SOL/USDT', 'name': 'Solana'},
-                {'symbol': 'XRP/USDT', 'name': 'Ripple'},
-                {'symbol': 'ADA/USDT', 'name': 'Cardano'},
-                {'symbol': 'DOGE/USDT', 'name': 'Dogecoin'},
-                {'symbol': 'TRX/USDT', 'name': 'TRON'},
-                {'symbol': 'SUI/USDT', 'name': 'Sui'},
-                {'symbol': 'LINK/USDT', 'name': 'Chainlink'},
-            ],
-            2: [  # 11 ~ 20 — 오래 상장돼 거래량이 많은 무기한 선물
-                {'symbol': 'AVAX/USDT', 'name': 'Avalanche'},
-                {'symbol': 'LTC/USDT', 'name': 'Litecoin'},
-                {'symbol': 'BCH/USDT', 'name': 'Bitcoin Cash'},
-                {'symbol': 'DOT/USDT', 'name': 'Polkadot'},
-                {'symbol': 'XLM/USDT', 'name': 'Stellar'},
-                {'symbol': 'HBAR/USDT', 'name': 'Hedera'},
-                {'symbol': 'ETC/USDT', 'name': 'Ethereum Classic'},  # UNI 대신 (진입 안 돼서 교체)
-                {'symbol': 'NEAR/USDT', 'name': 'NEAR'},
-                {'symbol': 'AAVE/USDT', 'name': 'Aave'},
-                {'symbol': 'ATOM/USDT', 'name': 'Cosmos'},
-            ],
-            3: [  # 21 ~ 30 — 🚧 준비 중 (아직 배포 안 함). 코인 정해지면 여기에 추가
-                {'symbol': 'UNI/USDT', 'name': 'Uniswap'},
-            ],
-        }
+        program_coins = PROGRAM_COINS
 
         # 프로그램 번호 선택
         prog_num = self.select_program_number()
@@ -4913,6 +4957,29 @@ class App:
             rest = sq + cur['qty']
             st['open'][k] = _new_open('LONG' if rest > 0 else 'SHORT', rest, fee * (1 - close_part), 0.0, t, px)
 
+    def _warn_unmanaged_positions(self):
+        """어느 프로그램의 코인 목록에도 없는 포지션 = 봇이 관리 안 함 (익절 주문도 없음) → 알려준다"""
+        if time.time() - self.__dict__.get('_unmanaged_at', 0) < 600:   # 10분마다
+            return
+        self._unmanaged_at = time.time()
+        positions = self.api._request('GET', '/fapi/v2/positionRisk', signed=True, quiet=True)
+        if not positions:
+            return
+        known = {c['symbol'].replace('/', '') for n, lst in PROGRAM_COINS.items()
+                 if n in PROGRAMS_IN_USE for c in lst}
+        known |= {c['symbol'].replace('/', '') for c in self.coins}
+        warned = self.__dict__.setdefault('_unmanaged_warned', {})
+        for p in positions:
+            try:
+                amt = float(p.get('positionAmt', 0))
+            except (TypeError, ValueError):
+                continue
+            sym = p.get('symbol', '')
+            if amt and sym not in known and time.time() - warned.get(sym, 0) > 3600:
+                warned[sym] = time.time()
+                print(f"⚠️ {sym} 포지션({amt:+g}개)은 어느 봇도 관리하지 않습니다 — 익절 주문도 없어요. "
+                      f"바이낸스에서 직접 정리하세요.")
+
     def _report_big_trades(self, S):
         """손익이 큰 거래는 콘솔에 자세히 (시간·수량·가격). 강제청산 같은 일을 바로 알아보게."""
         seen = self.__dict__.setdefault('_big_reported', set())
@@ -5026,6 +5093,10 @@ class App:
             self._report_big_trades(S)
         except Exception as e:
             print(f"[🔎 큰 거래 보고 오류] {e}")
+        try:
+            self._warn_unmanaged_positions()
+        except Exception as e:
+            print(f"[⚠️ 포지션 점검 오류] {e}")
 
         if first_time and ok_all:
             self._stats_ok = True
