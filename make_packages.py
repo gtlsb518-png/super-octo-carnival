@@ -4,7 +4,7 @@
   python make_packages.py
 
   dist/프로그램1_코인1-10.zip   → 프로그램1 폴더 (BTC ETH BNB SOL XRP ADA DOGE TRX SUI LINK)
-  dist/프로그램2_코인11-20.zip  → 프로그램2 폴더 (AVAX LTC BCH DOT XLM HBAR UNI NEAR AAVE ATOM)
+  dist/프로그램2_코인11-20.zip  → 프로그램2 폴더 (AVAX LTC BCH DOT XLM HBAR ETC NEAR AAVE ATOM)
 
 두 프로그램의 파일은 전부 같고, 9_main.py 의 DEFAULT_PROGRAM 한 줄만 다르다.
 """

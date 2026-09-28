@@ -453,7 +453,7 @@ class BinanceAPI:
         'DOGEUSDT': '1', 'TRXUSDT': '1',
         # 프로그램 #2
         'AVAXUSDT': '1', 'LTCUSDT': '0.1', 'BCHUSDT': '0.01', 'DOTUSDT': '1', 'XLMUSDT': '1',
-        'HBARUSDT': '1', 'UNIUSDT': '1', 'NEARUSDT': '1', 'AAVEUSDT': '0.1', 'ATOMUSDT': '1',
+        'HBARUSDT': '1', 'ETCUSDT': '0.1', 'NEARUSDT': '1', 'AAVEUSDT': '0.1', 'ATOMUSDT': '1',
     }
 
     def is_tradable(self, symbol):
@@ -584,7 +584,7 @@ class BinanceAPI:
         'TRXUSDT': '0.00001', 'SUIUSDT': '0.0001', 'LINKUSDT': '0.001',
         # 프로그램 #2 (실제 단위의 배수가 되도록 일부러 거칠게)
         'AVAXUSDT': '0.01', 'LTCUSDT': '0.1', 'BCHUSDT': '0.1', 'DOTUSDT': '0.001', 'XLMUSDT': '0.0001',
-        'HBARUSDT': '0.0001', 'UNIUSDT': '0.001', 'NEARUSDT': '0.001', 'AAVEUSDT': '0.1', 'ATOMUSDT': '0.001',
+        'HBARUSDT': '0.0001', 'ETCUSDT': '0.01', 'NEARUSDT': '0.001', 'AAVEUSDT': '0.1', 'ATOMUSDT': '0.001',
     }
 
     def round_price(self, symbol, price):
@@ -2964,7 +2964,7 @@ class App:
                 {'symbol': 'DOT/USDT', 'name': 'Polkadot'},
                 {'symbol': 'XLM/USDT', 'name': 'Stellar'},
                 {'symbol': 'HBAR/USDT', 'name': 'Hedera'},
-                {'symbol': 'UNI/USDT', 'name': 'Uniswap'},
+                {'symbol': 'ETC/USDT', 'name': 'Ethereum Classic'},  # UNI 대신 (진입 안 돼서 교체)
                 {'symbol': 'NEAR/USDT', 'name': 'NEAR'},
                 {'symbol': 'AAVE/USDT', 'name': 'Aave'},
                 {'symbol': 'ATOM/USDT', 'name': 'Cosmos'},
