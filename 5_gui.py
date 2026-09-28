@@ -382,7 +382,7 @@ class BinanceAPI:
 
     def get_klines(self, symbol, interval, limit=200):
         """차트 데이터는 항상 메인넷에서 가져옴 (정확한 가격)"""
-        cache_key = f"{symbol}_{interval}"
+        cache_key = f"{symbol}_{interval}_{limit}"   # 개수도 구분 (limit=1 결과를 봇이 받아가던 문제)
         
         # 🔥 캐시 확인 (같은 코인의 LONG/SHORT 봇이 공유)
         with self._klines_cache_lock:
@@ -6038,8 +6038,13 @@ class App:
             
             df = self.api.get_klines(coin['symbol'], coin['timeframe'])
             if df is not None and len(df) >= 60:
-                # 🔥 완성된 봉만 사용 (copy 제거 - 성능 향상!)
-                df_closed = df[:-1]
+                # 🔥 화면도 봇과 '같은 봉'으로 계산한다.
+                #    (예전엔 화면은 항상 완성봉, 봇은 즉시 모드라 진행 중 봉을 봐서
+                #     화면엔 '진입 조건 충족'인데 봇은 안 들어가는 일이 생겼다)
+                if coin.get('signal_mode', 'live') == 'live':
+                    df_closed = df
+                else:
+                    df_closed = df[:-1]
                 
                 signals = Indicators.get_signals(df_closed, coin['ut_sens'], coin['ut_atr'],
                                                 coin['ema_fast'], coin['ema_slow'])
