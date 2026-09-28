@@ -67,8 +67,9 @@ def load_settings():
         print("=" * 60)
         print(f"🔑 설정 파일: 1_config.py")
         print(f"   모드: {mode}   |   API Key: {key[:6]}...{key[-4:] if len(key) > 10 else ''}")
-        if not key or not getattr(_config, 'API_SECRET', ''):
-            print("   ❌ API 키가 비어 있습니다! 1_config.py에 키를 입력하세요.")
+        if (not key or not getattr(_config, 'API_SECRET', '')
+                or key.startswith('여기에') or str(getattr(_config, 'API_SECRET', '')).startswith('여기에')):
+            print("   ❌ API 키가 비어 있습니다! 1_config.py 에 내 테스트넷(또는 메인넷) 키를 입력하세요.")
         print("=" * 60)
         return {'api_key': _config.API_KEY, 'api_secret': _config.API_SECRET,
                 'testnet': _config.TESTNET, 'fee_rate': _config.FEE_RATE}
@@ -84,6 +85,17 @@ def save_settings(s):
         print(f"설정 저장 실패: {e}")
 
 _settings = load_settings()
+
+
+def key_hint():
+    k = _settings.get('api_key', '') or ''
+    if k.startswith('여기에') or len(k) <= 10:
+        return '(비어 있음 — 1_config.py 에 키 입력 필요)'
+    return f"{k[:6]}…{k[-4:]}"
+
+
+def key_source():
+    return 'settings.json' if os.path.exists(SETTINGS_FILE) else '1_config.py'
 
 # 📊 통계 기준일 (1_config.py 의 STATS_START_DATE = "2026-09-01" 또는 "2026-09-28 22:30").
 #    비워두면 처음 켠 시각부터 → bot_stats.json 에 기억. 그 파일을 지우고 켜면 다시 '지금부터' (초기화).
@@ -3641,7 +3653,10 @@ class App:
         
         CustomMessageBox.showinfo("API 연결", 
             f"✅ 연결 성공!\n\n"
+            f"🔑 API 키: {key_hint()}  ({key_source()})\n"
             f"💰 잔고: ${balance:,.2f} USDT\n"
+            f"   ↑ 바이낸스 {mode} 화면의 잔고와 같은지 확인하세요\n"
+            f"     (다르면 다른 계정의 키로 주문하는 중입니다)\n"
             f"🔧 주문 모드: {mode}\n"
             f"📊 차트 데이터: {chart_source}\n\n"
             f"🔗 선물 차트 확인:\n"
@@ -3677,7 +3692,7 @@ class App:
         """프로그램 번호 (9_main.py 의 DEFAULT_PROGRAM: 프로그램1 폴더=1, 프로그램2 폴더=2)"""
         prog_num = PROGRAM_NUMBER
         self.program_number = prog_num
-        self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}")
+        self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}  |  키 {key_hint()}")
         return prog_num
     
     def add_default_coins(self):

@@ -29,6 +29,11 @@ def build(num, name):
         for f in files:
             with open(os.path.join(BASE, f), encoding='utf-8') as fh:
                 text = fh.read()
+            if f == '1_config.py':
+                # 🔑 저장소의 키를 압축에 넣지 않는다 (덮어쓰면 다른 계정으로 주문이 나가던 문제)
+                text, n1 = re.subn(r'^API_KEY = ".*"', 'API_KEY = "여기에_API_키"', text, flags=re.M)
+                text, n2 = re.subn(r'^API_SECRET = ".*"', 'API_SECRET = "여기에_시크릿_키"', text, flags=re.M)
+                assert n1 == 1 and n2 == 1, 'API 키 줄을 못 찾음'
             if f == '9_main.py':
                 text, n = re.subn(r'^DEFAULT_PROGRAM = \d+', f'DEFAULT_PROGRAM = {num}', text, flags=re.M)
                 assert n == 1, 'DEFAULT_PROGRAM 줄을 못 찾음'
