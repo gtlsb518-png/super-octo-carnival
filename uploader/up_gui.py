@@ -89,16 +89,18 @@ SPECS = [
         "key": "yts", "name": "유튜브 (숏)", "save": "youtube_short", "glyph": "▶",
         "tag": "숏폼", "accent": YT, "accent_on": YT_ON, "site": "youtube",
         "thumb_label": "썸네일", "has_tags": True, "has_pin": True,
-        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (116, 65),
-        "note": "일부공개 게시 → 댓글 고정 → 예약 전환 · 태그는 쉼표로 구분",
+        "has_kids": True, "privacy": None, "ratio": (9, 16), "box": (56, 100),
+        "cover_tool": False,
+        "note": "일부공개 게시 → 댓글 고정 → 예약 전환 · 썸네일은 9:16",
         "btn": "숏 업로드",
     },
     {
         "key": "ytl", "name": "유튜브 (롱)", "save": "youtube_long", "glyph": "▶",
         "tag": "롱폼", "accent": YTL, "accent_on": YTL_ON, "site": "youtube",
         "thumb_label": "썸네일", "has_tags": True, "has_pin": True,
-        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (116, 65),
-        "note": "진행 방식은 숏과 같고 내용만 따로 · 태그는 쉼표로 구분",
+        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (133, 75),
+        "cover_tool": False,
+        "note": "진행 방식은 숏과 같고 내용만 따로 · 썸네일은 16:9",
         "btn": "롱 업로드",
     },
     {
@@ -107,8 +109,8 @@ SPECS = [
         "thumb_label": "커버 이미지", "has_tags": False, "has_pin": False,
         "has_kids": False,
         "privacy": [("전체 공개", "public"), ("친구만", "friends"), ("나만 보기", "private")],
-        "ratio": (9, 16), "box": (61, 108),
-        "note": "해시태그는 제목·상세정보에 #태그로 직접 · 예: 카페투어 #카페",
+        "ratio": (9, 16), "box": (56, 100), "cover_tool": True,
+        "note": "해시태그는 제목·상세정보에 #태그로 직접 · 커버는 위치 조정 가능",
         "btn": "틱톡 업로드",
     },
 ]
@@ -218,6 +220,182 @@ class StatusPill(tk.Canvas):
     def set(self, text, color):
         self._text, self._color = text, color
         self._draw()
+
+
+class CoverDialog(tk.Toplevel):
+    """
+    커버(썸네일) 위치 조정 창.
+
+    틱톡 커버는 1080x1920(9:16) 이다. 4:3 처럼 비율이 다른 그림을 그냥 올리면
+    틱톡이 알아서 잘라버리므로, 여기서 미리 원하는 위치로 잘라 9:16 파일을 만든다.
+    (틱톡 업로드 화면의 드래그 단계를 우리가 대신 해주는 셈)
+
+    ※ 프로필 목록에서는 위아래 약 15% 가 가려지므로 안내선을 같이 보여준다.
+    """
+
+    VIEW_W, VIEW_H = 330, 586          # 미리보기 크기 (9:16)
+    GUIDE = 0.15                       # 프로필에서 가려지는 비율
+
+    def __init__(self, parent, path, out_size=(1080, 1920), title="커버 위치 조정"):
+        super().__init__(parent)
+        self.title(title)
+        self.configure(bg=CARD)
+        self.resizable(False, False)
+        self.result = None
+
+        self.src = Image.open(path).convert("RGB")
+        self.src_path = path
+        self.out_w, self.out_h = out_size
+        self.VIEW_W = int(self.VIEW_H * self.out_w / self.out_h)
+
+        self.scale = 1.0
+        self.ox = self.oy = 0.0
+        self._drag = None
+
+        self._build(parent)
+        self.fill()                    # 처음엔 '채우기'
+        self.transient(parent)
+        self._center_on(parent)
+        self.grab_set()
+        self.wait_window(self)
+
+    def _center_on(self, parent):
+        """부모 창 가운데에 띄운다 (구석에 뜨면 잘려 보임)."""
+        self.update_idletasks()
+        try:
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+        except Exception:
+            return
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = max(0, px + (pw - w) // 2)
+        y = max(0, py + (ph - h) // 2)
+        self.geometry(f"+{x}+{y}")
+
+    # ---------- 화면 ----------
+
+    def _build(self, parent):
+        wrap = tk.Frame(self, bg=CARD)
+        wrap.pack(fill="both", expand=True, padx=16, pady=14)
+
+        tk.Label(wrap, text="그림을 끌어서 위치를 잡으세요 · 휠로 확대/축소",
+                 bg=CARD, fg=MUTED, font=(FONT, 9)).pack(anchor="w", pady=(0, 8))
+
+        self.canvas = tk.Canvas(wrap, width=self.VIEW_W, height=self.VIEW_H,
+                                bg="#1b1f27", highlightthickness=1,
+                                highlightbackground=LINE, cursor="fleur")
+        self.canvas.pack()
+        self.img_id = self.canvas.create_image(0, 0, anchor="nw")
+
+        # 프로필에서 가려지는 구간 안내선
+        g = int(self.VIEW_H * self.GUIDE)
+        for y in (g, self.VIEW_H - g):
+            self.canvas.create_line(0, y, self.VIEW_W, y,
+                                    fill="#ffd166", dash=(6, 4), width=1)
+        self.canvas.create_text(8, g - 10, anchor="w", fill="#ffd166",
+                                font=(FONT, 8), text="▲ 프로필 목록에서 가려짐")
+        self.canvas.create_text(8, self.VIEW_H - g + 12, anchor="w", fill="#ffd166",
+                                font=(FONT, 8), text="▼ 프로필 목록에서 가려짐")
+
+        self.canvas.bind("<Button-1>", self._press)
+        self.canvas.bind("<B1-Motion>", self._move)
+        self.canvas.bind("<MouseWheel>", self._wheel)
+        self.canvas.bind("<Button-4>", self._wheel)
+        self.canvas.bind("<Button-5>", self._wheel)
+
+        self.info = tk.Label(wrap, bg=CARD, fg=MUTED, font=(FONT, 8), justify="left")
+        self.info.pack(anchor="w", pady=(8, 0))
+
+        row = tk.Frame(wrap, bg=CARD)
+        row.pack(fill="x", pady=(10, 0))
+        for text, cmd, w in [("채우기", self.fill, 64), ("전체 보기", self.fit, 74),
+                             ("가운데", self.center, 64)]:
+            RoundButton(row, text, cmd, fill=CHIP, hover=CHIP_ON, fg=CHIP_INK,
+                        font=(FONT, 9, "bold"), radius=8, height=30,
+                        width=w).pack(side="left", padx=(0, 6))
+
+        row2 = tk.Frame(wrap, bg=CARD)
+        row2.pack(fill="x", pady=(10, 0))
+        RoundButton(row2, "취소", self.destroy, fill=CHIP, hover=CHIP_ON, fg=CHIP_INK,
+                    font=(FONT, 10, "bold"), radius=8, height=38,
+                    width=90).pack(side="right", padx=(6, 0))
+        RoundButton(row2, "이 위치로 저장", self.save, fill=BOTH, hover=BOTH_ON,
+                    font=(FONT, 10, "bold"), radius=8, height=38).pack(
+            side="right", fill="x", expand=True)
+
+    # ---------- 조작 ----------
+
+    def _press(self, e):
+        self._drag = (e.x, e.y, self.ox, self.oy)
+
+    def _move(self, e):
+        if not self._drag:
+            return
+        x0, y0, ox0, oy0 = self._drag
+        self.ox = ox0 + (e.x - x0)
+        self.oy = oy0 + (e.y - y0)
+        self._render()
+
+    def _wheel(self, e):
+        up = getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4
+        self.scale *= 1.08 if up else 1 / 1.08
+        self.scale = max(0.05, min(self.scale, 8.0))
+        self._render()
+
+    def fill(self):
+        """짧은 쪽을 기준으로 꽉 채운다 (남는 부분은 잘림)."""
+        w, h = self.src.size
+        self.scale = max(self.VIEW_W / w, self.VIEW_H / h)
+        self.center()
+
+    def fit(self):
+        """그림 전체가 보이게 맞춘다 (위아래에 여백 생김)."""
+        w, h = self.src.size
+        self.scale = min(self.VIEW_W / w, self.VIEW_H / h)
+        self.center()
+
+    def center(self):
+        self.ox = self.oy = 0.0
+        self._render()
+
+    # ---------- 그리기 ----------
+
+    def _compose(self, out_w, out_h):
+        """현재 위치·배율 그대로 out_w x out_h 그림을 만든다."""
+        k = out_w / self.VIEW_W
+        w, h = self.src.size
+        dw = max(1, int(round(w * self.scale * k)))
+        dh = max(1, int(round(h * self.scale * k)))
+        disp = self.src.resize((dw, dh), Image.LANCZOS)
+
+        frame = Image.new("RGB", (out_w, out_h), (17, 17, 17))
+        x = (out_w - dw) // 2 + int(round(self.ox * k))
+        y = (out_h - dh) // 2 + int(round(self.oy * k))
+        frame.paste(disp, (x, y))
+        return frame
+
+    def _render(self):
+        frame = self._compose(self.VIEW_W, self.VIEW_H)
+        self.photo = ImageTk.PhotoImage(frame)
+        self.canvas.itemconfig(self.img_id, image=self.photo)
+        self.canvas.tag_lower(self.img_id)
+
+        w, h = self.src.size
+        self.info.config(
+            text=f"원본 {w}×{h} · 저장 크기 {self.out_w}×{self.out_h} · 배율 {self.scale*100:.0f}%")
+
+    # ---------- 저장 ----------
+
+    def save(self):
+        base, _ = os.path.splitext(self.src_path)
+        out = f"{base}_커버{self.out_w}x{self.out_h}.png"
+        try:
+            self._compose(self.out_w, self.out_h).save(out)
+        except Exception as e:
+            messagebox.showerror("저장 실패", str(e), parent=self)
+            return
+        self.result = out
+        self.destroy()
 
 
 class App(tk.Tk):
@@ -370,7 +548,7 @@ class App(tk.Tk):
             card,
             "①은 크롬을 완전히 종료한 뒤 한 번만 · ③은 열려 있는 화면 하나를, "
             "④는 업로드 과정을 따라가며 여러 화면을 자동 진단합니다 (게시는 하지 않음)",
-        ).pack(anchor="w", padx=18, pady=(8, 10))
+        ).pack(anchor="w", padx=18, pady=(6, 8))
 
     # ---------- 동시 업로드 ----------
 
@@ -588,10 +766,54 @@ class App(tk.Tk):
                        text="이미지를 고르면\n미리보기")
         img.pack(expand=True)
 
-        info = tk.Label(wrap, bg=CARD, fg=MUTED, font=(FONT, 8), justify="left")
-        info.pack(side="left", padx=(12, 0), anchor="n")
+        side = tk.Frame(wrap, bg=CARD)
+        side.pack(side="left", padx=(12, 0), anchor="n")
+
+        info = tk.Label(side, bg=CARD, fg=MUTED, font=(FONT, 8), justify="left")
+        info.pack(anchor="w")
+
+        if spec.get("cover_tool"):
+            self._chip(side, "위치 조정",
+                       lambda k=spec["key"]: self._open_cover_tool(k),
+                       width=76).pack(anchor="w", pady=(6, 0))
 
         s["_preview"] = (img, info, bw, bh, spec["ratio"])
+
+    def _open_cover_tool(self, key):
+        """커버를 9:16 로 잘라 쓸 수 있게 위치 조정 창을 연다."""
+        s = self.secs[key]
+        spec = s["spec"]
+
+        if Image is None:
+            messagebox.showerror("미리보기 불가",
+                                 "pillow 가 설치되지 않아 위치 조정을 쓸 수 없습니다.\n"
+                                 "pip install pillow 로 설치하세요.")
+            return
+
+        # 이미 한 번 조정했다면 원본으로 다시 연다
+        src = (s.get("_cover_src") or "").strip() or s["thumb"].get().strip()
+        if not src:
+            messagebox.showerror("입력 오류",
+                                 f"{spec['thumb_label']} 파일을 먼저 고르세요.")
+            return
+        if not os.path.exists(src):
+            messagebox.showerror("입력 오류", f"파일이 없습니다:\n{src}")
+            return
+
+        rw, rh = spec["ratio"]
+        out = (1080, 1920) if (rw, rh) == (9, 16) else (1920, 1080)
+
+        try:
+            dlg = CoverDialog(self, src, out_size=out,
+                              title=f"{spec['name']} · {spec['thumb_label']} 위치 조정")
+        except Exception as e:
+            messagebox.showerror("열기 실패", str(e))
+            return
+
+        if dlg.result:
+            s["_cover_src"] = src
+            s["thumb"].set(dlg.result)
+            self.log(f"✔ 커버를 {out[0]}×{out[1]} 로 만들었습니다: {os.path.basename(dlg.result)}")
 
     def _update_preview(self, s):
         """썸네일/커버 파일을 읽어 실제 모습과 비율을 보여준다."""
@@ -641,7 +863,7 @@ class App(tk.Tk):
         box = tk.Frame(card, bg=CARD)
         box.pack(fill="both", expand=True, padx=18, pady=(0, 12))
 
-        self.log_box = tk.Text(box, width=1, height=5, wrap="word",
+        self.log_box = tk.Text(box, width=1, height=4, wrap="word",
                                bg=LOG_BG, fg=LOG_FG, insertbackground=LOG_FG,
                                font=(MONO, 9), state="disabled",
                                relief="flat", bd=0, padx=14, pady=10,
@@ -762,6 +984,8 @@ class App(tk.Tk):
             d["tags"] = s["tags"].get()
         if "privacy" in s:
             d["privacy"] = s["privacy"].get()
+        if s.get("_cover_src"):
+            d["cover_src"] = s["_cover_src"]
         if "pin" in s:
             d["pin_comment"] = s["pin"].get("1.0", "end").rstrip("\n")
         if "kids" in s:
@@ -781,6 +1005,8 @@ class App(tk.Tk):
             s["tags"].set(data.get("tags", ""))
         if "privacy" in s and data.get("privacy"):
             s["privacy"].set(data["privacy"])
+        if data.get("cover_src"):
+            s["_cover_src"] = data["cover_src"]
         if "pin" in s:
             s["pin"].delete("1.0", "end")
             s["pin"].insert("1.0", data.get("pin_comment", ""))
