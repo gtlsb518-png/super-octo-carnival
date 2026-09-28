@@ -73,6 +73,15 @@ tkinter가 없는 리눅스에서는 `sudo apt-get install python3-tk`로 설치
    ATOM/USDT  단위 0.01   최소 0.01   호가 0.001    → 33.33개 = 150.0 USDT ✅
 ```
 
+### 🔌 웹소켓 (`WEBSOCKET_MODE`)
+
+- `off` = 조회(REST)만 / `shadow`(기본) = 웹소켓은 비교만, 매매는 조회 / `on` = 차트(kline 스트림, 메인넷 `/market`)와
+  계좌 알림(user data stream, `/private`)을 웹소켓으로 받음
+- `on` 에서 봇 코드는 그대로이고 `get_klines`·포지션 캐시만 웹소켓 값을 씀 → 프로그램당 분당 약 600 → 약 100
+- 끊김: 자동 재접속 + 조회로 대체(15초 캐시), 재접속 시 빠진 봉을 조회로 채움, listenKey 30분 연장·만료 시 재발급
+- 모든 모드에서 응답 헤더 `X-MBX-USED-WEIGHT-1M`(IP 전체 사용량)을 보고 많으면 조회 간격을 자동으로 늘림
+- 청산 주문은 모두 `reduceOnly` (거래소 TP 와 동시에 나가도 반대 포지션이 안 열림)
+
 ### 📒 엑셀 거래 기록 (`trade_history.xlsx`)
 
 | 시트 | 내용 | 값의 출처 |

@@ -193,8 +193,462 @@ class CustomMessageBox:
         top.wait_window()
         return result[0]
 
+# ==================== 🔌 웹소켓 (차트·계좌 실시간 수신) ====================
+# 1_config.py 의 WEBSOCKET_MODE
+#   "off"    : 지금까지처럼 조회(REST)만 사용
+#   "shadow" : 웹소켓을 켜서 받기만 하고, 판단은 조회 방식이 한다 (값이 같은지 비교해서 콘솔에 보고)
+#   "on"     : 차트·포지션 변화를 웹소켓으로 받는다 → API 사용량이 크게 줄어 프로그램을 여러 개 돌릴 수 있음
+#              끊기면 자동 재접속, 그동안은 조회 방식으로 자동 대체
+try:
+    WEBSOCKET_MODE = str(getattr(importlib.import_module('1_config'), 'WEBSOCKET_MODE', 'shadow')).strip().lower()
+except Exception:
+    WEBSOCKET_MODE = 'shadow'
+if WEBSOCKET_MODE not in ('off', 'shadow', 'on'):
+    print(f"⚠️ WEBSOCKET_MODE='{WEBSOCKET_MODE}' 는 없는 값 → 'shadow' 로 실행")
+    WEBSOCKET_MODE = 'shadow'
+
+WS_AVAILABLE = False
+if WEBSOCKET_MODE != 'off':
+    try:
+        import websocket  # websocket-client
+        WS_AVAILABLE = True
+    except ImportError:
+        try:
+            import subprocess, sys as _sys
+            print("📦 웹소켓 라이브러리(websocket-client) 설치 중...")
+            subprocess.check_call([_sys.executable, '-m', 'pip', 'install', '-q', 'websocket-client'],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+            import websocket
+            WS_AVAILABLE = True
+            print("   ✅ 설치 완료")
+        except Exception as _e:
+            print(f"⚠️ 웹소켓 라이브러리 설치 실패({_e}) → 조회 방식만 사용합니다")
+            print("   수동 설치: pip install websocket-client")
+
+_INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
+                '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
+                '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000}
+
+
+class WSConn:
+    """끊기면 알아서 다시 붙는 웹소켓 연결 하나.
+
+    urls_fn() 이 돌려주는 주소 후보를 차례로 쓴다. 붙었는데 아무것도 안 오면 다음 후보로.
+    바이낸스가 24시간마다 끊는 것, 인터넷 끊김 모두 1→2→4…30초 간격으로 재접속.
+    """
+
+    def __init__(self, name, urls_fn, on_message, on_open=None):
+        self.name, self.urls_fn, self.on_message, self.on_open = name, urls_fn, on_message, on_open
+        self.connected = False
+        self.last_msg = 0.0
+        self.msgs = 0
+        self.url_idx = 0
+        self.cur_url = None
+        self.reconnects = 0
+        self.last_err = None
+        self._ws = None
+        self._stop = False
+        self._thread = None
+
+    def start(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._loop, daemon=True, name=f"ws-{self.name}")
+            self._thread.start()
+
+    def stop(self):
+        self._stop = True
+        self.close()
+
+    def close(self):
+        try:
+            if self._ws is not None:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def rotate(self):
+        """지금 주소가 안 맞는 것 같을 때 다음 후보로"""
+        self.url_idx += 1
+        self.close()
+
+    def healthy(self, max_silence=None):
+        if not self.connected:
+            return False
+        return max_silence is None or (time.time() - self.last_msg) < max_silence
+
+    def _loop(self):
+        backoff = 1
+        while not self._stop:
+            try:
+                urls = self.urls_fn() or []
+            except Exception as e:
+                urls, self.last_err = [], str(e)
+            if not urls:
+                time.sleep(min(backoff, 30)); backoff = min(backoff * 2, 30)
+                continue
+            url = urls[self.url_idx % len(urls)]
+            got = {'open': False, 'n': 0}
+
+            def _open(ws):
+                got['open'] = True
+                self.connected = True
+                self.cur_url = url
+                self.last_msg = time.time()
+                if self.on_open:
+                    try:
+                        self.on_open()
+                    except Exception as e:
+                        print(f"[🔌 {self.name}] 시작 처리 오류: {e}")
+
+            def _msg(ws, raw):
+                got['n'] += 1
+                self.msgs += 1
+                self.last_msg = time.time()
+                try:
+                    self.on_message(raw)
+                except Exception as e:
+                    print(f"[🔌 {self.name}] 메시지 처리 오류: {e}")
+
+            def _err(ws, e):
+                self.last_err = str(e)
+
+            def _close(ws, *a):
+                self.connected = False
+
+            try:
+                self._ws = websocket.WebSocketApp(url, on_open=_open, on_message=_msg,
+                                                  on_error=_err, on_close=_close)
+                # 바이낸스가 3분마다 ping → 라이브러리가 자동 pong. 우리도 60초마다 ping.
+                self._ws.run_forever(ping_interval=60, ping_timeout=20)
+            except Exception as e:
+                self.last_err = str(e)
+            self.connected = False
+            if self._stop:
+                break
+            self.reconnects += 1
+            if got['n'] > 0:
+                backoff = 1                 # 잘 받다가 끊긴 것 → 같은 주소로 바로 재접속
+            elif not got['open']:
+                self.url_idx += 1           # 접속 자체가 안 됨 → 다음 후보 주소
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+
+class KlineFeed:
+    """차트(봉)를 웹소켓으로 받아 코인별로 들고 있는다. 차트는 항상 메인넷."""
+
+    KEEP = 500          # 코인당 들고 있을 봉 개수
+    STALE_SEC = 15      # 이 시간 동안 아무 메시지도 없으면 '끊김'으로 본다
+
+    def __init__(self, api, pairs_fn):
+        self.api = api
+        self.pairs_fn = pairs_fn            # [(symbol 'BTC/USDT', interval '1h'), ...]
+        self.lock = threading.Lock()
+        self.rows = {}                      # (SYM, iv) -> [[t_ms, o, h, l, c, v], ...] 시간순
+        self.need_seed = set()
+        self.pairs = set()
+        self.dirty = {}
+        self.df_cache = {}
+        self.cmp = {'checks': 0, 'closed_bad': 0, 'live_max_pct': 0.0, 'not_ready': 0}
+        self.conn = WSConn('차트', self._urls, self._on_msg, self._on_open)
+
+    def _norm_pairs(self):
+        out = set()
+        for sym, iv in self.pairs_fn():
+            if iv in _INTERVAL_MS:
+                out.add((sym.replace('/', '').upper(), iv))
+        return out
+
+    def _urls(self):
+        self.pairs = self._norm_pairs()
+        if not self.pairs:
+            return []
+        streams = '/'.join(sorted(f"{s.lower()}@kline_{iv}" for s, iv in self.pairs))
+        # 2026-04-23 부터 봉 데이터는 /market 경로로만 나온다 (옛 주소는 예비)
+        return [f"wss://fstream.binance.com/market/stream?streams={streams}",
+                f"wss://fstream.binance.com/stream?streams={streams}"]
+
+    def start(self):
+        self.conn.start()
+        threading.Thread(target=self._seeder, daemon=True, name='ws-seed').start()
+
+    def _on_open(self):
+        with self.lock:
+            self.need_seed |= self.pairs        # 끊긴 사이 빈 구간이 있을 수 있으니 다시 채운다
+
+    def _seeder(self):
+        """새로 붙었거나 빈 구간이 생긴 코인은 조회로 과거 봉을 채운다 (천천히)"""
+        while not self.conn._stop:
+            try:
+                now_pairs = self._norm_pairs()
+                if self.pairs and now_pairs != self.pairs:
+                    self.conn.close()           # 코인이 바뀜 → 새 목록으로 다시 구독
+                with self.lock:
+                    todo = list(self.need_seed)
+                for key in todo:
+                    sym, iv = key
+                    df = self.api._rest_klines(sym, iv, 300, fresh=True)
+                    if df is not None and len(df):
+                        rows = [[int(ts.value // 1_000_000), *map(float, r)]
+                                for ts, r in zip(df.index, df[['open', 'high', 'low', 'close', 'volume']].values)]
+                        with self.lock:
+                            old = self.rows.get(key) or []
+                            # 채우는 동안 웹소켓으로 온 최신 봉은 살린다
+                            merged = {r[0]: r for r in rows}
+                            for r in old:
+                                if r[0] >= rows[-1][0]:
+                                    merged[r[0]] = r
+                            self.rows[key] = sorted(merged.values())[-self.KEEP:]
+                            self.need_seed.discard(key)
+                            self.dirty[key] = True
+                    time.sleep(0.3)
+            except Exception as e:
+                print(f"[🔌 차트] 과거 봉 채우기 오류: {e}")
+            time.sleep(1)
+
+    def _on_msg(self, raw):
+        j = json.loads(raw)
+        d = j.get('data', j)
+        if d.get('e') != 'kline':
+            return
+        k = d['k']
+        key = (d['s'].upper(), k['i'])
+        row = [int(k['t']), float(k['o']), float(k['h']), float(k['l']), float(k['c']), float(k['v'])]
+        with self.lock:
+            rows = self.rows.get(key)
+            if rows is None:
+                self.rows[key] = [row]
+                self.need_seed.add(key)
+            elif row[0] == rows[-1][0]:
+                rows[-1] = row
+            elif row[0] > rows[-1][0]:
+                if row[0] - rows[-1][0] > _INTERVAL_MS.get(k['i'], 0):
+                    self.need_seed.add(key)         # 봉이 빠졌다 → 다시 채우기
+                rows.append(row)
+                if len(rows) > self.KEEP:
+                    del rows[:-self.KEEP]
+            self.dirty[key] = True
+
+    def ready(self, symbol, interval):
+        key = (symbol.replace('/', '').upper(), interval)
+        with self.lock:
+            return (self.conn.healthy(self.STALE_SEC) and key not in self.need_seed
+                    and len(self.rows.get(key) or []) >= 100)
+
+    def get(self, symbol, interval, limit):
+        """조회(REST)와 같은 모양의 DataFrame. 준비 안 됐으면 None"""
+        if not self.ready(symbol, interval):
+            return None
+        key = (symbol.replace('/', '').upper(), interval)
+        with self.lock:
+            if self.dirty.get(key) or key not in self.df_cache:
+                rows = self.rows[key]
+                df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                self.df_cache[key] = df
+                self.dirty[key] = False
+            df = self.df_cache[key]
+        return df.iloc[-int(limit):].copy()
+
+    def compare(self, symbol, interval, rest_df):
+        """그림자 모드: 조회로 받은 봉과 웹소켓 봉이 같은지"""
+        if rest_df is None or len(rest_df) < 3:
+            return
+        ws = self.get(symbol, interval, len(rest_df))
+        if ws is None:
+            self.cmp['not_ready'] += 1
+            return
+        self.cmp['checks'] += 1
+        iv_ms = _INTERVAL_MS.get(interval, 3_600_000)
+        now_ms = time.time() * 1000
+        for ts in rest_df.index[-3:-1]:                       # 끝난 봉 2개는 똑같아야 함
+            if ts not in ws.index:
+                continue
+            closed_ago = now_ms - (ts.value // 1_000_000 + iv_ms)
+            a = rest_df.loc[ts, ['open', 'high', 'low', 'close']].values.astype(float)
+            b = ws.loc[ts, ['open', 'high', 'low', 'close']].values.astype(float)
+            if closed_ago > 5000 and np.max(np.abs(a - b) / np.maximum(np.abs(a), 1e-12)) > 1e-9:
+                self.cmp['closed_bad'] += 1
+        ts = rest_df.index[-1]                                  # 진행 중 봉은 조회 시점 차이만큼만
+        if ts in ws.index:
+            a, b = float(rest_df['close'].iloc[-1]), float(ws.loc[ts, 'close'])
+            if a:
+                self.cmp['live_max_pct'] = max(self.cmp['live_max_pct'], abs(a - b) / a * 100)
+
+
+class UserFeed:
+    """내 계좌 알림 (포지션·주문 체결·잔고). 주문 서버(테스트넷/메인넷) 기준."""
+
+    KEEPALIVE_SEC = 30 * 60     # 접속 키는 60분이면 만료 → 30분마다 연장
+
+    def __init__(self, api):
+        self.api = api
+        self.key = None
+        self.verified = False               # 실제 알림을 한 번이라도 받았나
+        self.events = 0
+        self.last_event = {}                # SYMBOL -> 마지막 알림 시각
+        self.ws_amt = {}                    # SYMBOL -> 웹소켓이 알려준 수량
+        self.hits = self.misses = 0
+        self.pending = {}                   # SYMBOL -> 조회로 변화를 본 시각 (웹소켓 알림 대기)
+        self._url_misses = 0
+        self.conn = WSConn('계좌', self._urls, self._on_msg)
+
+    def start(self):
+        self.conn.start()
+        threading.Thread(target=self._keepalive, daemon=True, name='ws-keepalive').start()
+
+    def _new_key(self):
+        r = self.api._request('POST', '/fapi/v1/listenKey', signed=False, quiet=True)
+        self.key = (r or {}).get('listenKey')
+        return self.key
+
+    def _urls(self):
+        k = self.key or self._new_key()
+        if not k:
+            return []
+        if self.api.testnet:
+            return [f"wss://fstream.binancefuture.com/private/ws/{k}",
+                    f"wss://fstream.binancefuture.com/ws/{k}",
+                    f"wss://stream.binancefuture.com/ws/{k}"]
+        return [f"wss://fstream.binance.com/private/ws/{k}",
+                f"wss://fstream.binance.com/ws/{k}"]
+
+    def _keepalive(self):
+        while not self.conn._stop:
+            time.sleep(self.KEEPALIVE_SEC)
+            if self.key:
+                r = self.api._request('PUT', '/fapi/v1/listenKey', signed=False, quiet=True)
+                if r is None:
+                    print("[🔌 계좌] 접속 키 연장 실패 → 새 키로 다시 접속")
+                    self.key = None
+                    self.conn.close()
+
+    def _on_msg(self, raw):
+        j = json.loads(raw)
+        e = j.get('e')
+        now = time.time()
+        if e == 'listenKeyExpired':
+            print("[🔌 계좌] 접속 키 만료 → 새 키로 다시 접속")
+            self.key = None
+            self.conn.close()
+            return
+        syms = set()
+        if e == 'ACCOUNT_UPDATE':
+            for p in (j.get('a') or {}).get('P', []) or []:
+                s = p.get('s')
+                if s:
+                    syms.add(s)
+                    try:
+                        self.ws_amt[s] = float(p.get('pa', 0))
+                    except (TypeError, ValueError):
+                        pass
+            self.api.invalidate_balance_cache()
+        elif e == 'ORDER_TRADE_UPDATE':
+            s = (j.get('o') or {}).get('s')
+            if s:
+                syms.add(s)
+        else:
+            return
+        self.events += 1
+        self.verified = True
+        for s in syms:
+            self.last_event[s] = now
+            if s in self.pending:
+                self.hits += 1
+                self.pending.pop(s, None)
+        if syms and self.api.ws_mode == 'on':
+            self.api.invalidate_position_cache()      # 포지션이 바뀜 → 다음 확인 때 바로 새로 조회
+
+    def note_rest_change(self, symbol):
+        """조회로 포지션 변화를 봤다 → 웹소켓도 알려줬는지 확인 (그림자 비교·주소 자동 선택)"""
+        now = time.time()
+        if now - self.last_event.get(symbol, 0) < 10:
+            self.hits += 1
+        else:
+            self.pending[symbol] = now
+
+    def sweep(self):
+        """10초 넘게 웹소켓 알림이 없던 변화 = 놓침"""
+        now = time.time()
+        for s, t in list(self.pending.items()):
+            if now - t > 10:
+                self.pending.pop(s, None)
+                self.misses += 1
+                self._url_misses += 1
+        if self._url_misses >= 2 and not self.verified and self.conn.connected:
+            print(f"[🔌 계좌] 이 주소로는 알림이 안 옴 → 다른 주소로 시도 ({self.conn.cur_url and self.conn.cur_url.split('/ws/')[0]})")
+            self._url_misses = 0
+            self.conn.rotate()
+
+    def healthy(self):
+        return self.conn.connected and self.verified
+
+
+class WSManager:
+    """웹소켓 전체 관리 + 10분마다 상태 보고"""
+
+    def __init__(self, api, mode, pairs_fn):
+        self.api, self.mode = api, mode
+        self.klines = KlineFeed(api, pairs_fn)
+        self.user = UserFeed(api)
+        self._was_ok = None
+
+    def start(self):
+        self.klines.start()
+        self.user.start()
+        threading.Thread(target=self._monitor, daemon=True, name='ws-monitor').start()
+        print(f"🔌 웹소켓 시작 — 모드: {self.mode} "
+              f"({'받기만 하고 판단은 조회 방식' if self.mode == 'shadow' else '차트·포지션을 웹소켓으로'})")
+
+    def chart_ok(self):
+        return self.klines.conn.healthy(KlineFeed.STALE_SEC)
+
+    def stop(self):
+        self.klines.conn.stop()
+        self.user.conn.stop()
+
+    def _monitor(self):
+        last_report = time.time() - 540          # 첫 보고는 켜고 1분 뒤, 그다음부터 10분마다
+        while not self.klines.conn._stop:
+            time.sleep(5)
+            try:
+                self.user.sweep()
+                ok = self.chart_ok()
+                if self.mode == 'on' and self._was_ok is not None and ok != self._was_ok:
+                    print("✅ 웹소켓 복구 — 다시 실시간 수신" if ok else
+                          "⚠️ 웹소켓 끊김 → 복구될 때까지 조회 방식으로 대신합니다 (자동 재접속 중)")
+                self._was_ok = ok
+                if time.time() - last_report >= 600:
+                    last_report = time.time()
+                    print(self.status_text())
+            except Exception as e:
+                print(f"[🔌 상태 확인 오류] {e}")
+
+    def status_text(self):
+        k, u, c = self.klines.conn, self.user.conn, self.klines.cmp
+        wc, wo = self.api.used_weight('chart'), self.api.used_weight('order')
+        lines = [f"🔌 웹소켓 [{self.mode}] {datetime.now().strftime('%H:%M')}",
+                 f"   차트: {'연결됨' if self.chart_ok() else '끊김'} | 메시지 {k.msgs:,} | 재접속 {k.reconnects}회",
+                 f"   계좌: {'연결됨' if u.connected else '끊김'}{' · 확인됨' if self.user.verified else ' · 알림 대기'}"
+                 f" | 알림 {self.user.events} | 재접속 {u.reconnects}회"]
+        if self.mode == 'shadow':
+            lines.append(f"   비교: 차트 {c['checks']}회 중 끝난 봉 불일치 {c['closed_bad']}회"
+                         f" (진행 중 봉 최대 차이 {c['live_max_pct']:.3f}%) | 포지션 변화 알림 {self.user.hits}회 성공"
+                         f" / 놓침 {self.user.misses}회")
+        lines.append(f"   API 사용량(분당, 이 IP 전체): 차트 {wc if wc is not None else '-'} / 주문 {wo if wo is not None else '-'} (한도 2,400)")
+        return '\n'.join(lines)
+
+
 # ==================== 바이낸스 API ====================
 class BinanceAPI:
+    # 기본값 (웹소켓·사용량 추적을 안 켠 상태)
+    ws = None
+    ws_mode = 'off'
+    _last_rest_amt = None
+    _balance_cache = None
+    _balance_cache_time = 0
+
     def __init__(self, api_key, api_secret, testnet=True):
         self.api_key = api_key
         self.api_secret = api_secret
@@ -219,6 +673,19 @@ class BinanceAPI:
         self._klines_cache = {}  # {symbol_interval: (data, timestamp)}
         self._klines_cache_ttl = 5  # 5초간 캐시
         self._klines_cache_lock = threading.Lock()
+
+        # 💰 잔고 캐시 (코인마다 5초마다 조회하던 것을 한 번으로)
+        self._balance_cache = None
+        self._balance_cache_time = 0
+
+        # 📊 바이낸스가 알려주는 'IP 전체 사용량' (여러 프로그램 합산) → 많으면 조회 간격 자동으로 늘림
+        self._used_w = {'chart': (None, 0), 'order': (None, 0)}
+        self._throttle_warned = {}
+
+        # 🔌 웹소켓 (start_websockets 로 켬)
+        self.ws = None
+        self.ws_mode = 'off'
+        self._last_rest_amt = None
         
         # 시간 오프셋 초기화
         self.time_offset = 0
@@ -256,6 +723,9 @@ class BinanceAPI:
                 response = self.session.post(url, params=params, timeout=10)
             elif method == 'DELETE':
                 response = self.session.delete(url, params=params, timeout=10)
+            elif method == 'PUT':
+                response = self.session.put(url, params=params, timeout=10)
+            self._note_weight('order', response)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
@@ -298,10 +768,22 @@ class BinanceAPI:
             return None
     
     def get_balance(self):
+        """잔고 (5초 캐시 — 코인마다 따로 조회하던 것을 한 번으로. 웹소켓 'on' 이면 30초 + 변화 알림 시 즉시)"""
+        ttl = 5 * self._slow('order')
+        if self.ws is not None and self.ws_mode == 'on' and self.ws.user.healthy():
+            ttl = 30
+        if self._balance_cache is not None and time.time() - self._balance_cache_time < ttl:
+            return self._balance_cache
         account = self._request('GET', '/fapi/v2/account', signed=True)
         if account:
-            return float(account.get('totalWalletBalance', 0))
-        return 0.0
+            self._balance_cache = float(account.get('totalWalletBalance', 0))
+            self._balance_cache_time = time.time()
+            return self._balance_cache
+        return self._balance_cache if self._balance_cache is not None else 0.0
+
+    def invalidate_balance_cache(self):
+        if self.ws_mode == 'on':
+            self._balance_cache_time = 0
 
     # ==================== 💸 펀딩비 ====================
     def get_funding_rate(self, symbol):
@@ -399,16 +881,67 @@ class BinanceAPI:
             print(f"[청산 원인 조회 실패] {symbol}: {e}")
             return None
 
+    # ==================== 📊 사용량 / 🔌 웹소켓 ====================
+    def _note_weight(self, which, response):
+        try:
+            w = response.headers.get('X-MBX-USED-WEIGHT-1M')
+            if w is not None:
+                self.__dict__.setdefault('_used_w', {})[which] = (int(w), time.time())
+        except Exception:
+            pass
+
+    def used_weight(self, which):
+        w, t = self.__dict__.get('_used_w', {}).get(which, (None, 0))
+        return w if (w is not None and time.time() - t < 90) else None
+
+    def _slow(self, which):
+        """이 IP 의 분당 사용량이 많으면 조회 간격을 늘린다 (프로그램 여러 개일 때 IP 차단 방지)"""
+        w = self.used_weight(which) or 0
+        f = 4 if w > 1800 else 2 if w > 1300 else 1
+        warned = self.__dict__.setdefault('_throttle_warned', {})
+        if f > 1 and time.time() - warned.get(which, 0) > 600:
+            warned[which] = time.time()
+            print(f"⚠️ API 사용량 높음 ({'차트' if which == 'chart' else '주문'} {w:,}/2,400) → 조회 간격 {f}배로 늘림 (차단 방지)")
+        return f
+
+    def start_websockets(self, pairs_fn, mode=None):
+        """pairs_fn(): [(심볼, 봉 간격), ...] — 코인 목록이 바뀌면 자동으로 다시 구독"""
+        mode = mode or WEBSOCKET_MODE
+        if mode == 'off' or not WS_AVAILABLE or self.ws is not None:
+            return None
+        self.ws_mode = mode
+        self.ws = WSManager(self, mode, pairs_fn)
+        self.ws.start()
+        return self.ws
+
     def get_klines(self, symbol, interval, limit=200):
-        """차트 데이터는 항상 메인넷에서 가져옴 (정확한 가격)"""
+        """차트 데이터 (항상 메인넷). 웹소켓 'on' 이면 웹소켓 값, 안 되면 조회."""
+        ws = self.ws
+        if ws is not None and self.ws_mode == 'on':
+            df = ws.klines.get(symbol, interval, limit)
+            if df is not None:
+                return df
+        df = self._rest_klines(symbol, interval, limit)
+        if ws is not None and self.ws_mode == 'shadow' and df is not None and limit >= 100:
+            try:
+                ws.klines.compare(symbol, interval, df)
+            except Exception as e:
+                print(f"[🔌 비교 오류] {e}")
+        return df
+
+    def _rest_klines(self, symbol, interval, limit=200, fresh=False):
+        """차트 데이터를 조회(REST)로 — 메인넷. fresh=True 면 캐시 안 씀 (웹소켓 빈 구간 채우기용)"""
         cache_key = f"{symbol}_{interval}_{limit}"   # 개수도 구분 (limit=1 결과를 봇이 받아가던 문제)
+        ttl = self._klines_cache_ttl * self._slow('chart')
+        if self.ws is not None and self.ws_mode == 'on':
+            ttl = max(ttl, 15)       # 웹소켓 끊긴 동안 대신하는 중 — 여러 프로그램이 한꺼번에 몰리지 않게
         
         # 🔥 캐시 확인 (같은 코인의 LONG/SHORT 봇이 공유)
         with self._klines_cache_lock:
             now = time.time()
-            if cache_key in self._klines_cache:
+            if not fresh and cache_key in self._klines_cache:
                 cached_data, cached_time = self._klines_cache[cache_key]
-                if (now - cached_time) < self._klines_cache_ttl:
+                if (now - cached_time) < ttl:
                     return cached_data.copy()
         
         params = {'symbol': symbol.replace('/', ''), 'interval': interval, 'limit': limit}
@@ -416,6 +949,7 @@ class BinanceAPI:
         
         try:
             response = self.session.get(url, params=params, timeout=10)
+            self._note_weight('chart', response)
             if response.status_code == 200:
                 klines = response.json()
                 df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -726,15 +1260,22 @@ class BinanceAPI:
 
     def get_position(self, symbol):
         # 🔥 캐시된 positionRisk 사용 (3초 TTL)
+        ttl = self._position_cache_ttl * self._slow('order')
+        ws = self.ws
+        if ws is not None and self.ws_mode == 'on':
+            # 웹소켓이 포지션 변화를 바로 알려주면(=캐시 즉시 무효화) 조회는 5초에 한 번이면 충분
+            ttl = max(ttl, 5.0 if ws.user.healthy() else 3.0)
         with self._position_cache_lock:
             now = time.time()
-            if self._position_cache is not None and (now - self._position_cache_time) < self._position_cache_ttl:
+            if self._position_cache is not None and (now - self._position_cache_time) < ttl:
                 positions = self._position_cache
             else:
                 positions = self._request('GET', '/fapi/v2/positionRisk', signed=True)
                 if positions is not None:
                     self._position_cache = positions
                     self._position_cache_time = now
+                    if ws is not None:
+                        self._check_position_changes(positions)
                 else:
                     # API 실패 — 캐시가 있으면 캐시 사용 (10초 이내)
                     if self._position_cache is not None and (now - self._position_cache_time) < 10:
@@ -768,6 +1309,20 @@ class BinanceAPI:
                     }
         return False  # API 성공 + 포지션 없음
     
+    def _check_position_changes(self, positions):
+        """조회로 본 포지션 변화를 웹소켓 쪽에 알려 비교 (웹소켓이 제대로 알려주는지 확인용)"""
+        try:
+            amt = {p['symbol']: float(p['positionAmt']) for p in positions}
+            prev = self._last_rest_amt
+            self._last_rest_amt = amt
+            if prev is None:
+                return
+            for s, a in amt.items():
+                if abs(a - prev.get(s, 0.0)) > 1e-12:
+                    self.ws.user.note_rest_change(s)
+        except Exception:
+            pass
+
     def invalidate_position_cache(self):
         """포지션 캐시 무효화 — 진입/청산 직후 호출"""
         with self._position_cache_lock:
@@ -2961,6 +3516,12 @@ class App:
         self.create_ui()
         self.add_default_coins()  # 기본 10개 코인 추가!
         threading.Thread(target=self.check_coin_units, daemon=True).start()  # 📏 소수점 점검
+
+        # 🔌 웹소켓 (1_config.py 의 WEBSOCKET_MODE: off / shadow / on)
+        try:
+            self.api.start_websockets(lambda: [(c['symbol'], c.get('timeframe', '1h')) for c in list(self.coins)])
+        except Exception as e:
+            print(f"⚠️ 웹소켓 시작 실패 → 조회 방식만 사용: {e}")
         
         # 🔥 저장된 통계 불러오기!
         self.load_stats()
