@@ -47,23 +47,32 @@ SEL = {
         "button:has-text('커버 편집')", "text='커버 편집'",
         "button:has-text('Edit cover')", "text='Edit cover'",
     ],
-    "커버 업로드 탭": [
+    # 캡처 화면: 커버 편집 창 아래쪽의 '커버 업로드' 버튼 (탭이 아님)
+    "커버 업로드 버튼": [
+        "text='커버 업로드'",
+        "text='Upload cover'",
+        "button:has-text('커버 업로드')",
         "div[role='tab']:has-text('업로드')",
-        "div[role='tab']:has-text('Upload')",
         "button:has-text('업로드')",
     ],
+    "커버 저장 버튼": [
+        "button:has-text('저장')",
+        "text='저장'",
+        "button:has-text('Save')",
+    ],
+    # 캡처 화면: '이 게시물을 볼 수 있는 사람' 아래 드롭다운 (기본값 '모두')
     "공개 범위 선택": [
         "div[class*='visibility'] div[class*='select']",
         "div[class*='select-container']",
     ],
-    "예약 게시 스위치": [
-        "[data-e2e='schedule_switch']",
-        "div[class*='schedule'] input[type='checkbox']",
-        "div[class*='switch'][class*='schedule']",
-        "input[type='radio'][value='schedule']",
-        "text='예약 게시'",
-        "text='Schedule'",
+    # 캡처 화면: '게시 시기'의 지금 / 예약 라디오 버튼
+    "예약 라디오": [
         "text='예약'",
+        "text='Schedule'",
+        "input[type='radio'][value='schedule']",
+        "[data-e2e='schedule_switch']",
+        "div[class*='schedule'] input[type='radio']",
+        "div[class*='switch'][class*='schedule']",
     ],
     "예약 날짜 입력칸": [
         "div[class*='date-picker'] input",
@@ -87,9 +96,11 @@ SEL = {
         "div[class*='datepicker']",
         "div[class*='DatePicker'][class*='panel']",
     ],
+    # 예약을 켜면 버튼 글자가 '게시' -> '예약' 으로 바뀐다.
+    # 바로 옆의 '초안 저장' 을 누르면 안 되므로 글자를 정확히 본다.
     "게시 버튼": [
-        "button[data-e2e='post_video_button']",
         "button:has-text('예약')",
+        "button[data-e2e='post_video_button']",
         "button:has-text('게시')",
         "button:has-text('Schedule')",
         "button:has-text('Post')",
@@ -263,7 +274,7 @@ def upload(page, cfg, log):
         try:
             _click_if(page, SEL["커버 편집 버튼"], timeout=8000)
             time.sleep(2)
-            _click_if(page, SEL["커버 업로드 탭"], timeout=6000)
+            _click_if(page, SEL["커버 업로드 버튼"], timeout=6000)
             time.sleep(1)
 
             cin, _ = _find_any(page, ["input[type=file][accept*='image']"],
@@ -271,10 +282,7 @@ def upload(page, cfg, log):
             cin.set_input_files(cover)
             time.sleep(3)
 
-            _click_if(page, [
-                "button:has-text('확인')", "button:has-text('저장')",
-                "button:has-text('Confirm')", "button:has-text('Save')",
-            ], timeout=8000)
+            _click_if(page, SEL["커버 저장 버튼"], timeout=8000)
             time.sleep(2)
             log("  - 커버 설정 완료")
         except Exception as e:
@@ -284,16 +292,21 @@ def upload(page, cfg, log):
 
     # ---------- 5. 공개 범위 ----------
     privacy = (cfg.get("privacy") or "public").lower()
-    label = {"public": "전체 공개", "friends": "친구", "private": "나만 보기"}.get(privacy, "전체 공개")
+    # 캡처 화면의 라벨은 '모두' 다. 예전 표기도 같이 넣어 어느 쪽이든 찾게 한다.
+    labels = {"public": ["모두", "전체 공개", "Everyone"],
+              "friends": ["친구", "Friends"],
+              "private": ["나만", "나만 보기", "Only you"]}.get(privacy, ["모두"])
+    label = labels[0]
     log(f"[5/7] 공개 범위 설정: {label}")
     try:
         _click_if(page, SEL["공개 범위 선택"], timeout=6000)
         time.sleep(1)
-        if not _click_if(page, [
-            f"div[role='option']:has-text('{label}')",
-            f"li:has-text('{label}')",
-            f"text='{label}'",
-        ], timeout=6000):
+        opts = []
+        for lb in labels:
+            opts += [f"div[role='option']:has-text('{lb}')",
+                     f"li:has-text('{lb}')",
+                     f"text='{lb}'"]
+        if not _click_if(page, opts, timeout=6000):
             log("  ! 공개 범위 항목을 못 찾음 (기본값 사용)")
             page.keyboard.press("Escape")
     except Exception as e:
@@ -331,14 +344,46 @@ def upload(page, cfg, log):
 
 # ==================== 예약 설정 ====================
 
+# 캡처 화면의 날짜/시간 칸은 '2026-09-28', '21:00' 글자가 적힌 드롭다운 버튼이다.
+# (input 태그가 아닐 수 있어서 글자 모양으로도 찾는다)
+RE_DATE = re.compile(r"^\s*\d{4}[-./]\s?\d{1,2}[-./]\s?\d{1,2}\.?\s*$")
+RE_TIME = re.compile(r"^\s*\d{1,2}\s*:\s*\d{2}\s*$")
+
+
+def _by_text(page, pattern, timeout=6000):
+    """화면에서 그 글자 모양을 가진 요소를 찾는다."""
+    end = time.time() + timeout / 1000.0
+    while time.time() < end:
+        for fr in _frames(page):
+            try:
+                loc = fr.get_by_text(pattern).first
+                loc.wait_for(state="visible", timeout=400)
+                return loc
+            except Exception:
+                continue
+        time.sleep(0.3)
+    return None
+
+
 def _schedule_inputs(page, timeout=10000):
-    """예약 날짜/시간 입력칸을 찾는다. 없으면 None (=예약이 아직 꺼져 있음)."""
+    """
+    예약 날짜/시간 칸을 찾는다. 없으면 None (=예약이 아직 꺼져 있음).
+
+    ① input 태그로 먼저 찾고
+    ② 없으면 '2026-09-28' / '21:00' 같은 글자가 적힌 드롭다운을 찾는다.
+    """
     try:
-        date_in, _ = _find_any(page, SEL["예약 날짜 입력칸"], timeout=timeout)
-        time_in, _ = _find_any(page, SEL["예약 시간 입력칸"], timeout=timeout)
+        date_in, _ = _find_any(page, SEL["예약 날짜 입력칸"], timeout=timeout // 2)
+        time_in, _ = _find_any(page, SEL["예약 시간 입력칸"], timeout=timeout // 2)
         return date_in, time_in
     except Exception:
-        return None
+        pass
+
+    date_el = _by_text(page, RE_DATE, timeout=timeout // 2)
+    time_el = _by_text(page, RE_TIME, timeout=timeout // 2)
+    if date_el is not None and time_el is not None:
+        return date_el, time_el
+    return None
 
 
 def _set_schedule(page, when, log):
@@ -352,7 +397,7 @@ def _set_schedule(page, when, log):
         log("  - '예약 게시'가 이미 켜져 있습니다")
     else:
         log("  - '예약 게시' 켜는 중...")
-        turned_on = _click_if(page, SEL["예약 게시 스위치"], timeout=15000)
+        turned_on = _click_if(page, SEL["예약 라디오"], timeout=15000)
         if not turned_on:
             raise RuntimeError(
                 "'예약 게시' 스위치를 찾지 못했습니다.\n"
@@ -385,9 +430,13 @@ def _set_schedule(page, when, log):
             f"예약 날짜가 제대로 들어가지 않았습니다 (화면: '{d}').\n"
             "영상은 게시되지 않았습니다. 브라우저에서 직접 확인하세요."
         )
-    if f"{when.hour:02d}" not in t and f"{when.hour}" not in t:
+    # 시와 분을 함께 본다 (시만 보면 21:40 같은 값도 통과해버림)
+    tnums = re.findall(r"\d{1,2}", t)
+    want_h = {f"{when.hour:02d}", str(when.hour), f"{when.hour % 12 or 12:02d}", str(when.hour % 12 or 12)}
+    want_m = {f"{when.minute:02d}", str(when.minute)}
+    if not (any(x in want_h for x in tnums[:1] or tnums) and any(x in want_m for x in tnums)):
         raise RuntimeError(
-            f"예약 시간이 제대로 들어가지 않았습니다 (화면: '{t}').\n"
+            f"예약 시간이 제대로 들어가지 않았습니다 (화면: '{t}', 원하는 값: {when:%H:%M}).\n"
             "영상은 게시되지 않았습니다. 브라우저에서 직접 확인하세요."
         )
 
@@ -396,44 +445,103 @@ def _set_schedule(page, when, log):
 
 
 def _pick_time(page, time_in, when, log):
-    """틱톡 시간 선택기(시/분 두 칸)에서 값을 고른다."""
+    """
+    틱톡 시간 선택기에서 시·분을 고른다.
+
+    캡처 화면 기준: 패널 안에 [시] : [분] 두 줄이 나란히 있고
+    분은 5분 단위(00, 05, 10 ...)다.
+    클래스 이름은 자주 바뀌므로 '화면상의 위치'로 어느 줄인지 판단한다.
+    """
     time_in.click()
     time.sleep(2)
 
-    panel, fr = _find_any(page, SEL["시간 선택 패널"], timeout=10000)
+    panel = None
+    for sel in SEL["시간 선택 패널"]:
+        try:
+            loc, _ = _find_any(page, [sel], timeout=3000)
+            panel = loc
+            break
+        except Exception:
+            continue
+    if panel is None:
+        panel = page
 
     hh, mm = f"{when.hour:02d}", f"{when.minute:02d}"
 
-    def click_col(col_selectors, value):
-        for sel in col_selectors:
+    def click_in_column(value, want_left):
+        """
+        패널 안에서 그 숫자가 적힌 칸을 찾아, 시 칸인지 분 칸인지 가려서 누른다.
+
+        판단 순서
+          ① 부모 클래스 이름에 left/hour, right/minute 가 있으면 그걸로
+          ② 두 줄이 좌우로 떨어져 있으면 x 좌표로
+          ③ 둘 다 아니면 문서 순서로 (앞쪽=시, 뒤쪽=분)
+        """
+        try:
+            items = panel.get_by_text(re.compile(rf"^\s*{value}\s*$"))
+            n = items.count()
+        except Exception:
+            return False
+        if n == 0:
+            return False
+
+        found = []
+        for i in range(min(n, 24)):
+            it = items.nth(i)
             try:
-                col = panel.locator(sel)
-                if col.count() == 0:
-                    continue
-                opt = col.get_by_text(re.compile(rf"^{value}$")).first
-                opt.scroll_into_view_if_needed(timeout=3000)
-                opt.click(timeout=3000)
-                return True
+                box = it.bounding_box()
+                cls = (it.evaluate("e => (e.className || '') + ' ' + "
+                                   "((e.parentElement && e.parentElement.className) || '')") or "").lower()
             except Exception:
                 continue
-        return False
+            if box:
+                found.append((box["x"] + box["width"] / 2, cls, it))
 
-    ok_h = click_col([
-        "[class*='timepicker-left'] [class*='option-item']",
-        "[class*='hour'] [class*='option']",
-        "ul:nth-of-type(1) li",
-    ], hh)
+        if not found:
+            return False
+
+        # ① 클래스 이름으로
+        key = ("left", "hour") if want_left else ("right", "minute")
+        named = [it for _, cls, it in found if any(k in cls for k in key)]
+        if named:
+            target = named[0]
+        else:
+            xs = [x for x, _, _ in found]
+            if len(found) > 1 and max(xs) - min(xs) >= 20:
+                # ② 좌우로 떨어져 있으면 위치로
+                mid = (min(xs) + max(xs)) / 2
+                side = [it for x, _, it in found if (x <= mid if want_left else x > mid)]
+                target = side[0] if side else found[0][2]
+            else:
+                # ③ 문서 순서로 (시가 먼저, 분이 나중)
+                target = found[0][2] if want_left else found[-1][2]
+
+        try:
+            target.scroll_into_view_if_needed(timeout=3000)
+            target.click(timeout=3000)
+            return True
+        except Exception:
+            return False
+
+    ok_h = click_in_column(hh, want_left=True)
     time.sleep(1)
 
-    ok_m = click_col([
-        "[class*='timepicker-right'] [class*='option-item']",
-        "[class*='minute'] [class*='option']",
-        "ul:nth-of-type(2) li",
-    ], mm)
+    # 시를 고르면 패널이 닫히는 경우가 있다. 닫혔으면 다시 연다.
+    try:
+        if panel is not page and not panel.is_visible(timeout=1500):
+            time_in.click()
+            time.sleep(1.5)
+    except Exception:
+        try:
+            time_in.click()
+            time.sleep(1.5)
+        except Exception:
+            pass
+
+    ok_m = click_in_column(mm, want_left=False)
     time.sleep(1)
 
     if not (ok_h and ok_m):
-        # 선택기가 안 먹으면 직접 타이핑 시도
         log(f"    선택기 클릭 실패(시:{ok_h} 분:{ok_m}) → 직접 입력 시도")
         try:
             time_in.click()

@@ -292,7 +292,7 @@ def dryrun_tiktok(page, video, log=print):
     # 예약 켜보기
     log("  '예약 게시' 켜보는 중...")
     if not up_tiktok._schedule_inputs(page, timeout=3000):
-        up_tiktok._click_if(page, up_tiktok.SEL["예약 게시 스위치"], timeout=10000)
+        up_tiktok._click_if(page, up_tiktok.SEL["예약 라디오"], timeout=10000)
         time.sleep(3)
     results.append(check_page(page, log, "3_예약켜짐"))
 

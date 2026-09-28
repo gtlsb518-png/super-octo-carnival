@@ -234,7 +234,9 @@ class CoverDialog(tk.Toplevel):
     """
 
     VIEW_W, VIEW_H = 330, 586          # 미리보기 크기 (9:16)
-    GUIDE = 0.15                       # 프로필에서 가려지는 비율
+    # 틱톡 커버 편집 화면이 '프로필에서 미리 보기(4:3)' 라고 알려준다.
+    # 9:16 커버가 프로필에서는 세로 3:4 로 잘리므로 위아래 12.5% 씩 가려진다.
+    GUIDE = 0.125
 
     def __init__(self, parent, path, out_size=(1080, 1920), title="커버 위치 조정"):
         super().__init__(parent)
@@ -293,9 +295,9 @@ class CoverDialog(tk.Toplevel):
             self.canvas.create_line(0, y, self.VIEW_W, y,
                                     fill="#ffd166", dash=(6, 4), width=1)
         self.canvas.create_text(8, g - 10, anchor="w", fill="#ffd166",
-                                font=(FONT, 8), text="▲ 프로필 목록에서 가려짐")
+                                font=(FONT, 8), text="▲ 프로필에서 가려짐 (3:4로 잘림)")
         self.canvas.create_text(8, self.VIEW_H - g + 12, anchor="w", fill="#ffd166",
-                                font=(FONT, 8), text="▼ 프로필 목록에서 가려짐")
+                                font=(FONT, 8), text="▼ 프로필에서 가려짐 (3:4로 잘림)")
 
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._move)
