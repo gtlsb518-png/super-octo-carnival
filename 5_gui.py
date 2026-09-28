@@ -403,8 +403,6 @@ class BinanceAPI:
         return None
     
     def set_leverage(self, symbol, leverage):
-        """레버리지 설정. 성공하면 True. 실패 사유는 last_order_error()로 확인."""
-        self._remember_error(None)
         params = {'symbol': symbol.replace('/', ''), 'leverage': leverage}
         return self._request('POST', '/fapi/v1/leverage', params=params, signed=True) is not None
     
@@ -641,27 +639,17 @@ class BinanceAPI:
             self._position_cache_time = 0
     
     def close_position(self, symbol):
-        """시장가로 전량 청산. 청산이 성공한 뒤에만 남은 TP 주문을 취소한다.
-
-        예전에는 TP 주문을 먼저 취소하고 청산했는데, 청산 주문이 거절되면
-        TP 주문만 사라지고 포지션은 보호 없이 남았다.
-        """
+        # 🔥 대기 중인 TP 주문 먼저 취소 (고아 주문 방지)
+        try:
+            self.cancel_all_orders(symbol)
+        except Exception:
+            pass
         position = self.get_position(symbol)
         if position:
             side = 'SELL' if position['side'] == 'long' else 'BUY'
             result = self.create_order(symbol, side, position['amount'])
             self.invalidate_position_cache()  # 🔥 청산 후 캐시 무효화
-            if result:
-                try:
-                    self.cancel_all_orders(symbol)   # 남은 TP 주문 정리 (고아 주문 방지)
-                except Exception:
-                    pass
             return result
-        # 포지션이 이미 없으면 남은 주문만 정리
-        try:
-            self.cancel_all_orders(symbol)
-        except Exception:
-            pass
         return True
     
     def get_order(self, symbol, order_id):
@@ -931,48 +919,6 @@ class TradingBot:
             self.log(f"   💡 {hint}", pos_type)
         self.log(f"   요청 수량 {qty} | 신호가 유지되면 계속 재시도합니다 (같은 오류는 5분마다 표시)", pos_type)
         print(f"[❌ 주문 거절] {self.config['symbol']} {pos_type} qty={qty} → {code} {msg}")
-
-    def report_leverage_failure(self, pos_type):
-        """레버리지 설정이 실패해 진입을 건너뛸 때 이유를 로그로 (5분에 한 번)."""
-        err = self.api.last_order_error() or {}
-        now = time.time()
-        seen = self.config.setdefault('_order_fail_log', {})
-        if now - seen.get(f'LEV:{pos_type}', 0) < 300:
-            return
-        seen[f'LEV:{pos_type}'] = now
-        lev = self.config['leverage']
-        self.log(f"❌ {pos_type} 진입 안 함 — 레버리지 {lev}배 설정 실패 "
-                 f"(바이낸스: {err.get('msg') or '응답 없음'} / 코드 {err.get('code')})", pos_type)
-        self.log(f"   💡 레버리지가 {lev}배로 안 바뀐 채 들어가면 기존 레버리지(보통 20배)로 체결돼 "
-                 f"위험합니다. 신호가 유지되면 계속 재시도합니다", pos_type)
-        print(f"[❌ 레버리지 설정 실패] {self.config['symbol']} {pos_type} → {err}")
-
-    def check_position_leverage(self, position):
-        """보유 포지션의 실제 레버리지가 설정값과 다르면 경고 (30분에 한 번).
-
-        화면 ROI는 바이낸스 레버리지로 계산되므로, 레버리지가 높으면 ROI가 부풀려 보여
-        '목표를 넘었는데 익절이 안 된다'처럼 보인다 (익절은 가격 기준이라 정상).
-        """
-        try:
-            real = int(position.get('leverage') or 0)
-        except Exception:
-            return
-        want = int(self.config.get('leverage', 0) or 0)
-        if not real or not want or real == want:
-            return
-        now = time.time()
-        if now - self.config.get('_lev_warn_at', 0) < 1800:
-            return
-        self.config['_lev_warn_at'] = now
-        side = str(position.get('side', '')).upper() or self.bot_type.upper()
-        roi = float(position.get('roi_pct', 0) or 0)
-        tp = self.config.get(f"entry_tp_{position.get('side')}") or self.config.get('tp_sideways', 1.2)
-        self.log(f"⚠️ {self.config['symbol']} 바이낸스 레버리지가 {real}배입니다 (설정은 {want}배)", side)
-        self.log(f"   화면 ROI {roi:+.2f}% = 실제 가격 변화 {roi / real:+.2f}% "
-                 f"| 익절은 가격 +{tp}% (ROI로는 {tp * real:.1f}%)에서", side)
-        self.log(f"   ⚠️ 강제청산까지 가격 약 {100 / real:.0f}% (설정대로면 {100 / want:.0f}%) "
-                 f"— 바이낸스에서 이 코인 레버리지를 {want}배로 바꾸세요", side)
-        print(f"[⚠️ 레버리지 불일치] {self.config['symbol']} 실제 {real}배 / 설정 {want}배")
 
     # ==================== 💸 펀딩비 로그 ====================
     def log_funding_rate(self, pos_type):
@@ -1833,12 +1779,8 @@ class TradingBot:
                             # 🔥 격리 모드 설정 (고정)
                             self.api.set_margin_type(self.config['symbol'], 'ISOLATED')
                             
-                            # 진입 — 레버리지가 설정값대로 안 바뀌면 들어가지 않는다
-                            #   (실패한 채 들어가면 바이낸스 기존 레버리지(보통 20배)로 체결돼
-                            #    강제청산까지 거리가 33% → 5%로 가까워진다)
-                            if not self.api.set_leverage(self.config['symbol'], self.config['leverage']):
-                                self.report_leverage_failure(pos_type)
-                                continue
+                            # 진입
+                            self.api.set_leverage(self.config['symbol'], self.config['leverage'])
                             
                             # 수량 계산 (레버리지 고려)
                             qty = (self.config['amount'] * self.config['leverage']) / signals['price']
@@ -2062,7 +2004,6 @@ class TradingBot:
                     entry = current_position['entry_price']
                     current = current_position.get('mark_price', signals['price'])
                     leverage = current_position.get('leverage', self.config['leverage'])
-                    self.check_position_leverage(current_position)
                     
                     # 🔥 ROI 업데이트 (익절 판단용)
                     roi_pct = current_position.get('roi_pct', 0)
@@ -2100,8 +2041,7 @@ class TradingBot:
                                 time.sleep(1)
                             
                             if not close_success:
-                                _e = self.api.last_order_error() or {}
-                                self.log(f"❌ 청산 실패! 수동으로 청산하세요! (바이낸스: {_e.get('msg') or '응답 없음'} / 코드 {_e.get('code')})", 'LONG')
+                                self.log(f"❌ 청산 실패! 수동으로 청산하세요!", 'LONG')
                                 print(f"[❌ 청산 실패] {self.config['symbol']} LONG - 수동 청산 필요!")
                                 self.config["is_closing"] = False
                                 continue
@@ -2451,8 +2391,7 @@ class TradingBot:
                                 time.sleep(1)
                             
                             if not close_success:
-                                _e = self.api.last_order_error() or {}
-                                self.log(f"❌ 청산 실패! 수동으로 청산하세요! (바이낸스: {_e.get('msg') or '응답 없음'} / 코드 {_e.get('code')})", 'SHORT')
+                                self.log(f"❌ 청산 실패! 수동으로 청산하세요!", 'SHORT')
                                 print(f"[❌ 청산 실패] {self.config['symbol']} SHORT - 수동 청산 필요!")
                                 self.config["is_closing"] = False
                                 continue
