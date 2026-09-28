@@ -21,27 +21,45 @@ PACKS = {1: '프로그램1_코인1-10', 2: '프로그램2_코인11-20'}
 # 3: '프로그램3_코인21-30'  ← 🚧 준비 중 (지금은 UNI 1개). 코인 다 정하면 주석 풀기
 
 
+def _add_program(z, num, name, keep_keys=False):
+    files = FILES + (EXTRA_1 if num == 1 else [])
+    for f in files:
+        with open(os.path.join(BASE, f), encoding='utf-8') as fh:
+            text = fh.read()
+        if f == '1_config.py' and not keep_keys:
+            # 🔑 저장소의 키를 압축에 넣지 않는다 (덮어쓰면 다른 계정으로 주문이 나가던 문제)
+            text, n1 = re.subn(r'^API_KEY = ".*"', 'API_KEY = "여기에_API_키"', text, flags=re.M)
+            text, n2 = re.subn(r'^API_SECRET = ".*"', 'API_SECRET = "여기에_시크릿_키"', text, flags=re.M)
+            assert n1 == 1 and n2 == 1, 'API 키 줄을 못 찾음'
+        if f == '9_main.py':
+            text, n = re.subn(r'^DEFAULT_PROGRAM = \d+', f'DEFAULT_PROGRAM = {num}', text, flags=re.M)
+            assert n == 1, 'DEFAULT_PROGRAM 줄을 못 찾음'
+        z.writestr(f'{name}/{f}', text.encode('utf-8'))
+
+
 def build(num, name):
     os.makedirs(os.path.join(BASE, 'dist'), exist_ok=True)
     out = os.path.join(BASE, 'dist', f'{name}.zip')
-    files = FILES + (EXTRA_1 if num == 1 else [])
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        for f in files:
-            with open(os.path.join(BASE, f), encoding='utf-8') as fh:
-                text = fh.read()
-            if f == '1_config.py':
-                # 🔑 저장소의 키를 압축에 넣지 않는다 (덮어쓰면 다른 계정으로 주문이 나가던 문제)
-                text, n1 = re.subn(r'^API_KEY = ".*"', 'API_KEY = "여기에_API_키"', text, flags=re.M)
-                text, n2 = re.subn(r'^API_SECRET = ".*"', 'API_SECRET = "여기에_시크릿_키"', text, flags=re.M)
-                assert n1 == 1 and n2 == 1, 'API 키 줄을 못 찾음'
-            if f == '9_main.py':
-                text, n = re.subn(r'^DEFAULT_PROGRAM = \d+', f'DEFAULT_PROGRAM = {num}', text, flags=re.M)
-                assert n == 1, 'DEFAULT_PROGRAM 줄을 못 찾음'
-            z.writestr(f'{name}/{f}', text.encode('utf-8'))
+        _add_program(z, num, name)
+    print(f'✅ {out}')
+    return out
+
+
+def build_all_with_keys():
+    """본인용: 프로그램 1·2를 한 압축에, 1_config.py 의 키 그대로 (python make_packages.py --with-keys)"""
+    os.makedirs(os.path.join(BASE, 'dist'), exist_ok=True)
+    out = os.path.join(BASE, 'dist', '바이낸스봇_전체_키포함.zip')
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for num, name in PACKS.items():
+            _add_program(z, num, name, keep_keys=True)
     print(f'✅ {out}')
     return out
 
 
 if __name__ == '__main__':
+    import sys
     for num, name in PACKS.items():
         build(num, name)
+    if '--with-keys' in sys.argv:
+        build_all_with_keys()
