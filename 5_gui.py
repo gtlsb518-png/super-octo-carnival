@@ -149,61 +149,81 @@ def get_volume_info_local(df, ma_period=60):
         return {'current': 0, 'average': 0, 'ratio': 0}
 
 class CustomMessageBox:
+    """알림 창. 글 길이에 맞춰 창 크기가 커지고, 버튼은 항상 아래에 보인다.
+    (예전엔 600x300 고정이라 글이 길면 '확인' 버튼이 창 밖으로 밀려 안 보였음)
+    Enter = 확인/예, Esc = 닫기/아니오"""
+
     @staticmethod
-    def showinfo(title, message):
+    def _open(title, message, fg, buttons):
         top = tk.Toplevel()
         top.title(title)
-        top.geometry("600x300")
         top.configure(bg='#2d2d2d')
-        tk.Label(top, text=message, bg='#2d2d2d', fg='#ffffff', 
-                font=('Arial', 12), wraplength=550, justify='left').pack(expand=True, padx=20, pady=20)
-        tk.Button(top, text="확인", command=top.destroy, bg='#00aa00', fg='#ffffff',
-                 font=('Arial', 12, 'bold'), padx=30, pady=10).pack(pady=20)
-        top.transient()
-        top.grab_set()
-        top.wait_window()
-    
-    @staticmethod
-    def showwarning(title, message):
-        top = tk.Toplevel()
-        top.title(title)
-        top.geometry("600x300")
-        top.configure(bg='#2d2d2d')
-        tk.Label(top, text=message, bg='#2d2d2d', fg='#ffaa00',
-                font=('Arial', 12), wraplength=550, justify='left').pack(expand=True, padx=20, pady=20)
-        tk.Button(top, text="확인", command=top.destroy, bg='#ffaa00', fg='#000000',
-                 font=('Arial', 12, 'bold'), padx=30, pady=10).pack(pady=20)
-        top.transient()
-        top.grab_set()
-        top.wait_window()
-    
-    @staticmethod
-    def askyesno(title, message):
-        top = tk.Toplevel()
-        top.title(title)
-        top.geometry("600x300")
-        top.configure(bg='#2d2d2d')
-        result = [False]
-        
-        tk.Label(top, text=message, bg='#2d2d2d', fg='#ffffff',
-                font=('Arial', 12), wraplength=550, justify='left').pack(expand=True, padx=20, pady=20)
-        
+        result = [None]
+
+        # 버튼을 먼저 아래에 붙인다 → 글이 길어도 버튼은 항상 보임
         btn_frame = tk.Frame(top, bg='#2d2d2d')
-        btn_frame.pack(pady=20)
-        
-        def yes():
-            result[0] = True
-            top.destroy()
-        
-        tk.Button(btn_frame, text="예", command=yes, bg='#00aa00', fg='#ffffff',
-                 font=('Arial', 12, 'bold'), padx=30, pady=10).pack(side='left', padx=10)
-        tk.Button(btn_frame, text="아니오", command=top.destroy, bg='#aa0000', fg='#ffffff',
-                 font=('Arial', 12, 'bold'), padx=30, pady=10).pack(side='left', padx=10)
-        
+        btn_frame.pack(side='bottom', pady=15)
+        for text, value, bg, bfg in buttons:
+            def _click(v=value):
+                result[0] = v
+                top.destroy()
+            tk.Button(btn_frame, text=text, command=_click, bg=bg, fg=bfg,
+                      font=('Arial', 12, 'bold'), padx=30, pady=10).pack(side='left', padx=10)
+
+        lines = str(message).count('\n') + 1
+        if lines > 22:
+            # 아주 긴 글은 스크롤되는 칸에
+            box = tk.Frame(top, bg='#2d2d2d')
+            box.pack(side='top', fill='both', expand=True, padx=15, pady=(15, 0))
+            sb = tk.Scrollbar(box)
+            sb.pack(side='right', fill='y')
+            txt = tk.Text(box, bg='#2d2d2d', fg=fg, font=('Arial', 12), wrap='word',
+                          yscrollcommand=sb.set, relief='flat', height=20, width=60)
+            txt.insert('1.0', message)
+            txt.config(state='disabled')
+            txt.pack(side='left', fill='both', expand=True)
+            sb.config(command=txt.yview)
+        else:
+            tk.Label(top, text=message, bg='#2d2d2d', fg=fg, font=('Arial', 12),
+                     wraplength=550, justify='left').pack(side='top', expand=True, padx=20, pady=(20, 5))
+
+        try:
+            top.update_idletasks()
+            sh = top.winfo_screenheight()
+            w = max(600, top.winfo_reqwidth())
+            h = min(max(250, top.winfo_reqheight()), sh - 120)
+            x = max(0, (top.winfo_screenwidth() - w) // 2)
+            y = max(0, (sh - h) // 2 - 30)
+            top.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
+
+        first, last = buttons[0][1], buttons[-1][1]
+        top.bind('<Return>', lambda e: (result.__setitem__(0, first), top.destroy()))
+        top.bind('<Escape>', lambda e: (result.__setitem__(0, last), top.destroy()))
         top.transient()
         top.grab_set()
+        try:
+            top.focus_force()
+        except Exception:
+            pass
         top.wait_window()
         return result[0]
+
+    @staticmethod
+    def showinfo(title, message):
+        CustomMessageBox._open(title, message, '#ffffff', [("확인", True, '#00aa00', '#ffffff')])
+
+    @staticmethod
+    def showwarning(title, message):
+        CustomMessageBox._open(title, message, '#ffaa00', [("확인", True, '#ffaa00', '#000000')])
+
+    @staticmethod
+    def askyesno(title, message):
+        r = CustomMessageBox._open(title, message, '#ffffff',
+                                   [("예", True, '#00aa00', '#ffffff'),
+                                    ("아니오", False, '#aa0000', '#ffffff')])
+        return bool(r)
 
 # ==================== 🔌 웹소켓 (차트·계좌 실시간 수신) ====================
 # 1_config.py 의 WEBSOCKET_MODE
