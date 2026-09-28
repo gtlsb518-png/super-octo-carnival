@@ -4667,10 +4667,14 @@ class App:
         oldest = now - 179 * 86400 * 1000   # 바이낸스는 체결 기록을 6개월까지만 준다
         ms = None
         if STATS_START_DATE:
-            try:
-                ms = int(datetime.strptime(STATS_START_DATE[:10], '%Y-%m-%d').timestamp() * 1000)
-            except ValueError:
-                print(f"⚠️ STATS_START_DATE='{STATS_START_DATE}' 형식 오류 (예: 2026-09-01) → 무시")
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+                try:
+                    ms = int(datetime.strptime(STATS_START_DATE.strip(), fmt).timestamp() * 1000)
+                    break
+                except ValueError:
+                    continue
+            else:
+                print(f"⚠️ STATS_START_DATE='{STATS_START_DATE}' 형식 오류 (예: 2026-09-01 또는 2026-09-28 22:30) → 무시")
         if ms is None:
             ms = getattr(self, '_saved_stats_start_ms', None)
         if ms is None:
@@ -4939,7 +4943,7 @@ class App:
 
         if first_time and ok_all:
             self._stats_ok = True
-            since = datetime.fromtimestamp(S['start_ms'] / 1000).strftime('%Y-%m-%d')
+            since = datetime.fromtimestamp(S['start_ms'] / 1000).strftime('%Y-%m-%d %H:%M')
             tot = sum(c['stats'].get('total_pnl', 0) for c in self.coins)
             fee = sum(c['stats'].get('total_fee', 0) for c in self.coins)
             fund = sum(c['stats'].get('funding_total', 0) for c in self.coins)
