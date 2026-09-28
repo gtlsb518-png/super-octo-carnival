@@ -84,6 +84,14 @@ def save_settings(s):
         print(f"설정 저장 실패: {e}")
 
 _settings = load_settings()
+
+# 📊 통계 기준일 (1_config.py 의 STATS_START_DATE = "2026-09-01" 형식).
+#    비워두면 처음 켠 날 기준 30일 전부터 → 그 날짜를 bot_stats.json 에 기억해서 계속 씀.
+#    ⭐ 컴퓨터를 옮겨도 숫자를 똑같이 보려면 두 컴퓨터의 1_config.py 에 같은 날짜를 적으세요.
+try:
+    STATS_START_DATE = str(getattr(importlib.import_module('1_config'), 'STATS_START_DATE', '') or '').strip()
+except Exception:
+    STATS_START_DATE = ''
 API_KEY = _settings.get('api_key', '')
 API_SECRET = _settings.get('api_secret', '')
 TESTNET = _settings.get('testnet', True)
@@ -474,6 +482,19 @@ class BinanceAPI:
         s_ = format(q.normalize(), 'f') if q != 0 else '0'
         return s_, float(q)
 
+    def qty_units(self, symbol):
+        """코인의 주문 단위 정보. src='거래소' 면 바이낸스가 준 값, '예비값' 이면 조회 실패로 대체값"""
+        self._load_exchange_info()
+        sc = symbol.replace('/', '')
+        live = sc in self._step_cache
+        return {
+            'step': self._step_cache.get(sc) or self._STEP_FALLBACK.get(sc, '0.001'),
+            'min': self._minqty_cache.get(sc) or self._STEP_FALLBACK.get(sc, '0.001'),
+            'tick': self._tick_cache.get(sc) or self._TICK_FALLBACK.get(sc, '0.0001'),
+            'notional': float(getattr(self, '_minnotional_cache', {}).get(sc) or 5),
+            'src': '거래소' if live else '예비값',
+        }
+
     def min_qty(self, symbol):
         self._load_exchange_info()
         sc = symbol.replace('/', '')
@@ -524,6 +545,7 @@ class BinanceAPI:
         self._tick_cache = {}
         self._step_cache = {}     # 수량 단위 (LOT_SIZE / MARKET_LOT_SIZE 중 큰 값)
         self._minqty_cache = {}   # 최소 주문 수량
+        self._minnotional_cache = {}   # 최소 주문 금액 (USDT)
         try:
             from decimal import Decimal
             info = self._request('GET', '/fapi/v1/exchangeInfo')
@@ -547,10 +569,11 @@ class BinanceAPI:
                                 cur = self._minqty_cache.get(sym)
                                 if cur is None or Decimal(mn) > Decimal(cur):
                                     self._minqty_cache[sym] = mn
+                        elif ft == 'MIN_NOTIONAL':
+                            nv = f.get('notional') or f.get('minNotional')
+                            if nv:
+                                self._minnotional_cache[sym] = nv
                 print(f"✅ exchangeInfo 로드: {len(self._tick_cache)}개 심볼 (가격·수량 단위)")
-                for c in ('ADAUSDT', 'SUIUSDT', 'SOLUSDT', 'XRPUSDT'):
-                    if c in self._step_cache:
-                        print(f"   {c} 수량 단위 {self._step_cache[c]} / 최소 {self._minqty_cache.get(c)}")
         except Exception as e:
             print(f"⚠️ exchangeInfo 로드 실패 (fallback 사용): {e}")
 
@@ -690,9 +713,10 @@ class BinanceAPI:
         return self._request('GET', '/fapi/v1/income', params=params, signed=True)
     
     # ==================== 📒 바이낸스 체결 내역 ====================
-    def get_user_trades(self, symbol, from_id=None, start_ms=None, limit=1000):
+    def get_user_trades(self, symbol, from_id=None, start_ms=None, limit=1000, end_ms=None):
         """바이낸스 '거래 내역'과 같은 원본 체결 기록 (/fapi/v1/userTrades).
 
+        start~end 는 최대 7일 (바이낸스 제한). fromId 와 시간은 같이 못 쓴다.
         Returns: 체결 목록(시간순) / 조회 실패 시 None
         """
         params = {'symbol': symbol.replace('/', ''), 'limit': limit}
@@ -700,6 +724,8 @@ class BinanceAPI:
             params['fromId'] = int(from_id)
         elif start_ms is not None:
             params['startTime'] = int(start_ms)
+            if end_ms is not None:
+                params['endTime'] = int(end_ms)
         rows = self._request('GET', '/fapi/v1/userTrades', params=params, signed=True)
         if rows is None:
             return None
@@ -716,13 +742,42 @@ class BinanceAPI:
             else:
                 other[asset] = other.get(asset, 0.0) + fee
         for asset, amt in other.items():
-            try:
-                r = self.session.get(f"{self.chart_url}/fapi/v1/premiumIndex",
-                                     params={'symbol': f'{asset}USDT'}, timeout=10)
-                usdt += amt * float(r.json()['markPrice'])
-            except Exception:
+            px = self.asset_usdt_price(asset)
+            if px:
+                usdt += amt * px
+            else:
                 print(f"[수수료 환산 실패] {asset} {amt} — USDT 합계에서 빠짐")
         return usdt
+
+    def asset_usdt_price(self, asset):
+        """BNB 등 수수료 자산의 USDT 시세 (10분 캐시). 실패 시 None"""
+        cache = self.__dict__.setdefault('_asset_px', {})
+        hit = cache.get(asset)
+        if hit and time.time() - hit[1] < 600:
+            return hit[0]
+        try:
+            r = self.session.get(f"{self.chart_url}/fapi/v1/premiumIndex",
+                                 params={'symbol': f'{asset}USDT'}, timeout=10)
+            px = float(r.json()['markPrice'])
+            cache[asset] = (px, time.time())
+            return px
+        except Exception:
+            return hit[0] if hit else None
+
+    def get_income_all(self, income_type, start_ms):
+        """계좌 전체(모든 코인)의 손익 기록을 start_ms 이후 전부. 실패 시 None"""
+        out, frm = [], int(start_ms)
+        for _ in range(50):
+            rows = self._request('GET', '/fapi/v1/income',
+                                 params={'incomeType': income_type, 'startTime': frm,
+                                         'limit': 1000}, signed=True)
+            if rows is None:
+                return None
+            out += rows
+            if len(rows) < 1000:
+                break
+            frm = int(rows[-1]['time'])   # 같은 시각 겹침은 tranId 로 거른다
+        return out
 
     def get_round_trip(self, symbol):
         """방금 청산된 포지션 한 건을 바이낸스 체결 기록에서 그대로 복원.
@@ -801,6 +856,19 @@ LOG_LOCK = threading.Lock()
 ENTRY_LOCK = threading.Lock()
 CLOSE_LOCK = threading.Lock()  # 🔥 거래소 TP 체결 감지 중복 방지
 EXCEL_LOCK = threading.RLock()  # 🔥 엑셀 동시 저장 방지 (코인 두 개가 동시에 청산되면 한 줄이 사라지던 문제)
+
+def refund_entry_charge(cfg, side):
+    """진입 때 통계에 미리 뺀 진입 수수료를 되돌린다.
+
+    청산 때는 '진입+청산' 수수료를 한 번에 더하므로, 이걸 안 하면
+    진입 수수료가 두 번 빠진다 (수수료·순수익이 실제보다 나빠 보이던 원인).
+    """
+    amt = cfg.pop(f'_fee_charged_{side}', 0) or 0
+    if amt:
+        st = cfg['stats']
+        st[f'{side}_fee'] = st.get(f'{side}_fee', 0) - amt
+        st['total_fee'] = st.get('total_fee', 0) - amt
+        st['total_pnl'] = st.get('total_pnl', 0) + amt
 
 # ==================== 트레이딩 봇 ====================
 class TradingBot:
@@ -1209,6 +1277,7 @@ class TradingBot:
         roi_pct = (pnl_usd / self.config['amount']) * 100 if self.config['amount'] > 0 else 0
 
         # 통계 (기존 익절 경로와 동일한 방식)
+        refund_entry_charge(self.config, side)  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
         self.config['stats'][f'{side}_fee'] = self.config['stats'].get(f'{side}_fee', 0) + total_fee
         self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
         self.config['stats'][f'{side}_count'] += 1
@@ -1813,22 +1882,9 @@ class TradingBot:
                             # 수량 계산 (레버리지 고려)
                             qty = (self.config['amount'] * self.config['leverage']) / signals['price']
                             
-                            # 🔥 코인별 정밀도 (바이낸스 선물 실제 기준!)
-                            symbol_clean = self.config['symbol'].replace('/', '')
-                            
-                            precision_map = {
-                                'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'LINKUSDT': 2,
-                                'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'SUIUSDT': 1,
-                                'DOGEUSDT': 0, 'TRXUSDT': 0,
-                            }
-                            precision = precision_map.get(symbol_clean, 2)
-                            
-                            if precision == 0:
-                                qty = int(round(qty))  # 반올림 후 정수
-                                min_qty = 1
-                            else:
-                                qty = round(qty, precision)
-                                min_qty = 10 ** (-precision)
+                            # 🔥 코인별 소수점 = 바이낸스 거래소 정보(stepSize) 그대로 (코드에 적어두지 않음)
+                            _, qty = self.api.round_qty(self.config['symbol'], qty)
+                            min_qty = self.api.min_qty(self.config['symbol'])
                             
                             # 최소 주문량 체크
                             if qty < min_qty:
@@ -1879,6 +1935,7 @@ class TradingBot:
                                 # 🔥 전체 수수료 및 PNL에 즉시 반영!
                                 self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + entry_fee
                                 self.config['stats']['total_pnl'] -= entry_fee  # 진입 시점에 차감!
+                                self.config[f'_fee_charged_{pos_type.lower()}'] = entry_fee  # 청산 때 중복 차감 방지용
                                 
                                 # 🔥 통계 UI 즉시 업데이트!
                                 self.stats_callback()
@@ -2082,6 +2139,7 @@ class TradingBot:
                             net_profit = pnl_usd - total_fee
                             
                             # 통계
+                            refund_entry_charge(self.config, 'long')  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
                             self.config['stats']['long_fee'] = self.config['stats'].get('long_fee', 0) + total_fee
                             self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
                             
@@ -2178,6 +2236,7 @@ class TradingBot:
                             total_fee = entry_fee + close_fee
                             net_profit = pnl_usd - total_fee
                             
+                            refund_entry_charge(self.config, 'long')  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
                             self.config['stats']['long_fee'] = self.config['stats'].get('long_fee', 0) + total_fee
                             self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
                             
@@ -2249,14 +2308,9 @@ class TradingBot:
                                         self.config["is_entering_short"] = False
                                         continue
                                     
-                                    # 소수점 처리 (바이낸스 실제 기준)
-                                    symbol_clean = self.config['symbol'].replace('/', '')
-                                    p_map = {'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'LINKUSDT': 2,
-                                             'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'SUIUSDT': 1,
-                                             'DOGEUSDT': 0, 'TRXUSDT': 0}
-                                    p = p_map.get(symbol_clean, 2)
+                                    # 소수점 처리 = 바이낸스 거래소 정보(stepSize) 그대로
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
-                                    qty = int(round(raw_qty)) if p == 0 else round(raw_qty, p)
+                                    _, qty = self.api.round_qty(self.config['symbol'], raw_qty)
                                     
                                     # SHORT 주문
                                     order = self.api.create_order(self.config['symbol'], 'SELL', qty)
@@ -2287,6 +2341,7 @@ class TradingBot:
                                         self.config['stats']['short_fee'] = self.config['stats'].get('short_fee', 0) + entry_fee
                                         self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + entry_fee
                                         self.config['stats']['total_pnl'] -= entry_fee  # 진입 시점에 차감!
+                                        self.config['_fee_charged_short'] = entry_fee  # 청산 때 중복 차감 방지용
                                         
                                         # 🔥 통계 UI 즉시 업데이트!
                                         self.stats_callback()
@@ -2432,6 +2487,7 @@ class TradingBot:
                             net_profit = pnl_usd - total_fee
                             
                             # 통계
+                            refund_entry_charge(self.config, 'short')  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
                             self.config['stats']['short_fee'] = self.config['stats'].get('short_fee', 0) + total_fee
                             self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
                             
@@ -2530,6 +2586,7 @@ class TradingBot:
                             total_fee = entry_fee + close_fee
                             net_profit = pnl_usd - total_fee
                             
+                            refund_entry_charge(self.config, 'short')  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
                             self.config['stats']['short_fee'] = self.config['stats'].get('short_fee', 0) + total_fee
                             self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + total_fee
                             
@@ -2601,14 +2658,9 @@ class TradingBot:
                                         self.config["is_entering_long"] = False
                                         continue
                                     
-                                    # 소수점 처리 (바이낸스 실제 기준)
-                                    symbol_clean = self.config['symbol'].replace('/', '')
-                                    p_map = {'BTCUSDT': 3, 'ETHUSDT': 3, 'BNBUSDT': 2, 'LINKUSDT': 2,
-                                             'SOLUSDT': 1, 'XRPUSDT': 1, 'ADAUSDT': 1, 'SUIUSDT': 1,
-                                             'DOGEUSDT': 0, 'TRXUSDT': 0}
-                                    p = p_map.get(symbol_clean, 2)
+                                    # 소수점 처리 = 바이낸스 거래소 정보(stepSize) 그대로
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
-                                    qty = int(round(raw_qty)) if p == 0 else round(raw_qty, p)
+                                    _, qty = self.api.round_qty(self.config['symbol'], raw_qty)
                                     
                                     # LONG 주문
                                     order = self.api.create_order(self.config['symbol'], 'BUY', qty)
@@ -2639,6 +2691,7 @@ class TradingBot:
                                         self.config['stats']['long_fee'] = self.config['stats'].get('long_fee', 0) + entry_fee
                                         self.config['stats']['total_fee'] = self.config['stats'].get('total_fee', 0) + entry_fee
                                         self.config['stats']['total_pnl'] -= entry_fee  # 진입 시점에 차감!
+                                        self.config['_fee_charged_long'] = entry_fee  # 청산 때 중복 차감 방지용
                                         
                                         # 🔥 통계 UI 즉시 업데이트!
                                         self.stats_callback()
@@ -2792,11 +2845,12 @@ class App:
         
         print("=" * 60)
         print("📊 통계: 파일에서 불러오기 시도...")
-        print("📝 거래 기록: trade_history.xlsx에 저장됨")
+        print(f"📝 거래 기록: {TRADE_HISTORY_FILE}에 저장됨")
         print("=" * 60)
         
         self.create_ui()
         self.add_default_coins()  # 기본 10개 코인 추가!
+        threading.Thread(target=self.check_coin_units, daemon=True).start()  # 📏 소수점 점검
         
         # 🔥 저장된 통계 불러오기!
         self.load_stats()
@@ -2806,6 +2860,9 @@ class App:
         
         # 📒 바이낸스 거래내역 시트 자동 동기화 (5분마다 + 청산 직후)
         self.start_binance_sync()
+
+        # 📊 통계를 바이낸스 기록으로 계속 맞춤 (다른 컴퓨터·재시작해도 같은 숫자)
+        self.start_stats_sync()
         
         self.update_balance()
         
@@ -2877,7 +2934,7 @@ class App:
             pass
     
     def select_program_number(self):
-        """프로그램 번호 (9_main.py=1, 9_main_2.py=2)"""
+        """프로그램 번호 (9_main.py 의 DEFAULT_PROGRAM: 프로그램1 폴더=1, 프로그램2 폴더=2)"""
         prog_num = PROGRAM_NUMBER
         self.program_number = prog_num
         self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}")
@@ -3895,6 +3952,303 @@ class App:
     BINANCE_HEADERS = ['시간', '심볼', '방향', '가격', '수량', '체결금액(USDT)',
                        '수수료', '수수료 자산', '역할', '실현 손익', '주문번호', '체결번호']
 
+    # ==================== 📊 통계 = 바이낸스 기록 ====================
+    # 예전엔 통계를 이 컴퓨터의 bot_stats.json 에만 더해 나가서
+    #   · 다른 컴퓨터에서 켜면 0부터 다시 시작하고
+    #   · 진입 수수료가 두 번 빠지는 등 바이낸스 숫자와 어긋났다.
+    # 이제는 기준일 이후 바이낸스 체결·펀딩 기록을 읽어 매번 다시 계산한다.
+    # → 어느 컴퓨터에서 켜도, 몇 번 껐다 켜도 같은 숫자가 나온다.
+    STATS_SYNC_EVERY = 120      # 초 — 전체 코인 다시 맞춤 (진입·청산한 코인은 그 즉시 따로)
+    STATS_FUNDING_EVERY = 600   # 초 — 펀딩은 8시간마다라 10분에 한 번이면 충분
+
+    def _stats_start_ms(self):
+        """통계 기준 시각(ms). 설정 > 저장된 값 > 30일 전 순서."""
+        now = int(time.time() * 1000)
+        oldest = now - 179 * 86400 * 1000   # 바이낸스는 체결 기록을 6개월까지만 준다
+        ms = None
+        if STATS_START_DATE:
+            try:
+                ms = int(datetime.strptime(STATS_START_DATE[:10], '%Y-%m-%d').timestamp() * 1000)
+            except ValueError:
+                print(f"⚠️ STATS_START_DATE='{STATS_START_DATE}' 형식 오류 (예: 2026-09-01) → 무시")
+        if ms is None:
+            ms = getattr(self, '_saved_stats_start_ms', None)
+        if ms is None:
+            ms = now - 30 * 86400 * 1000
+        if ms < oldest:
+            print("⚠️ 통계 기준일이 6개월보다 오래됨 → 바이낸스가 주는 6개월치부터 계산")
+            ms = oldest
+        return int(ms)
+
+    def _wake_stats_sync(self, coin=None):
+        ev = getattr(self, '_stats_wake', None)
+        if ev is not None:
+            if coin is not None:
+                self._stats_dirty.add(coin['symbol'])
+            ev.set()
+
+    def start_stats_sync(self):
+        self._stats_wake = threading.Event()
+        self._stats_state = None          # 첫 계산 때 만든다
+        self._stats_ok = False
+        self._stats_dirty = set()
+
+        def loop():
+            time.sleep(5)
+            only = None
+            while True:
+                try:
+                    self.sync_stats_from_binance(only)
+                except Exception as e:
+                    print(f"[📊 통계 동기화 오류] {e}")
+                woke = self._stats_wake.wait(self.STATS_SYNC_EVERY)
+                self._stats_wake.clear()
+                only = None
+                if woke:
+                    time.sleep(3)          # 체결 기록이 바이낸스에 올라올 시간
+                    self._stats_wake.clear()
+                    only = set(self._stats_dirty)
+                    self._stats_dirty.clear()
+                    if not only or not self._stats_ok:
+                        only = None        # 어떤 코인인지 모르면 / 첫 계산 전이면 전체
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _fetch_new_fills(self, sym, st, now_ms):
+        """sym 의 새 체결만 가져온다. 실패 시 None (다음에 다시)."""
+        got = []
+        if st['last_id'] is None:
+            # 아직 체결을 못 찾은 코인 → 7일 창으로 기준일부터 훑는다
+            t = st['scanned_to']
+            first = None
+            while t < now_ms:
+                end = min(t + 7 * 86400 * 1000 - 1, now_ms)
+                rows = self.api.get_user_trades(sym, start_ms=t, end_ms=end)
+                if rows is None:
+                    return None
+                time.sleep(0.15)           # 한꺼번에 몰리지 않게
+                if rows:
+                    first = int(rows[0]['id'])
+                    break
+                t = end + 1
+            if first is None:
+                st['scanned_to'] = now_ms - 60 * 1000   # 1분 겹쳐서 다음에 이어 본다
+                return []
+            frm = first
+        else:
+            frm = st['last_id'] + 1
+        while True:
+            rows = self.api.get_user_trades(sym, from_id=frm)
+            if rows is None:
+                return None
+            got += rows
+            if len(rows) < 1000:
+                break
+            frm = int(rows[-1]['id']) + 1
+            time.sleep(0.15)
+        seen = st['last_id'] if st['last_id'] is not None else -1
+        return [t for t in got if int(t['id']) > seen and int(t['time']) >= st['start_ms']]
+
+    def _fill_fee_usdt(self, t):
+        fee = abs(float(t.get('commission', 0) or 0))
+        asset = t.get('commissionAsset', 'USDT')
+        if asset in ('USDT', 'USDC', 'FDUSD'):
+            return fee
+        px = self.api.asset_usdt_price(asset)
+        return fee * px if px else 0.0
+
+    @staticmethod
+    def _apply_fills(st, fills, fee_of):
+        """체결을 시간순으로 따라가며 '진입→청산' 한 바퀴씩 묶는다.
+
+        st['trips']  : 끝난 거래 [{side, net, fee, order}]  (net = 실현손익 − 수수료)
+        st['open'][k]: 아직 안 끝난 포지션 {qty, fee, pnl, side}
+        """
+        eps = 1e-9
+        for t in fills:
+            q = float(t['qty'])
+            sq = q if t['side'] == 'BUY' else -q
+            fee = fee_of(t)
+            rp = float(t.get('realizedPnl', 0) or 0)
+            ps = t.get('positionSide') or 'BOTH'
+            k = ps if ps in ('LONG', 'SHORT') else 'BOTH'
+            cur = st['open'].get(k)
+            st['last_id'] = int(t['id'])
+            if cur is None or abs(cur['qty']) < eps:
+                if rp != 0:
+                    # 기준일 전에 잡은 포지션을 청산한 체결 → 청산 건만 거래로 센다
+                    side = 'LONG' if t['side'] == 'SELL' else 'SHORT'
+                    if k in ('LONG', 'SHORT'):
+                        side = k
+                    last = st['trips'][-1] if st['trips'] else None
+                    if last and last.get('orphan') and last['order'] == t['orderId']:
+                        last['net'] += rp - fee; last['fee'] += fee
+                    else:
+                        st['trips'].append({'side': side, 'net': rp - fee, 'fee': fee,
+                                            'order': t['orderId'], 'orphan': True})
+                    continue
+                side = k if k in ('LONG', 'SHORT') else ('LONG' if sq > 0 else 'SHORT')
+                st['open'][k] = {'qty': sq, 'fee': fee, 'pnl': rp, 'side': side}
+                continue
+            if (cur['qty'] > 0) == (sq > 0):          # 물타기/추가 진입
+                cur['qty'] += sq; cur['fee'] += fee; cur['pnl'] += rp
+                continue
+            if abs(sq) <= abs(cur['qty']) + eps:      # 일부/전부 청산
+                cur['qty'] += sq; cur['fee'] += fee; cur['pnl'] += rp
+                if abs(cur['qty']) <= eps * max(1.0, q):
+                    st['trips'].append({'side': cur['side'], 'net': cur['pnl'] - cur['fee'],
+                                        'fee': cur['fee'], 'order': t['orderId']})
+                    st['open'][k] = None
+                continue
+            # 한 주문으로 청산 + 반대 진입 (뒤집기) → 수수료를 수량 비율로 나눈다
+            close_part = abs(cur['qty']) / abs(sq)
+            cur['fee'] += fee * close_part; cur['pnl'] += rp
+            st['trips'].append({'side': cur['side'], 'net': cur['pnl'] - cur['fee'],
+                                'fee': cur['fee'], 'order': t['orderId']})
+            rest = sq + cur['qty']
+            st['open'][k] = {'qty': rest, 'fee': fee * (1 - close_part), 'pnl': 0.0,
+                             'side': 'LONG' if rest > 0 else 'SHORT'}
+
+    @staticmethod
+    def _compose_stats(st, funding):
+        """끝난 거래 + 열린 포지션 수수료 + 펀딩비 → 화면용 통계"""
+        out = {'long_count': 0, 'short_count': 0, 'long_win': 0, 'short_win': 0,
+               'long_loss': 0, 'short_loss': 0, 'long_profit': 0.0, 'short_profit': 0.0,
+               'long_fee': 0.0, 'short_fee': 0.0}
+        for tr in st['trips']:
+            sd = tr['side'].lower()
+            out[f'{sd}_count'] += 1
+            out[f'{sd}_win' if tr['net'] > 0 else f'{sd}_loss'] += 1
+            out[f'{sd}_profit'] += tr['net']
+            out[f'{sd}_fee'] += tr['fee']
+        open_net = 0.0
+        for cur in st['open'].values():
+            if cur and abs(cur['qty']) > 1e-12:
+                out[f"{cur['side'].lower()}_fee"] += cur['fee']   # 진입 수수료는 이미 냈다
+                open_net += cur['pnl'] - cur['fee']
+        out['total_fee'] = out['long_fee'] + out['short_fee']
+        out['funding_total'] = funding
+        out['total_pnl'] = out['long_profit'] + out['short_profit'] + open_net + funding
+        return out
+
+    def sync_stats_from_binance(self, only=None):
+        """기준일 이후 바이낸스 기록으로 코인 통계를 다시 맞춘다 (only=코인 심볼 모음이면 그것만)."""
+        if not getattr(self, 'api', None) or not self.coins:
+            return
+        now = int(time.time() * 1000)
+        if self._stats_state is None:
+            start = self._stats_start_ms()
+            self._saved_stats_start_ms = start
+            self._stats_state = {'start_ms': start, 'syms': {},
+                                 'fund_ids': set(), 'fund': {}, 'fund_from': start, 'fund_at': 0}
+        S = self._stats_state
+        first_time = not self._stats_ok
+        ok_all = True
+
+        targets = [c for c in list(self.coins) if only is None or c['symbol'] in only]
+        for coin in targets:
+            sym = coin['symbol'].replace('/', '')
+            st = S['syms'].get(sym)
+            if st is None:
+                st = S['syms'][sym] = {'start_ms': S['start_ms'], 'last_id': None,
+                                       'scanned_to': S['start_ms'], 'trips': [], 'open': {}}
+            fills = self._fetch_new_fills(sym, st, now)
+            if fills is None:
+                ok_all = False
+                continue
+            if fills:
+                self._apply_fills(st, fills, self._fill_fee_usdt)
+
+        # 펀딩비: 계좌 전체 기록 한 번에 받아서 내 코인 것만 (10분에 한 번)
+        rows = []
+        if time.time() - S['fund_at'] >= self.STATS_FUNDING_EVERY:
+            rows = self.api.get_income_all('FUNDING_FEE', S['fund_from'])
+            if rows is not None:
+                S['fund_at'] = time.time()
+        if rows is None:
+            ok_all = False
+        else:
+            for r in rows:
+                tid = r.get('tranId')
+                if tid in S['fund_ids']:
+                    continue
+                S['fund_ids'].add(tid)
+                S['fund'][r.get('symbol', '')] = S['fund'].get(r.get('symbol', ''), 0.0) + float(r['income'])
+                S['fund_from'] = max(S['fund_from'], int(r['time']))
+
+        if not ok_all and first_time:
+            return   # 첫 계산이 덜 끝났으면 화면을 바꾸지 않는다 (반쪽 숫자 방지)
+
+        for coin in (list(self.coins) if (first_time or rows) else targets):   # 새 펀딩이 있으면 전체
+            sym = coin['symbol'].replace('/', '')
+            st = S['syms'].get(sym)
+            if st is None:
+                continue
+            new = self._compose_stats(st, S['fund'].get(sym, 0.0))
+            coin.setdefault('stats', {}).update(new)
+            self._refresh_stats_ui(coin)
+
+        if first_time and ok_all:
+            self._stats_ok = True
+            since = datetime.fromtimestamp(S['start_ms'] / 1000).strftime('%Y-%m-%d')
+            tot = sum(c['stats'].get('total_pnl', 0) for c in self.coins)
+            fee = sum(c['stats'].get('total_fee', 0) for c in self.coins)
+            fund = sum(c['stats'].get('funding_total', 0) for c in self.coins)
+            print(f"📊 통계를 바이낸스 기록으로 맞췄습니다 (기준일 {since}부터) — "
+                  f"순수익 ${tot:+.2f} | 수수료 -${fee:.2f} | 펀딩 ${fund:+.2f}")
+            self.save_stats()
+
+    def check_coin_units(self):
+        """📏 켤 때 코인마다 '바이낸스 주문 단위'와 실제 주문 수량을 한 번 보여준다.
+
+        수량 소수점은 코드에 적어두지 않고 바이낸스 거래소 정보(stepSize)를 그대로 쓴다.
+        여기서 ❌/⚠️ 가 뜨면 그 코인은 진입이 안 되거나 금액이 크게 달라진다.
+        """
+        time.sleep(2)
+        lines, bad, unknown = [], 0, 0
+        for coin in list(self.coins):
+            sym = coin['symbol']
+            try:
+                u = self.api.qty_units(sym)
+                df = self.api.get_klines(sym, coin.get('timeframe', '1h'), limit=2)
+                price = float(df['close'].iloc[-1]) if df is not None and len(df) else None
+            except Exception as e:
+                lines.append(f"   {sym:<10} 확인 실패: {e}")
+                bad += 1
+                continue
+            target = coin['amount'] * coin['leverage']
+            head = f"   {sym:<10} 단위 {u['step']:<6} 최소 {u['min']:<6} 호가 {u['tick']:<8}"
+            if not price:
+                unknown += 1
+                lines.append(head + " 가격 조회 실패"
+                             + (" (거래소 정보도 못 받아 예비값)" if u['src'] != '거래소' else ""))
+                continue
+            qs, q = self.api.round_qty(sym, target / price)
+            real = q * price
+            mark = '✅'
+            note = ''
+            if q < float(u['min']) or q <= 0:
+                mark, note = '❌', ' ← 최소 수량보다 작음: 진입 불가 (진입금을 늘리세요)'
+            elif real < u['notional']:
+                mark, note = '❌', f" ← 최소 주문금액 {u['notional']:.0f} USDT 미만: 진입 불가"
+            elif real < target * 0.8:
+                mark, note = '⚠️', ' ← 단위가 커서 목표 금액보다 20% 넘게 작게 들어감'
+            if u['src'] != '거래소':
+                note += ' (거래소 정보 못 받아 예비값 사용)'
+            if mark != '✅':
+                bad += 1
+            lines.append(f"{head} → {qs}개 = {real:,.1f} USDT {mark}{note}")
+        print("=" * 60)
+        print(f"📏 주문 수량 소수점 점검 (진입금 × 레버리지 기준, 프로그램 #{PROGRAM_NUMBER})")
+        for l in lines:
+            print(l)
+        if bad:
+            print(f"   ⚠️ 확인 필요 {bad}개")
+        elif unknown:
+            print(f"   ⚠️ 가격을 못 받아 {unknown}개는 수량 확인 못 함 (인터넷 확인 — 주문 땐 다시 계산)")
+        else:
+            print("   모두 정상 ✅")
+        print("=" * 60)
+
     def start_binance_sync(self):
         """바이낸스 체결 기록을 엑셀에 그대로 옮겨 적는 작업을 5분마다 돌린다."""
         if not OPENPYXL_AVAILABLE:
@@ -4129,7 +4483,7 @@ class App:
         print("🔚 프로그램 종료 중...")
         print("=" * 60)
         print("📊 통계 저장 중...")
-        print("📝 거래 기록: trade_history.xlsx에 저장됨")
+        print(f"📝 거래 기록: {TRADE_HISTORY_FILE}에 저장됨")
         print("=" * 60)
         
         # 🔥 통계 저장!
@@ -4153,6 +4507,7 @@ class App:
             
             data = {
                 'global_stats': self.global_stats,
+                'stats_start_ms': getattr(self, '_saved_stats_start_ms', None),
                 'coins': {}
             }
             
@@ -4186,6 +4541,9 @@ class App:
             with open(STATS_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
+            if data.get('stats_start_ms'):
+                self._saved_stats_start_ms = int(data['stats_start_ms'])
+
             # 전체 통계 불러오기
             if 'global_stats' in data:
                 self.global_stats = data['global_stats']
@@ -4230,12 +4588,12 @@ class App:
             print(f"✅ 통계 불러오기 완료!")
             
             # 🔥 UI에 통계 반영
-            self.root.after(500, self._refresh_stats_ui)
+            self.root.after(500, self._refresh_all_stats_ui)
             
         except Exception as e:
             print(f"❌ 통계 불러오기 실패: {e}")
     
-    def _refresh_stats_ui(self):
+    def _refresh_all_stats_ui(self):
         """🔥 저장된 통계를 UI에 반영"""
         try:
             # 전체 통계 UI 업데이트
@@ -5156,6 +5514,7 @@ class App:
                     net_profit = pnl_usd - total_fee
                     
                     # 통계 업데이트 (순수익 기준!)
+                    refund_entry_charge(coin, key)  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
                     if side == 'LONG':
                         coin['stats']['long_count'] += 1
                         if net_profit > 0:
@@ -5164,8 +5523,8 @@ class App:
                             coin['stats']['long_loss'] += 1
                         coin['stats']['long_profit'] += net_profit
                         coin['stats']['total_pnl'] += net_profit
-                        coin['stats']['long_fee'] = coin['stats'].get('long_fee', 0) + close_fee
-                        coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + close_fee
+                        coin['stats']['long_fee'] = coin['stats'].get('long_fee', 0) + total_fee
+                        coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
                     else:  # SHORT
                         coin['stats']['short_count'] += 1
                         if net_profit > 0:
@@ -5174,8 +5533,8 @@ class App:
                             coin['stats']['short_loss'] += 1
                         coin['stats']['short_profit'] += net_profit
                         coin['stats']['total_pnl'] += net_profit
-                        coin['stats']['short_fee'] = coin['stats'].get('short_fee', 0) + close_fee
-                        coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + close_fee
+                        coin['stats']['short_fee'] = coin['stats'].get('short_fee', 0) + total_fee
+                        coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
                     
                     # 청산
                     self.api.close_position(coin['symbol'])
@@ -5338,23 +5697,9 @@ class App:
                     # 수량 계산 (정확하게!)
                     qty = (coin['amount'] * coin['leverage']) / current_price
                     
-                    # 🔥 코인별 정밀도 정확하게 조정!
-                    symbol_clean = coin['symbol'].replace('/', '')
-                    
-                    if symbol_clean in ['BTCUSDT', 'ETHUSDT']:
-                        qty = round(qty, 3)
-                        min_qty = 0.001
-                    elif symbol_clean in ['SOLUSDT', 'AVAXUSDT', 'DOTUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT']:
-                        qty = int(qty)
-                        if qty < 1:
-                            qty = 1
-                        min_qty = 1
-                    elif symbol_clean in ['BNBUSDT', 'LTCUSDT']:
-                        qty = round(qty, 2)
-                        min_qty = 0.01
-                    else:
-                        qty = round(qty, 2)
-                        min_qty = 0.01
+                    # 🔥 코인별 소수점 = 바이낸스 거래소 정보(stepSize) 그대로
+                    _, qty = self.api.round_qty(coin['symbol'], qty)
+                    min_qty = self.api.min_qty(coin['symbol'])
                     
                     # 최소 주문량 체크
                     if qty < min_qty:
@@ -5473,6 +5818,7 @@ class App:
                             coin['stats']['short_fee'] = coin['stats'].get('short_fee', 0) + entry_fee
                         coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + entry_fee
                         coin['stats']['total_pnl'] = coin['stats'].get('total_pnl', 0) - entry_fee
+                        coin[f'_fee_charged_{side.lower()}'] = entry_fee  # 청산 때 중복 차감 방지용
                         
                         # 🔥🔥🔥 거래소 TP 주문 등록 (설정가 도달 시 거래소가 즉시 청산!)
                         try:
@@ -5577,7 +5923,12 @@ class App:
         log_text.see('end')
     
     def update_stats(self, coin):
-        """코인별 통계 업데이트 (스레드 안전!)"""
+        """진입·청산 뒤 불린다 → 화면 갱신 + 바이낸스 기록으로 다시 맞추기 요청."""
+        self._refresh_stats_ui(coin)
+        self._wake_stats_sync(coin)
+
+    def _refresh_stats_ui(self, coin):
+        """코인별 통계 화면만 다시 그린다 (스레드 안전!)"""
         def _do_update():
             try:
                 stats = coin['stats']
@@ -5596,7 +5947,9 @@ class App:
                     short_loss = stats['short_loss']
                     short_fee = stats.get('short_fee', 0)
                     short_pnl_sign = '+' if stats['short_profit'] >= 0 else ''
-                    stats_text = (f"순수익: {pnl_sign}${total_pnl:.2f} | 수수료: -${total_fee:.2f}\n"
+                    fund = stats.get('funding_total', 0) or 0
+                    fund_txt = f" | 펀딩: {'+' if fund >= 0 else '-'}${abs(fund):.2f}" if fund else ""
+                    stats_text = (f"순수익: {pnl_sign}${total_pnl:.2f} | 수수료: -${total_fee:.2f}{fund_txt}\n"
                                 f"L:{long_total}회 (익{long_win}/손{long_loss}) {long_pnl_sign}${stats['long_profit']:.2f} (수수료 -${long_fee:.2f})\n"
                                 f"S:{short_total}회 (익{short_win}/손{short_loss}) {short_pnl_sign}${stats['short_profit']:.2f} (수수료 -${short_fee:.2f})")
                     coin['stats_label'].config(text=stats_text, fg=pnl_color)

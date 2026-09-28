@@ -26,10 +26,13 @@ from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 🔢 프로그램 번호 — 'python 9_main.py 2' 로 켜거나 9_main_2.py 를 실행하면 2번
+# 🔢 프로그램 번호 — 1 = 코인 1~10번, 2 = 코인 11~20번
+#    프로그램2 폴더의 이 파일은 2로 되어 있습니다. 나머지 파일은 1번과 완전히 같습니다.
+DEFAULT_PROGRAM = 1
+
 if len(sys.argv) > 1 and sys.argv[1].isdigit():
     os.environ['BOT_PROGRAM'] = sys.argv[1]
-PROGRAM_NUMBER = os.environ.get('BOT_PROGRAM', '1')
+PROGRAM_NUMBER = os.environ.get('BOT_PROGRAM', str(DEFAULT_PROGRAM))
 if not PROGRAM_NUMBER.isdigit() or int(PROGRAM_NUMBER) < 1:
     PROGRAM_NUMBER = '1'
 os.environ['BOT_PROGRAM'] = PROGRAM_NUMBER
