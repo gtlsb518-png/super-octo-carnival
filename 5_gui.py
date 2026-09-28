@@ -4760,12 +4760,25 @@ class App:
     def _apply_fills(st, fills, fee_of):
         """체결을 시간순으로 따라가며 '진입→청산' 한 바퀴씩 묶는다.
 
-        st['trips']  : 끝난 거래 [{side, net, fee, order}]  (net = 실현손익 − 수수료)
-        st['open'][k]: 아직 안 끝난 포지션 {qty, fee, pnl, side}
+        st['trips']  : 끝난 거래 [{side, net, fee, order, 시간·수량·가격}]  (net = 실현손익 − 수수료)
+        st['open'][k]: 아직 안 끝난 포지션 {qty, fee, pnl, side, ...}
         """
         eps = 1e-9
+
+        def _new_open(side, sq, fee, rp, t, px):
+            return {'qty': sq, 'fee': fee, 'pnl': rp, 'side': side, 'open_t': int(t['time']),
+                    'oq': abs(sq), 'onot': abs(sq) * px, 'cq': 0.0, 'cnot': 0.0}
+
+        def _finish(cur, t):
+            st['trips'].append({
+                'side': cur['side'], 'net': cur['pnl'] - cur['fee'], 'fee': cur['fee'], 'rp': cur['pnl'],
+                'order': t['orderId'], 'open_t': cur['open_t'], 'close_t': int(t['time']),
+                'qty': cur['oq'], 'entry_px': cur['onot'] / cur['oq'] if cur['oq'] else 0.0,
+                'exit_px': cur['cnot'] / cur['cq'] if cur['cq'] else 0.0})
+
         for t in fills:
             q = float(t['qty'])
+            px = float(t.get('price', 0) or 0)
             sq = q if t['side'] == 'BUY' else -q
             fee = fee_of(t)
             rp = float(t.get('realizedPnl', 0) or 0)
@@ -4781,32 +4794,64 @@ class App:
                         side = k
                     last = st['trips'][-1] if st['trips'] else None
                     if last and last.get('orphan') and last['order'] == t['orderId']:
-                        last['net'] += rp - fee; last['fee'] += fee
+                        last['net'] += rp - fee; last['fee'] += fee; last['rp'] += rp
+                        last['cnot'] += q * px; last['qty'] += q
+                        last['exit_px'] = last['cnot'] / last['qty']
+                        last['close_t'] = int(t['time'])
                     else:
-                        st['trips'].append({'side': side, 'net': rp - fee, 'fee': fee,
-                                            'order': t['orderId'], 'orphan': True})
+                        st['trips'].append({'side': side, 'net': rp - fee, 'fee': fee, 'rp': rp,
+                                            'order': t['orderId'], 'orphan': True, 'open_t': None,
+                                            'close_t': int(t['time']), 'qty': q, 'cnot': q * px,
+                                            'exit_px': px, 'entry_px': None})
                     continue
                 side = k if k in ('LONG', 'SHORT') else ('LONG' if sq > 0 else 'SHORT')
-                st['open'][k] = {'qty': sq, 'fee': fee, 'pnl': rp, 'side': side}
+                st['open'][k] = _new_open(side, sq, fee, rp, t, px)
                 continue
             if (cur['qty'] > 0) == (sq > 0):          # 물타기/추가 진입
                 cur['qty'] += sq; cur['fee'] += fee; cur['pnl'] += rp
+                cur['oq'] += q; cur['onot'] += q * px
                 continue
             if abs(sq) <= abs(cur['qty']) + eps:      # 일부/전부 청산
                 cur['qty'] += sq; cur['fee'] += fee; cur['pnl'] += rp
+                cur['cq'] += q; cur['cnot'] += q * px
                 if abs(cur['qty']) <= eps * max(1.0, q):
-                    st['trips'].append({'side': cur['side'], 'net': cur['pnl'] - cur['fee'],
-                                        'fee': cur['fee'], 'order': t['orderId']})
+                    _finish(cur, t)
                     st['open'][k] = None
                 continue
             # 한 주문으로 청산 + 반대 진입 (뒤집기) → 수수료를 수량 비율로 나눈다
-            close_part = abs(cur['qty']) / abs(sq)
+            close_q = abs(cur['qty'])
+            close_part = close_q / abs(sq)
             cur['fee'] += fee * close_part; cur['pnl'] += rp
-            st['trips'].append({'side': cur['side'], 'net': cur['pnl'] - cur['fee'],
-                                'fee': cur['fee'], 'order': t['orderId']})
+            cur['cq'] += close_q; cur['cnot'] += close_q * px
+            _finish(cur, t)
             rest = sq + cur['qty']
-            st['open'][k] = {'qty': rest, 'fee': fee * (1 - close_part), 'pnl': 0.0,
-                             'side': 'LONG' if rest > 0 else 'SHORT'}
+            st['open'][k] = _new_open('LONG' if rest > 0 else 'SHORT', rest, fee * (1 - close_part), 0.0, t, px)
+
+    def _report_big_trades(self, S):
+        """손익이 큰 거래는 콘솔에 자세히 (시간·수량·가격). 강제청산 같은 일을 바로 알아보게."""
+        seen = self.__dict__.setdefault('_big_reported', set())
+        margin = {c['symbol'].replace('/', ''): float(c.get('amount', 50) or 50) for c in self.coins}
+        fmt_t = lambda ms: datetime.fromtimestamp(ms / 1000).strftime('%m-%d %H:%M') if ms else '?'
+        for sym, st in S['syms'].items():
+            m = margin.get(sym, 50.0)
+            for tr in st['trips']:
+                key = (sym, tr['order'], tr['close_t'])
+                if key in seen or abs(tr['net']) < max(10.0, 0.3 * m):
+                    continue
+                seen.add(key)
+                qty, exit_px = tr['qty'], tr['exit_px']
+                entry = tr.get('entry_px')
+                if entry is None and qty:        # 기준일 전 진입 → 실현손익으로 진입가 역산
+                    entry = exit_px - tr['rp'] / qty if tr['side'] == 'LONG' else exit_px + tr['rp'] / qty
+                move = ((exit_px - entry) / entry * 100 * (1 if tr['side'] == 'LONG' else -1)) if entry else 0
+                tag = '이익' if tr['net'] > 0 else '손실'
+                print(f"🔎 {sym[:-4]}/USDT {tr['side']} 큰 {tag} ${tr['net']:+.2f} | "
+                      f"진입 {fmt_t(tr['open_t']) if tr['open_t'] else '기준일 전'} ~{fmt_px(entry)} → "
+                      f"청산 {fmt_t(tr['close_t'])} {fmt_px(exit_px)} | {qty:g}개 | 가격이 {'유리하게' if move >= 0 else '불리하게'} {abs(move):.1f}% | "
+                      f"실현손익 {tr['rp']:+.2f} 수수료 {tr['fee']:.2f}")
+                if tr['net'] < 0 and abs(tr['net']) >= 0.9 * m:
+                    print(f"   → 증거금({m:.0f} USDT)을 거의 다 잃음 = 강제청산으로 보입니다 "
+                          f"(바이낸스 주문 내역에서 '강제청산/Liquidation' 확인)")
 
     @staticmethod
     def _compose_stats(st, funding):
@@ -4886,6 +4931,11 @@ class App:
             new = self._compose_stats(st, S['fund'].get(sym, 0.0))
             coin.setdefault('stats', {}).update(new)
             self._refresh_stats_ui(coin)
+
+        try:
+            self._report_big_trades(S)
+        except Exception as e:
+            print(f"[🔎 큰 거래 보고 오류] {e}")
 
         if first_time and ok_all:
             self._stats_ok = True
