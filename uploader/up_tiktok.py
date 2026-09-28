@@ -5,7 +5,7 @@
 전체 흐름:
   1. tiktok.com/tiktokstudio/upload 접속 (로그인 확인)
   2. 영상 파일 선택
-  3. 설명(캡션) + 해시태그 입력
+  3. 설명(캡션) 입력 — 해시태그는 제목/상세정보에 직접 적어둔 그대로 들어감
   4. 커버(썸네일) 지정   ※ 실패해도 업로드는 계속
   5. 공개 범위 설정
   6. **예약 게시** 날짜·시간 설정 (사용자 지정)
@@ -191,9 +191,8 @@ def upload(page, cfg, log):
     """
     cfg 키:
       video    : 영상 파일 경로 (필수)
-      title    : 제목 (캡션 첫 줄로 들어감)
+      title    : 제목 (캡션 첫 줄로 들어감, #해시태그를 여기에 직접 적음)
       desc     : 상세 설명
-      tags     : 태그 (쉼표 구분, 자동으로 #붙임)
       cover    : 커버 이미지 경로 (선택)
       privacy  : 'public' | 'friends' | 'private'
       schedule : 'YYYY-MM-DD HH:MM' (비우면 지금 바로 게시)
@@ -223,14 +222,13 @@ def upload(page, cfg, log):
     time.sleep(5)
 
     # ---------- 3. 캡션(제목+설명+태그) ----------
-    log("[3/7] 제목·설명·태그 입력 중...")
+    log("[3/7] 제목·설명 입력 중...")
     parts = []
     if cfg.get("title", "").strip():
         parts.append(cfg["title"].strip())
     if cfg.get("desc", "").strip():
         parts.append(cfg["desc"].strip())
     caption = "\n".join(parts)
-    tags = [t.strip().lstrip("#") for t in cfg.get("tags", "").split(",") if t.strip()]
 
     try:
         cap, fr = _find_any(page, SEL["캡션 입력창"], timeout=60000)
@@ -246,14 +244,13 @@ def upload(page, cfg, log):
                 page.keyboard.press("Shift+Enter")
             page.keyboard.type(line, delay=12)
 
-        # 해시태그: 입력 후 자동완성 창을 ESC 로 닫고 공백
-        for t in tags:
-            page.keyboard.type(" #" + t, delay=25)
-            time.sleep(1.2)
-            page.keyboard.press("Escape")
-            time.sleep(0.3)
-        if tags:
-            page.keyboard.type(" ", delay=10)
+        # 해시태그는 제목/상세정보 안에 직접 적어 넣는다.
+        # '#' 을 치면 틱톡이 자동완성 목록을 띄우는데, 그대로 두면
+        # 다음 클릭을 가로채므로 ESC 로 닫아준다.
+        time.sleep(1.2)
+        page.keyboard.press("Escape")
+        time.sleep(0.4)
+        page.keyboard.press("Escape")
 
         log("  - 캡션 입력 완료")
     except Exception as e:

@@ -10,6 +10,7 @@
   up_browser.py
   up_youtube.py
   up_tiktok.py
+  up_check.py
   up_gui.py
   up_main.py (이 파일)
 """
@@ -37,6 +38,7 @@ print("🔍 필수 라이브러리 확인 중...")
 
 required = {
     "playwright": "playwright",   # 브라우저 자동 조작
+    "PIL": "pillow",              # 썸네일 미리보기
 }
 
 missing = []
@@ -83,8 +85,8 @@ print("-" * 60)
 print("사용 순서")
 print("  1) 크롬을 완전히 종료 → [① 크롬 로그인 정보 가져오기]  (최초 1회만)")
 print("  2) [② 업로드용 크롬 열기] → 로그인 상태 확인")
-print("  3) 제목/상세정보/태그/파일/썸네일 입력")
-print("  4) [유튜브 업로드] 또는 [틱톡 업로드] 버튼 클릭")
+print("  3) 유튜브(숏) / 유튜브(롱) / 틱톡 칸에 각각 내용 입력")
+print("  4) 각 칸의 업로드 버튼, 또는 [숏 + 틱톡 동시 업로드] 클릭")
 print("-" * 60)
 print()
 
