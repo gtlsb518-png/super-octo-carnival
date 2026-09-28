@@ -519,7 +519,7 @@ class BinanceAPI:
         sc = symbol.replace('/', '')
         return float(self._minqty_cache.get(sc) or self._STEP_FALLBACK.get(sc, '0.001'))
 
-    def create_order(self, symbol, side, quantity, position_side=None):
+    def create_order(self, symbol, side, quantity, position_side=None, reduce_only=False):
         symbol_clean = symbol.replace('/', '')
         self._remember_error(None)
 
@@ -539,6 +539,11 @@ class BinanceAPI:
             'type': 'MARKET',
             'quantity': quantity
         }
+        if reduce_only:
+            # 청산 주문은 '줄이기만' — 이미 포지션이 없으면 바이낸스가 거절한다.
+            # (없으면 반대 방향 새 포지션이 열려버림: 거래소 TP 와 동시에 청산하거나
+            #  다른 컴퓨터에서 같은 봇이 먼저 청산한 경우)
+            params['reduceOnly'] = 'true'
         
         # positionSide는 Hedge Mode에서만 사용
         # One-Way Mode에서는 제거
@@ -775,11 +780,18 @@ class BinanceAPI:
             self.cancel_all_orders(symbol)
         except Exception:
             pass
+        self.invalidate_position_cache()   # 방금 거래소 TP 로 닫혔을 수 있으니 최신 값으로
         position = self.get_position(symbol)
         if position:
             side = 'SELL' if position['side'] == 'long' else 'BUY'
-            result = self.create_order(symbol, side, position['amount'])
+            result = self.create_order(symbol, side, abs(position['amount']), reduce_only=True)
             self.invalidate_position_cache()  # 🔥 청산 후 캐시 무효화
+            if not result:
+                # 거절됐는데 포지션이 이미 없다 = 거래소 TP 가 먼저 청산함 → 청산된 것으로 본다
+                again = self.get_position(symbol)
+                if again is not None and not again:
+                    print(f"[ℹ️] {symbol}: 거래소 TP 가 먼저 청산 — 봇 청산 주문은 취소됨 (반대 포지션 안 열림)")
+                    return {'already_closed': True}
             return result
         return True
     
@@ -3858,7 +3870,7 @@ class App:
                                     try:
                                         # 청산 (symbol은 BTCUSDT 형식 그대로)
                                         close_side = 'SELL' if pos_amt > 0 else 'BUY'
-                                        self.api.create_order(symbol_display, close_side, abs(pos_amt))
+                                        self.api.create_order(symbol_display, close_side, abs(pos_amt), reduce_only=True)
                                         
                                         close_success = True
                                         closed_count += 1
@@ -5747,7 +5759,8 @@ class App:
                         close_order = self.api.create_order(
                             coin['symbol'],
                             close_side,
-                            close_qty
+                            close_qty,
+                            reduce_only=True
                         )
                         
                         if close_order:
