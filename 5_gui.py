@@ -242,7 +242,7 @@ class BinanceAPI:
         params['signature'] = signature
         return params
     
-    def _request(self, method, endpoint, params=None, signed=False):
+    def _request(self, method, endpoint, params=None, signed=False, quiet=False):
         url = f"{self.base_url}{endpoint}"
         if params is None:
             params = {}
@@ -275,12 +275,14 @@ class BinanceAPI:
                     elif ec == -1015:
                         print(f"⚠️ 요청 제한! 3초 대기...")
                         time.sleep(3)
-                    else:
+                    elif not quiet:
                         print(f"API 오류: {error_data}")
                     self._remember_error(error_data)
                 except:
-                    print(f"API 오류: {e.response.text}")
-                    self._remember_error({'code': None, 'msg': e.response.text[:200]})
+                    if not quiet:
+                        print(f"API 오류: {e.response.text}")
+                    self._remember_error({'code': None, 'msg': e.response.text[:200],
+                                          'http': e.response.status_code})
             return None
         except requests.exceptions.ConnectionError:
             print(f"🔌 연결 끊김! 2초 후 재시도...")
@@ -340,7 +342,7 @@ class BinanceAPI:
             print(f"[펀딩비 조회 실패] {symbol}: {e}")
             return None, 0
 
-    def get_close_reason(self, symbol, lookback_ms=10 * 60 * 1000):
+    def get_close_reason(self, symbol, lookback_ms=10 * 60 * 1000, had_algo_tp=False):
         """포지션이 왜 닫혔는지 판별.
 
         Returns: 'tp'     = 봇이 건 TP 주문 체결 (정상)
@@ -375,6 +377,23 @@ class BinanceAPI:
                 return 'tp'
             if otype in ('STOP_MARKET', 'STOP'):
                 return 'tp'      # 봇이 건 손절 주문 — 사람이 끈 게 아니므로 정지 안 함
+            if cid.startswith(self.TP_CLIENT_PREFIX) or str(o.get('origType', '')).startswith('TAKE_PROFIT'):
+                return 'tp'
+            # 알고 TP 가 발동하면 일반 시장가 주문으로 체결된다 → 알고 주문 기록과 맞춰본다
+            algo = self._rows(self._request('GET', '/fapi/v1/allAlgoOrders',
+                                            params={'symbol': symbol.replace('/', ''), 'startTime': since},
+                                            signed=True, quiet=True))
+            if algo:
+                oid, ot = str(o.get('orderId')), int(o.get('updateTime', 0))
+                for a in algo:
+                    if str(a.get('actualOrderId') or '') == oid:
+                        return 'tp'
+                    st = str(a.get('algoStatus') or a.get('status') or '').upper()
+                    at = int(a.get('updateTime') or a.get('triggerTime') or 0)
+                    if st in ('TRIGGERED', 'TRIGGERING', 'FINISHED') and abs(at - ot) < 60 * 1000:
+                        return 'tp'
+            elif algo is None and had_algo_tp:
+                return None      # 알고 기록을 못 봄 → 손익으로 판단하게 넘긴다
             return 'manual'      # 그 외 체결(MARKET/LIMIT) = 사람이 직접 청산
         except Exception as e:
             print(f"[청산 원인 조회 실패] {symbol}: {e}")
@@ -601,26 +620,81 @@ class BinanceAPI:
             decimals = 0
         return f"{result:.{decimals}f}"
 
-    def create_tp_order(self, symbol, position_side, stop_price):
-        """🔥 거래소 측 TP 주문 (TAKE_PROFIT_MARKET + closePosition)
+    TP_CLIENT_PREFIX = 'bottp_'   # 봇이 건 TP 표시 (청산 원인 판별용)
 
-        거래소가 직접 트리거하므로 프로그램 지연 없이 설정가 근처에서 청산됨.
+    def create_tp_order(self, symbol, position_side, stop_price, quantity=None):
+        """🔥 거래소 측 TP 주문 (TAKE_PROFIT_MARKET)
+
+        ⚠️ 바이낸스가 2025-12-09 부터 TP/SL 같은 조건부 주문을 '알고 주문'
+           (/fapi/v1/algoOrder) 으로만 받는다. 예전 주소(/fapi/v1/order)로 보내면
+           -4120 으로 거절돼서 '거래소 TP 주문 등록 실패'가 매번 떴다.
+
+        1) closePosition(전량 청산)  2) 안 되면 수량 + reduceOnly  3) 옛 주소 순서로 시도.
         position_side: 'long'이면 SELL TP, 'short'이면 BUY TP
         """
-        params = {
-            'symbol': symbol.replace('/', ''),
-            'side': 'SELL' if position_side == 'long' else 'BUY',
-            'type': 'TAKE_PROFIT_MARKET',
-            'stopPrice': self.round_price(symbol, stop_price),
-            'closePosition': 'true',
-            'workingType': 'CONTRACT_PRICE',  # 차트(최종가) 기준 트리거
-        }
-        return self._request('POST', '/fapi/v1/order', params=params, signed=True)
+        sc = symbol.replace('/', '')
+        side = 'SELL' if position_side == 'long' else 'BUY'
+        trig = self.round_price(symbol, stop_price)
+        cid = f"{self.TP_CLIENT_PREFIX}{sc[:10]}_{int(time.time() * 1000)}"
+        base = {'symbol': sc, 'side': side, 'type': 'TAKE_PROFIT_MARKET',
+                'algoType': 'CONDITIONAL', 'triggerPrice': trig,
+                'workingType': 'CONTRACT_PRICE',   # 차트(최종가) 기준 트리거
+                'clientAlgoId': cid}
+        self._tp_error = None
+        r = self._request('POST', '/fapi/v1/algoOrder', params=dict(base, closePosition='true'),
+                          signed=True, quiet=True)
+        if r:
+            return r
+        first_err = self.last_order_error() or {}
+        # 2) 수량 + reduceOnly (closePosition 을 안 받는 서버 대비)
+        if quantity is None:
+            try:
+                pos = self.get_position(symbol)
+                quantity = abs(float(pos['amount'])) if pos else None
+            except Exception:
+                quantity = None
+        if quantity:
+            qs, _ = self.round_qty(symbol, quantity)
+            r = self._request('POST', '/fapi/v1/algoOrder',
+                              params=dict(base, quantity=qs, reduceOnly='true'),
+                              signed=True, quiet=True)
+            if r:
+                return r
+        # 3) 알고 주소가 없는 서버면 옛 주소로
+        if first_err.get('http') == 404 or first_err.get('code') is None:
+            r = self._request('POST', '/fapi/v1/order', params={
+                'symbol': sc, 'side': side, 'type': 'TAKE_PROFIT_MARKET', 'stopPrice': trig,
+                'closePosition': 'true', 'workingType': 'CONTRACT_PRICE',
+                'newClientOrderId': cid}, signed=True, quiet=True)
+            if r:
+                return r
+        self._tp_error = self.last_order_error() or first_err
+        print(f"[⚠️ TP 주문 실패] {symbol}: {self._tp_error}")
+        return None
+
+    def tp_error_text(self):
+        e = getattr(self, '_tp_error', None) or {}
+        return f"{e.get('msg', '응답 없음')} (코드 {e.get('code')})"
+
+    @staticmethod
+    def _rows(resp):
+        """알고 주문 조회 응답 → 목록 (list 또는 {'orders': [...]} 모두 처리)"""
+        if resp is None:
+            return None
+        if isinstance(resp, list):
+            return resp
+        if isinstance(resp, dict):
+            for k in ('orders', 'rows', 'data', 'list'):
+                if isinstance(resp.get(k), list):
+                    return resp[k]
+        return []
 
     def cancel_all_orders(self, symbol):
-        """심볼의 모든 대기 주문 취소 (잔여 TP 주문 정리)"""
+        """심볼의 모든 대기 주문 취소 — 일반 주문 + 알고(TP) 주문 둘 다"""
         params = {'symbol': symbol.replace('/', '')}
-        return self._request('DELETE', '/fapi/v1/allOpenOrders', params=params, signed=True)
+        r = self._request('DELETE', '/fapi/v1/allOpenOrders', params=dict(params), signed=True)
+        self._request('DELETE', '/fapi/v1/algoOpenOrders', params=dict(params), signed=True, quiet=True)
+        return r
 
     def has_open_tp(self, symbol):
         """이미 걸려 있는 TP(익절) 대기 주문이 있는지.
@@ -629,11 +703,18 @@ class BinanceAPI:
         Returns: True=있음 / False=없음 / None=조회 실패(모름)
         """
         try:
-            orders = self._request('GET', '/fapi/v1/openOrders',
-                                   params={'symbol': symbol.replace('/', '')}, signed=True)
-            if orders is None:
-                return None
-            return any(str(o.get('type', '')).startswith('TAKE_PROFIT') for o in orders)
+            sc = symbol.replace('/', '')
+            algo = self._rows(self._request('GET', '/fapi/v1/openAlgoOrders',
+                                            params={'symbol': sc}, signed=True, quiet=True))
+            if algo and any(str(o.get('orderType') or o.get('type') or '').startswith('TAKE_PROFIT')
+                            for o in algo):
+                return True
+            orders = self._request('GET', '/fapi/v1/openOrders', params={'symbol': sc}, signed=True)
+            if orders and any(str(o.get('type', '')).startswith('TAKE_PROFIT') for o in orders):
+                return True
+            if orders is None or algo is None:
+                return None      # 한쪽이라도 조회 실패면 '모름'
+            return False
         except Exception as e:
             print(f"[대기주문 조회 실패] {symbol}: {e}")
             return None
@@ -856,6 +937,19 @@ LOG_LOCK = threading.Lock()
 ENTRY_LOCK = threading.Lock()
 CLOSE_LOCK = threading.Lock()  # 🔥 거래소 TP 체결 감지 중복 방지
 EXCEL_LOCK = threading.RLock()  # 🔥 엑셀 동시 저장 방지 (코인 두 개가 동시에 청산되면 한 줄이 사라지던 문제)
+
+def fmt_px(p):
+    """가격 표시: 싼 코인도 자릿수가 보이게 (0.10 → 0.10261)"""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return str(p)
+    if p >= 100:
+        return f"{p:,.2f}"
+    if p >= 1:
+        return f"{p:.4f}"
+    return f"{p:.6f}".rstrip('0').rstrip('.') if p > 0 else "0"
+
 
 def refund_entry_charge(cfg, side):
     """진입 때 통계에 미리 뺀 진입 수수료를 되돌린다.
@@ -1202,13 +1296,16 @@ class TradingBot:
                 tp_price = entry_price * (1 + tp_pct / 100)
             else:
                 tp_price = entry_price * (1 - tp_pct / 100)
+            self.config[f'tp_algo_{pos_type.lower()}'] = False
             result = self.api.create_tp_order(self.config['symbol'], pos_type.lower(), tp_price)
             if result:
+                self.config[f'tp_algo_{pos_type.lower()}'] = True
                 tp_price_str = self.api.round_price(self.config['symbol'], tp_price)
                 self.log(f"   📌 거래소 TP 주문 등록: ${tp_price_str} (도달 시 즉시 청산)", pos_type)
                 print(f"[📌 TP 주문] {self.config['symbol']} {pos_type} → ${tp_price_str}")
                 return True
             self.log(f"   ⚠️ 거래소 TP 주문 등록 실패 → 봇 폴링으로 익절 처리", pos_type)
+            self.log(f"      바이낸스: {self.api.tp_error_text()}", pos_type)
         except Exception as e:
             print(f"[{self.config['symbol']}] TP 주문 등록 오류: {e}")
         return False
@@ -1255,7 +1352,7 @@ class TradingBot:
             print(f"[{symbol}] 실현 손익 조회 실패: {e}")
 
         # 🔍 왜 닫혔는지 판별
-        reason = self.api.get_close_reason(symbol)
+        reason = self.api.get_close_reason(symbol, had_algo_tp=bool(self.config.get(f'tp_algo_{side}')))
         if reason is None:
             # 주문 조회 실패 → 손익 부호로 보수적 추정.
             # 봇 TP는 +1.5%에서만 체결되므로 손실이면 TP일 수 없다.
@@ -1484,6 +1581,7 @@ class TradingBot:
             if self.config.get('exit_mode', 'tp') != 'switch':
                 existing = self.api.has_open_tp(self.config['symbol'])
                 if existing is True:
+                    self.config[f'tp_algo_{side}'] = True
                     print(f"   기존 TP 주문이 살아 있어 그대로 둡니다")
                 else:
                     self.place_exchange_tp(pos_type, entry, self.config[f'entry_tp_{side}'])
@@ -2158,7 +2256,7 @@ class TradingBot:
                             
                             # 로그
                             self.log(f"✅ LONG 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'LONG')
-                            self.log(f"   💰 청산가: ${close_price:.2f} | 수익: ${pnl_usd:.2f}", 'LONG')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
                             self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
                             print(f"[✅ 익절] {self.config['symbol']} LONG ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%)")
@@ -2257,12 +2355,12 @@ class TradingBot:
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"🔄 LONG→SHORT 스위칭! 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'LONG')
-                            self.log(f"   💰 청산가: ${close_price:.2f} | 수익: ${pnl_usd:.2f}", 'LONG')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
                             self.log(f"   💸 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
                             # 콘솔 출력
                             print(f"[🔄 스위칭] {self.config['symbol']} LONG→SHORT {'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}%")
-                            print(f"   💰 청산가: ${close_price:.2f} | 수익: ${pnl_usd:.2f} | 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
+                            print(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
                             
                             # 통계 업데이트
                             self.stats_callback()
@@ -2506,7 +2604,7 @@ class TradingBot:
                             
                             # 로그
                             self.log(f"✅ SHORT 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'SHORT')
-                            self.log(f"   💰 청산가: ${close_price:.2f} | 수익: ${pnl_usd:.2f}", 'SHORT')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
                             self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
                             print(f"[✅ 익절] {self.config['symbol']} SHORT ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%)")
@@ -2607,12 +2705,12 @@ class TradingBot:
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"🔄 SHORT→LONG 스위칭! 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'SHORT')
-                            self.log(f"   💰 청산가: ${close_price:.2f} | 수익: ${pnl_usd:.2f}", 'SHORT')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
                             self.log(f"   💸 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
                             # 콘솔 출력
                             print(f"[🔄 스위칭] {self.config['symbol']} SHORT→LONG {'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}%")
-                            print(f"   💰 청산가: ${close_price:.2f} | 수익: ${pnl_usd:.2f} | 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
+                            print(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
                             
                             # 통계 업데이트
                             self.stats_callback()
@@ -3483,7 +3581,7 @@ class App:
                             coin['roi']['short_max'] = max(0, roi_pct)
                             coin['roi']['short_min'] = min(0, roi_pct)
                     
-                        print(f"  🔄 포지션 이어받기: {position['side'].upper()} | 진입가: ${entry_price:.2f} | ROI: {roi_pct:+.2f}%")
+                        print(f"  🔄 포지션 이어받기: {position['side'].upper()} | 진입가: ${fmt_px(entry_price)} | ROI: {roi_pct:+.2f}%")
                 else:
                     # 포지션 없으면 ROI 초기화
                     coin['roi']['long_entry'] = None
@@ -3553,7 +3651,7 @@ class App:
                     if position and position['side'] == 'long':
                         roi = coin['roi']['long_current']
                         self.add_log(coin, 'LONG', f"📍 포지션 이어받음!")
-                        self.add_log(coin, 'LONG', f"   진입가: ${position['entry_price']:.2f}")
+                        self.add_log(coin, 'LONG', f"   진입가: ${fmt_px(position['entry_price'])}")
                         self.add_log(coin, 'LONG', f"   현재 ROI: {roi:+.2f}%")
                     else:
                         self.add_log(coin, 'LONG', "📭 포지션 없음 - 신호 대기")
@@ -3607,7 +3705,7 @@ class App:
                     if position and position['side'] == 'short':
                         roi = coin['roi']['short_current']
                         self.add_log(coin, 'SHORT', f"📍 포지션 이어받음!")
-                        self.add_log(coin, 'SHORT', f"   진입가: ${position['entry_price']:.2f}")
+                        self.add_log(coin, 'SHORT', f"   진입가: ${fmt_px(position['entry_price'])}")
                         self.add_log(coin, 'SHORT', f"   현재 ROI: {roi:+.2f}%")
                     else:
                         self.add_log(coin, 'SHORT', "📭 포지션 없음 - 신호 대기")
