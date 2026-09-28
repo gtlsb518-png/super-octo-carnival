@@ -25,7 +25,17 @@ import faulthandler
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ERROR_LOG = os.path.join(BASE_DIR, '오류기록.txt')
+
+# 🔢 프로그램 번호 — 'python 9_main.py 2' 로 켜거나 9_main_2.py 를 실행하면 2번
+if len(sys.argv) > 1 and sys.argv[1].isdigit():
+    os.environ['BOT_PROGRAM'] = sys.argv[1]
+PROGRAM_NUMBER = os.environ.get('BOT_PROGRAM', '1')
+if not PROGRAM_NUMBER.isdigit() or int(PROGRAM_NUMBER) < 1:
+    PROGRAM_NUMBER = '1'
+os.environ['BOT_PROGRAM'] = PROGRAM_NUMBER
+
+ERROR_LOG = os.path.join(BASE_DIR, '오류기록.txt' if PROGRAM_NUMBER == '1'
+                         else f'오류기록_{PROGRAM_NUMBER}.txt')
 
 # 콘솔이 이모지·한글을 못 찍어도 죽지 않게
 for _s in (sys.stdout, sys.stderr):
@@ -149,7 +159,7 @@ threading.excepthook = on_thread_error
 import subprocess
 
 print("=" * 60)
-print("🚀 바이낸스 선물 자동매매 봇")
+print(f"🚀 바이낸스 선물 자동매매 봇 — 프로그램 #{PROGRAM_NUMBER}")
 print("=" * 60)
 print()
 print("🔍 필수 라이브러리 확인 중...")

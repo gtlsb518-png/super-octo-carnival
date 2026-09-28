@@ -19,3 +19,7 @@ goldfib_settings.json
 goldfib_trades.csv
 바이낸스자동매매봇.zip
 오류기록.txt
+bot_stats_*.json
+bot_running_*.json
+trade_history_*.xlsx
+오류기록_*.txt

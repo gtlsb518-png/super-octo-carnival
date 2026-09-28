@@ -30,7 +30,15 @@ except ImportError:
     print("⚠️ openpyxl 미설치 - pip install openpyxl 실행하세요")
 
 # 엑셀 파일 경로
-TRADE_HISTORY_FILE = 'trade_history.xlsx'
+# 🔢 프로그램 번호 — 9_main.py 는 1번, 9_main_2.py 는 2번을 정해준다.
+#    같은 폴더에서 여러 개를 동시에 돌려도 저장 파일이 서로 덮어쓰지 않도록 이름을 나눈다.
+try:
+    PROGRAM_NUMBER = max(1, int(os.environ.get('BOT_PROGRAM', '1')))
+except ValueError:
+    PROGRAM_NUMBER = 1
+_FILE_SUFFIX = '' if PROGRAM_NUMBER == 1 else f'_{PROGRAM_NUMBER}'
+TRADE_HISTORY_FILE = f'trade_history{_FILE_SUFFIX}.xlsx'
+BOT_RUNNING_FILE = f'bot_running{_FILE_SUFFIX}.json'
 
 # 번호 붙은 모듈 import
 import importlib
@@ -435,7 +443,20 @@ class BinanceAPI:
         'BTCUSDT': '0.001', 'ETHUSDT': '0.001', 'BNBUSDT': '0.01', 'LINKUSDT': '0.01',
         'SOLUSDT': '1', 'XRPUSDT': '1', 'ADAUSDT': '1', 'SUIUSDT': '1',
         'DOGEUSDT': '1', 'TRXUSDT': '1',
+        # 프로그램 #2
+        'AVAXUSDT': '1', 'LTCUSDT': '0.1', 'BCHUSDT': '0.01', 'DOTUSDT': '1', 'XLMUSDT': '1',
+        'HBARUSDT': '1', 'UNIUSDT': '1', 'NEARUSDT': '1', 'AAVEUSDT': '0.1', 'ATOMUSDT': '1',
     }
+
+    def is_tradable(self, symbol):
+        """이 서버(테스트넷/메인넷)에서 지금 거래되는 무기한 선물인지.
+        True / False / None(거래소 정보를 못 받아서 모름)
+        """
+        self._load_exchange_info()
+        t = getattr(self, '_tradable', None)
+        if not t:
+            return None
+        return symbol.replace('/', '') in t
 
     def round_qty(self, symbol, qty):
         """주문 수량을 바이낸스 수량 단위(stepSize)의 배수로 내림 → (문자열, 숫자)
@@ -507,8 +528,11 @@ class BinanceAPI:
             from decimal import Decimal
             info = self._request('GET', '/fapi/v1/exchangeInfo')
             if info and 'symbols' in info:
+                self._tradable = set()
                 for s in info['symbols']:
                     sym = s['symbol']
+                    if s.get('status', 'TRADING') == 'TRADING' and s.get('contractType', 'PERPETUAL') == 'PERPETUAL':
+                        self._tradable.add(sym)
                     for f in s.get('filters', []):
                         ft = f.get('filterType')
                         if ft == 'PRICE_FILTER':
@@ -535,6 +559,9 @@ class BinanceAPI:
         'BTCUSDT': '0.10', 'ETHUSDT': '0.01', 'BNBUSDT': '0.010', 'SOLUSDT': '0.0100',
         'XRPUSDT': '0.0001', 'ADAUSDT': '0.00010', 'DOGEUSDT': '0.000010',
         'TRXUSDT': '0.00001', 'SUIUSDT': '0.0001', 'LINKUSDT': '0.001',
+        # 프로그램 #2 (실제 단위의 배수가 되도록 일부러 거칠게)
+        'AVAXUSDT': '0.01', 'LTCUSDT': '0.1', 'BCHUSDT': '0.1', 'DOTUSDT': '0.001', 'XLMUSDT': '0.0001',
+        'HBARUSDT': '0.0001', 'UNIUSDT': '0.001', 'NEARUSDT': '0.001', 'AAVEUSDT': '0.1', 'ATOMUSDT': '0.001',
     }
 
     def round_price(self, symbol, price):
@@ -2733,7 +2760,7 @@ class TradingBot:
                     print(error_msg)
 
 # ==================== GUI ====================
-STATS_FILE = "bot_stats.json"  # 🔥 통계 저장 파일
+STATS_FILE = f"bot_stats{_FILE_SUFFIX}.json"  # 🔥 통계 저장 파일 (프로그램별)
 MAX_LOG_LINES = 1000  # 🧹 코인별 LONG/SHORT 로그 최대 보관 줄 수 (넘으면 오래된 것부터 삭제)
 
 class App:
@@ -2791,8 +2818,7 @@ class App:
         # 🔥 자동 저장 타이머 (5분마다)
         self.auto_save_stats()
         
-        # 🔥 자동 재연결: bot_running.json 있으면 자동으로 이어받기
-        BOT_RUNNING_FILE = 'bot_running.json'
+        # 🔥 자동 재연결: bot_running.json 있으면 자동으로 이어받기 (프로그램별 파일)
         if os.path.exists(BOT_RUNNING_FILE):
             print("\n" + "=" * 60)
             print("🔄 이전 세션 발견! 자동 재연결 중...")
@@ -2823,7 +2849,9 @@ class App:
             f"📊 차트 데이터: {chart_source}\n\n"
             f"🔗 선물 차트 확인:\n"
             f"https://www.binance.com/en/futures/ADAUSDT\n\n"
-            f"🪙 기본 10개 코인 추가됨!"
+            f"🪙 프로그램 #{PROGRAM_NUMBER}: 코인 {len(self.coins)}개 추가됨!"
+            + (f"\n\n⚠️ 이 서버에서 거래할 수 없어 뺀 코인:\n{', '.join(self._skipped_coins)}"
+               if getattr(self, '_skipped_coins', None) else "")
         )
     
     def _auto_reconnect(self):
@@ -2835,7 +2863,7 @@ class App:
         """봇 실행 상태 저장 — 프로그램 재시작 시 자동 재연결용"""
         try:
             state = {'running': True, 'timestamp': time.time()}
-            with open('bot_running.json', 'w') as f:
+            with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
             pass
@@ -2843,14 +2871,14 @@ class App:
     def _clear_running_state(self):
         """봇 종료 상태 — 다음 시작 시 새로 시작"""
         try:
-            if os.path.exists('bot_running.json'):
-                os.remove('bot_running.json')
+            if os.path.exists(BOT_RUNNING_FILE):
+                os.remove(BOT_RUNNING_FILE)
         except:
             pass
     
     def select_program_number(self):
-        """프로그램 #1 고정"""
-        prog_num = 1
+        """프로그램 번호 (9_main.py=1, 9_main_2.py=2)"""
+        prog_num = PROGRAM_NUMBER
         self.program_number = prog_num
         self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}")
         return prog_num
@@ -2858,30 +2886,61 @@ class App:
     def add_default_coins(self):
         """프로그램 번호에 따라 10개 코인 자동 추가"""
         
-        # 🪙 바이낸스 선물 거래 가능한 100개 코인 (2025년 1월 기준)
-        all_coins = [
-            # 프로그램 #1 (1-10) - 메이저 코인
-            {'symbol': 'BTC/USDT', 'name': 'Bitcoin'},
-            {'symbol': 'ETH/USDT', 'name': 'Ethereum'},
-            {'symbol': 'BNB/USDT', 'name': 'BNB'},
-            {'symbol': 'SOL/USDT', 'name': 'Solana'},
-            {'symbol': 'XRP/USDT', 'name': 'Ripple'},
-            {'symbol': 'ADA/USDT', 'name': 'Cardano'},
-            {'symbol': 'DOGE/USDT', 'name': 'Dogecoin'},
-            {'symbol': 'TRX/USDT', 'name': 'TRON'},
-            {'symbol': 'SUI/USDT', 'name': 'Sui'},
-            {'symbol': 'LINK/USDT', 'name': 'Chainlink'},
-        ]
-        
+        # 🪙 프로그램별 담당 코인 (서로 겹치지 않게 — 한 계정에서 동시에 돌리기 때문)
+        program_coins = {
+            1: [  # 1 ~ 10
+                {'symbol': 'BTC/USDT', 'name': 'Bitcoin'},
+                {'symbol': 'ETH/USDT', 'name': 'Ethereum'},
+                {'symbol': 'BNB/USDT', 'name': 'BNB'},
+                {'symbol': 'SOL/USDT', 'name': 'Solana'},
+                {'symbol': 'XRP/USDT', 'name': 'Ripple'},
+                {'symbol': 'ADA/USDT', 'name': 'Cardano'},
+                {'symbol': 'DOGE/USDT', 'name': 'Dogecoin'},
+                {'symbol': 'TRX/USDT', 'name': 'TRON'},
+                {'symbol': 'SUI/USDT', 'name': 'Sui'},
+                {'symbol': 'LINK/USDT', 'name': 'Chainlink'},
+            ],
+            2: [  # 11 ~ 20 — 오래 상장돼 거래량이 많은 무기한 선물
+                {'symbol': 'AVAX/USDT', 'name': 'Avalanche'},
+                {'symbol': 'LTC/USDT', 'name': 'Litecoin'},
+                {'symbol': 'BCH/USDT', 'name': 'Bitcoin Cash'},
+                {'symbol': 'DOT/USDT', 'name': 'Polkadot'},
+                {'symbol': 'XLM/USDT', 'name': 'Stellar'},
+                {'symbol': 'HBAR/USDT', 'name': 'Hedera'},
+                {'symbol': 'UNI/USDT', 'name': 'Uniswap'},
+                {'symbol': 'NEAR/USDT', 'name': 'NEAR'},
+                {'symbol': 'AAVE/USDT', 'name': 'Aave'},
+                {'symbol': 'ATOM/USDT', 'name': 'Cosmos'},
+            ],
+        }
+
         # 프로그램 번호 선택
         prog_num = self.select_program_number()
-        
-        # 해당 프로그램의 10개 코인 선택 (이미 10개만 있음)
-        selected_coins = all_coins  # 전체 사용
-        
+        wanted = program_coins.get(prog_num)
+        if wanted is None:
+            print(f"⚠️ 프로그램 #{prog_num} 코인 목록이 없습니다 (1번·2번만 있음)")
+            wanted = []
+
+        # ✅ 이 서버(테스트넷/메인넷)에서 실제로 거래되는 코인만 쓴다
+        #    (상장폐지·테스트넷 미지원 코인은 빼고 알려준다. 거래소 정보를 못 받으면 전부 사용)
+        selected_coins, self._skipped_coins = [], []
+        for c in wanted:
+            ok = None
+            try:
+                ok = self.api.is_tradable(c['symbol'])
+            except Exception:
+                ok = None
+            if ok is False:
+                self._skipped_coins.append(c['symbol'])
+            else:
+                selected_coins.append(c)
+
+        first = (prog_num - 1) * 10 + 1
         print("=" * 60)
         print(f"🚀 프로그램 #{prog_num} 시작!")
-        print(f"📌 담당 코인: 1번 ~ 10번")
+        print(f"📌 담당 코인: {first}번 ~ {first + len(wanted) - 1}번")
+        if self._skipped_coins:
+            print(f"⚠️ 이 서버에서 거래할 수 없어 뺀 코인: {', '.join(self._skipped_coins)}")
         print("=" * 60)
         
         for i, coin_info in enumerate(selected_coins, 1):
@@ -2917,7 +2976,7 @@ class App:
             print(f"  #{num:3d}. {coin_info['symbol']:15s} ({coin_info['name']})")
         
         print("=" * 60)
-        print(f"🪙 프로그램 #{prog_num}: 10개 코인 로드 완료!")
+        print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
         print("=" * 60)
         print()
     
@@ -4054,7 +4113,7 @@ class App:
         
         # 3회 실패 시 CSV로 백업 저장
         try:
-            backup_file = f"trade_backup_{now.strftime('%Y%m%d')}.csv"
+            backup_file = f"trade_backup{_FILE_SUFFIX}_{now.strftime('%Y%m%d')}.csv"
             import csv
             with open(backup_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
