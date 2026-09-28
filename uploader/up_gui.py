@@ -91,7 +91,7 @@ SPECS = [
         "thumb_label": "썸네일", "has_tags": True, "has_pin": True,
         "has_kids": True, "privacy": None, "ratio": (9, 16), "box": (56, 100),
         "cover_tool": False,
-        "note": "일부공개 게시 → 댓글 고정 → 예약 전환 · 썸네일은 9:16",
+        "note": "일부공개 게시 → 댓글 고정 → 예약 전환 · 썸네일 9:16 · 태그는 선택",
         "btn": "숏 업로드",
     },
     {
@@ -100,7 +100,7 @@ SPECS = [
         "thumb_label": "썸네일", "has_tags": True, "has_pin": True,
         "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (133, 75),
         "cover_tool": False,
-        "note": "진행 방식은 숏과 같고 내용만 따로 · 썸네일은 16:9",
+        "note": "진행 방식은 숏과 같고 내용만 따로 · 썸네일 16:9 · 태그는 선택",
         "btn": "롱 업로드",
     },
     {
@@ -1172,8 +1172,6 @@ class App(tk.Tk):
         for key, label in REQUIRED:
             if not (cfg.get(key) or "").strip():
                 out.append(label)
-        if spec["has_tags"] and not (cfg.get("tags") or "").strip():
-            out.append("태그")
         return out
 
     def _prepare(self, key):

@@ -88,6 +88,12 @@ SEL = {
         "input#file-loader",
         "input[type=file][accept*='image']",
     ],
+    # 새 화면에서는 '파일 업로드' 네모를 먼저 눌러야 입력칸이 살아나는 경우가 있다
+    "썸네일 파일 업로드 칸": [
+        "ytcp-thumbnail-uploader #still-picker-upload-button",
+        "#file-loader-container",
+        "text='파일 업로드'",
+    ],
     "자세히 보기 버튼": [
         "ytcp-button#toggle-button", "#toggle-button",
         "button:has-text('자세히 보기')", "button:has-text('SHOW MORE')",
@@ -102,6 +108,14 @@ SEL = {
     ],
     "댓글 입력창(닫힘)": [
         "#simplebox-placeholder",
+        "ytd-comments #placeholder-area",
+        "text='댓글 추가...'",
+    ],
+    # 숏츠는 오른쪽에 댓글 패널이 따로 열린다
+    "숏츠 댓글 버튼": [
+        "#comments-button button",
+        "ytd-reel-player-overlay-renderer #comments-button button",
+        "button[aria-label*='댓글']",
     ],
     "댓글 입력창(열림)": [
         "#contenteditable-root",
@@ -116,6 +130,13 @@ SEL = {
     "댓글 메뉴(⋮)": [
         "ytd-comment-thread-renderer #action-menu button",
         "ytd-comment-thread-renderer ytd-menu-renderer #button",
+        "ytd-comment-view-model #action-menu button",
+    ],
+    # 스튜디오 콘텐츠 목록에서 '공개 상태' 칸
+    "목록 공개상태 칸": [
+        "ytcp-video-list-cell-visibility",
+        "#visibility-cell",
+        "ytcp-video-row #visibility",
     ],
     "공개 상태 드롭다운": [
         "ytcp-video-metadata-visibility ytcp-dropdown-trigger",
@@ -124,12 +145,14 @@ SEL = {
         "ytcp-form-select#privacy-form",
         "#privacy-form ytcp-dropdown-trigger",
     ],
-    "예약 라디오": [
+    # 캡처 화면에서 '예약'은 라디오가 아니라 펼침 영역이다
+    "예약 펼치기": [
+        "ytcp-video-visibility-select #second-container",
+        "#second-container",
         "tp-yt-paper-radio-button[name='SCHEDULE']",
         "ytcp-video-visibility-scheduler tp-yt-paper-radio-button",
-        "#second-container tp-yt-paper-radio-button",
-        "tp-yt-paper-radio-button:has-text('예약')",
-        "tp-yt-paper-radio-button:has-text('Schedule')",
+        "text='예약'",
+        "text='Schedule'",
     ],
     "예약 날짜 입력칸": [
         "ytcp-date-picker input",
@@ -144,10 +167,12 @@ SEL = {
         "input[aria-label*='시간']",
         "input[aria-label*='time']",
     ],
-    "저장 버튼": [
+    # 예약을 고르면 확인 버튼 글자가 '저장' -> '예약' 으로 바뀐다
+    "저장/예약 버튼": [
         "ytcp-button#save-button", "#save-button",
         "ytcp-button#done-button", "#done-button",
         "button:has-text('예약')", "button:has-text('저장')",
+        "text='예약'", "text='저장'",
     ],
 }
 
@@ -323,7 +348,14 @@ def upload(page, cfg, log):
     if thumb and os.path.exists(thumb):
         log("[5/10] 썸네일 업로드 중...")
         try:
-            tin = _first(page, SEL["썸네일 입력칸"], timeout=20000, state="attached")
+            try:
+                tin = _first(page, SEL["썸네일 입력칸"], timeout=10000, state="attached")
+            except Exception:
+                # 새 화면은 '파일 업로드' 네모를 눌러야 입력칸이 생긴다
+                log("    '파일 업로드' 눌러보는 중...")
+                _click_if(page, SEL["썸네일 파일 업로드 칸"], timeout=8000)
+                time.sleep(1.5)
+                tin = _first(page, SEL["썸네일 입력칸"], timeout=15000, state="attached")
             tin.set_input_files(thumb)
             time.sleep(3)
             log("  - 썸네일 등록 완료")
@@ -459,26 +491,52 @@ def _get_video_id(page, log):
 
 # ==================== 댓글 작성 + 고정 ====================
 
-def _post_and_pin_comment(page, vid, text, log):
-    page.goto(f"https://www.youtube.com/watch?v={vid}", wait_until="domcontentloaded", timeout=90000)
+def _open_comment_box(page, vid, log):
+    """
+    댓글 입력창을 연다.
+
+    일반 영상: /watch 페이지를 내리면 아래에 댓글창이 있다.
+    숏츠     : /shorts 페이지 오른쪽의 댓글 버튼을 눌러야 패널이 열린다.
+    둘 다 시도한다.
+    """
+    # --- 1) 일반 시청 페이지 ---
+    log("  - 시청 페이지에서 댓글창 찾는 중...")
+    page.goto(f"https://www.youtube.com/watch?v={vid}",
+              wait_until="domcontentloaded", timeout=90000)
     time.sleep(5)
 
-    # 댓글창은 스크롤을 내려야 로드된다
-    log("  - 댓글창 여는 중...")
-    box = None
-    for _ in range(10):
+    for _ in range(8):
         page.mouse.wheel(0, 900)
-        time.sleep(1.2)
+        time.sleep(1.1)
         try:
-            box = page.locator("#simplebox-placeholder").first
-            box.wait_for(state="visible", timeout=1500)
-            break
+            box = _first(page, SEL["댓글 입력창(닫힘)"], timeout=1200)
+            log("    일반 시청 페이지에서 찾음")
+            return box
         except Exception:
-            box = None
+            pass
 
-    if box is None:
-        raise RuntimeError("댓글 입력창을 찾지 못했습니다 (댓글이 꺼져 있거나 아직 처리 중)")
+    # --- 2) 숏츠 페이지 ---
+    log("  - 숏츠 페이지에서 댓글 패널 여는 중...")
+    page.goto(f"https://www.youtube.com/shorts/{vid}",
+              wait_until="domcontentloaded", timeout=90000)
+    time.sleep(6)
 
+    _click_if(page, SEL["숏츠 댓글 버튼"], timeout=15000)
+    time.sleep(3)
+
+    for _ in range(6):
+        try:
+            box = _first(page, SEL["댓글 입력창(닫힘)"], timeout=1500)
+            log("    숏츠 댓글 패널에서 찾음")
+            return box
+        except Exception:
+            time.sleep(1.5)
+
+    raise RuntimeError("댓글 입력창을 찾지 못했습니다 (댓글이 꺼져 있거나 아직 처리 중)")
+
+
+def _post_and_pin_comment(page, vid, text, log):
+    box = _open_comment_box(page, vid, log)
     box.click()
     time.sleep(1)
 
@@ -498,22 +556,32 @@ def _post_and_pin_comment(page, vid, text, log):
     # 내 댓글이 목록에 뜰 때까지 새로고침하며 대기
     log("  - 등록된 댓글 확인 중...")
     key = text.strip().split("\n")[0][:25]
+    is_short = "/shorts/" in (page.url or "")
     thread = None
     for attempt in range(4):
         page.reload(wait_until="domcontentloaded", timeout=90000)
-        time.sleep(4)
-        for _ in range(10):
-            page.mouse.wheel(0, 900)
-            time.sleep(1.0)
-            try:
-                if page.locator("ytd-comment-thread-renderer").count() > 0:
-                    break
-            except Exception:
-                pass
+        time.sleep(5)
 
-        n = page.locator("ytd-comment-thread-renderer").count()
+        if is_short:
+            # 숏츠는 새로고침하면 패널이 닫히므로 다시 연다
+            _click_if(page, SEL["숏츠 댓글 버튼"], timeout=12000)
+            time.sleep(3)
+        else:
+            for _ in range(10):
+                page.mouse.wheel(0, 900)
+                time.sleep(1.0)
+                try:
+                    if page.locator("ytd-comment-thread-renderer").count() > 0:
+                        break
+                except Exception:
+                    pass
+
+        sel = "ytd-comment-thread-renderer"
+        if page.locator(sel).count() == 0 and page.locator("ytd-comment-view-model").count():
+            sel = "ytd-comment-view-model"
+        n = page.locator(sel).count()
         for i in range(min(n, 15)):
-            t = page.locator("ytd-comment-thread-renderer").nth(i)
+            t = page.locator(sel).nth(i)
             try:
                 if key in t.inner_text(timeout=2000):
                     thread = t
@@ -579,25 +647,63 @@ def _post_and_pin_comment(page, vid, text, log):
 
 # ==================== 예약으로 변경 ====================
 
+def _open_visibility_from_list(page, vid, log):
+    """
+    스튜디오 콘텐츠 목록에서 해당 영상 줄을 찾아 '공개 상태' 칸을 누른다.
+    (캡처 화면에서 쓰던 방식)
+    """
+    for tab in ("shorts", "videos"):
+        try:
+            page.goto(f"https://studio.youtube.com/channel/UC/videos/{tab}",
+                      wait_until="domcontentloaded", timeout=90000)
+            time.sleep(5)
+        except Exception:
+            continue
+
+        # 영상 ID 가 들어간 줄을 찾는다
+        try:
+            row = page.locator(f"ytcp-video-row:has(a[href*='{vid}'])").first
+            row.wait_for(state="visible", timeout=8000)
+        except Exception:
+            continue
+
+        for sel in SEL["목록 공개상태 칸"]:
+            try:
+                cell = row.locator(sel).first
+                cell.click(timeout=4000)
+                log(f"    콘텐츠 목록({tab})에서 열었습니다")
+                return True
+            except Exception:
+                continue
+
+    return False
+
+
 def _set_schedule(page, vid, when, log):
     """스튜디오 편집 화면에서 공개 상태를 '예약'으로 바꾼다."""
     if when <= datetime.now():
         raise RuntimeError(f"예약 시간이 현재보다 과거입니다: {when:%Y-%m-%d %H:%M}")
 
+    # ① 영상 편집 화면에서 공개 상태 창 열기
     page.goto(f"https://studio.youtube.com/video/{vid}/edit",
               wait_until="domcontentloaded", timeout=90000)
     time.sleep(5)
 
-    # 공개 상태 드롭다운 열기
     log("  - 공개 상태 창 여는 중...")
     opened = _click_if(page, SEL["공개 상태 드롭다운"], timeout=20000)
+
+    # ② 안 되면 콘텐츠 목록에서 해당 영상의 '공개 상태' 칸을 누른다
     if not opened:
-        raise RuntimeError("공개 상태 드롭다운을 찾지 못했습니다")
+        log("    편집 화면에서 못 찾음 → 콘텐츠 목록에서 시도")
+        opened = _open_visibility_from_list(page, vid, log)
+
+    if not opened:
+        raise RuntimeError("공개 상태 창을 열지 못했습니다")
     time.sleep(2.5)
 
     # '예약' 선택
     log("  - '예약' 선택 중...")
-    if not _click_if(page, SEL["예약 라디오"], timeout=15000):
+    if not _click_if(page, SEL["예약 펼치기"], timeout=15000):
         raise RuntimeError("'예약' 항목을 찾지 못했습니다")
     time.sleep(2)
 
@@ -642,7 +748,7 @@ def _set_schedule(page, vid, when, log):
 
     # 저장
     log("  - 저장 중...")
-    if not _click_if(page, SEL["저장 버튼"], timeout=15000):
+    if not _click_if(page, SEL["저장/예약 버튼"], timeout=15000):
         raise RuntimeError("저장 버튼을 찾지 못했습니다")
     time.sleep(4)
 
