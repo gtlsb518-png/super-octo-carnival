@@ -2,7 +2,7 @@
 """
 유튜브 / 틱톡 자동 업로드 프로그램 - GUI
 
-  [상단]  프로그램 제목 + 현재 상태
+  [상단]  제목 바 + 진행 표시 + 상태 배지
   [준비]  크롬 열기 / 로그인 정보 복사 / 화면 진단
   [본문]  유튜브(숏) · 유튜브(롱) · 틱톡  세 칸, 각각 업로드 버튼
   [묶음]  유튜브(숏) + 틱톡 동시 업로드 버튼
@@ -34,37 +34,49 @@ SETTINGS_FILE = os.path.join(HERE, "uploader_settings.json")
 VIDEO_TYPES = [("영상 파일", "*.mp4 *.mov *.avi *.mkv *.webm *.flv"), ("모든 파일", "*.*")]
 IMAGE_TYPES = [("이미지 파일", "*.jpg *.jpeg *.png *.webp *.bmp"), ("모든 파일", "*.*")]
 
-# ==================== 색·글꼴 ====================
+# ==================== 색 ====================
 
-BG        = "#eef0f4"
-CARD      = "#ffffff"
-INK       = "#16191d"
-MUTED     = "#6b7280"
-LINE      = "#dfe3e8"
-HEAD_BG   = "#14171c"
-CHIP      = "#eceff3"
-CHIP_ON   = "#dde2e8"
-SHADE     = "#f1f3f6"
+BG        = "#eaedf2"   # 창 배경
+CARD      = "#ffffff"   # 카드
+FIELD     = "#f6f8fa"   # 입력칸 배경
+SHADE     = "#eef1f5"   # 미리보기 자리
+INK       = "#0f172a"   # 본문 글자
+MUTED     = "#64748b"   # 설명 글자
+FAINT     = "#94a3b8"   # 더 흐린 글자
+LINE      = "#dde3ea"   # 테두리
+SHADOW    = "#d2d9e3"   # 카드 그림자
+FOCUS     = "#2563eb"   # 입력칸 포커스
+
+HEAD_BG   = "#0d1424"   # 상단 바
+HEAD_SUB  = "#7c8ba5"   # 상단 바 보조 글자
+PILL_BG   = "#1c2740"   # 상태 배지 배경
+
+CHIP      = "#eef1f5"   # 작은 버튼
+CHIP_ON   = "#dfe5ec"
+CHIP_INK  = "#334155"
 
 YT        = "#ff0033"   # 유튜브 (숏)
-YT_ON     = "#d4002a"
-YTL       = "#8b0020"   # 유튜브 (롱) - 구분용으로 조금 어둡게
-YTL_ON    = "#6d0019"
-TT        = "#111111"   # 틱톡
-TT_ON     = "#333333"
-BOTH      = "#0f766e"   # 동시 업로드
-BOTH_ON   = "#0b5b55"
+YT_ON     = "#e0002d"
+YTL       = "#9d1230"   # 유튜브 (롱)
+YTL_ON    = "#851028"
+TT        = "#15161a"   # 틱톡
+TT_ON     = "#2c2e36"
+BOTH      = "#0d9488"   # 동시 업로드
+BOTH_ON   = "#0b7f75"
+
+DIM_BTN   = "#cbd5e1"   # 비활성 버튼
+DIM_INK   = "#eef2f7"
 
 OK_TXT    = "#15803d"
 WARN_TXT  = "#b45309"
 
-LOG_BG    = "#11141a"
-LOG_FG    = "#ccd1d9"
+LOG_BG    = "#0f1523"
+LOG_FG    = "#c7d0dd"
 C_OK      = "#4ade80"
 C_ERR     = "#f87171"
 C_WARN    = "#fbbf24"
 C_STEP    = "#60a5fa"
-C_DIM     = "#5b6472"
+C_DIM     = "#55637a"
 
 FONT  = "맑은 고딕"
 MONO  = "Consolas"
@@ -74,30 +86,30 @@ MONO  = "Consolas"
 
 SPECS = [
     {
-        "key": "yts", "name": "유튜브 (숏)", "save": "youtube_short",
-        "accent": YT, "accent_on": YT_ON, "site": "youtube",
+        "key": "yts", "name": "유튜브 (숏)", "save": "youtube_short", "glyph": "▶",
+        "tag": "숏폼", "accent": YT, "accent_on": YT_ON, "site": "youtube",
         "thumb_label": "썸네일", "has_tags": True, "has_pin": True,
-        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (128, 72),
-        "note": "숏폼용 · 일부공개 게시 → 댓글 고정 → 예약 전환 · 태그는 쉼표로 구분",
-        "btn": "▶   숏 업로드",
+        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (116, 65),
+        "note": "일부공개 게시 → 댓글 고정 → 예약 전환 · 태그는 쉼표로 구분",
+        "btn": "숏 업로드",
     },
     {
-        "key": "ytl", "name": "유튜브 (롱)", "save": "youtube_long",
-        "accent": YTL, "accent_on": YTL_ON, "site": "youtube",
+        "key": "ytl", "name": "유튜브 (롱)", "save": "youtube_long", "glyph": "▶",
+        "tag": "롱폼", "accent": YTL, "accent_on": YTL_ON, "site": "youtube",
         "thumb_label": "썸네일", "has_tags": True, "has_pin": True,
-        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (128, 72),
-        "note": "롱폼용 · 진행 방식은 숏과 같고 내용만 따로 · 태그는 쉼표로 구분",
-        "btn": "▶   롱 업로드",
+        "has_kids": True, "privacy": None, "ratio": (16, 9), "box": (116, 65),
+        "note": "진행 방식은 숏과 같고 내용만 따로 · 태그는 쉼표로 구분",
+        "btn": "롱 업로드",
     },
     {
-        "key": "tt", "name": "틱톡", "save": "tiktok",
-        "accent": TT, "accent_on": TT_ON, "site": "tiktok",
+        "key": "tt", "name": "틱톡", "save": "tiktok", "glyph": "♪",
+        "tag": "숏폼", "accent": TT, "accent_on": TT_ON, "site": "tiktok",
         "thumb_label": "커버 이미지", "has_tags": False, "has_pin": False,
         "has_kids": False,
         "privacy": [("전체 공개", "public"), ("친구만", "friends"), ("나만 보기", "private")],
-        "ratio": (9, 16), "box": (68, 121),
-        "note": "해시태그는 제목·상세정보에 #태그로 직접 · 예: 카페투어 #카페 #브이로그",
-        "btn": "▶   틱톡 업로드",
+        "ratio": (9, 16), "box": (61, 108),
+        "note": "해시태그는 제목·상세정보에 #태그로 직접 · 예: 카페투어 #카페",
+        "btn": "틱톡 업로드",
     },
 ]
 
@@ -105,6 +117,107 @@ SPEC_BY_KEY = {sp["key"]: sp for sp in SPECS}
 
 # 업로드 시 반드시 채워져 있어야 하는 칸
 REQUIRED = [("title", "제목"), ("desc", "상세정보"), ("video", "영상 파일")]
+
+
+# ==================== 둥근 버튼 ====================
+
+class RoundButton(tk.Canvas):
+    """모서리가 둥글고 마우스를 올리면 색이 바뀌는 버튼."""
+
+    def __init__(self, parent, text, command=None, *, fill, hover,
+                 fg="#ffffff", behind=CARD, font=(FONT, 10, "bold"),
+                 radius=9, height=40, width=0):
+        super().__init__(parent, height=height, width=width,
+                         highlightthickness=0, bd=0, bg=behind, takefocus=0)
+        self._text = text
+        self._cmd = command
+        self._fill, self._hover_fill, self._fg = fill, hover, fg
+        self._radius, self._font = radius, font
+        self._state = "normal"
+        self._over = False
+
+        self.bind("<Configure>", lambda e: self._draw())
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<ButtonRelease-1>", self._click)
+        super().configure(cursor="hand2")
+
+    # 둥근 사각형 (폴리곤 + smooth 로 흉내)
+    def _round_rect(self, x1, y1, x2, y2, r, **kw):
+        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+               x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+               x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        return self.create_polygon(pts, smooth=True, **kw)
+
+    def _draw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w < 4 or h < 4:
+            return
+        if self._state == "disabled":
+            fill, fg = DIM_BTN, DIM_INK
+        else:
+            fill = self._hover_fill if self._over else self._fill
+            fg = self._fg
+        self._round_rect(1, 1, w - 1, h - 1, self._radius, fill=fill, outline=fill)
+        self.create_text(w // 2, h // 2 + 1, text=self._text, fill=fg, font=self._font)
+
+    def _enter(self, _=None):
+        if self._state == "normal":
+            self._over = True
+            self._draw()
+
+    def _leave(self, _=None):
+        self._over = False
+        self._draw()
+
+    def _click(self, _=None):
+        if self._state == "normal" and self._cmd:
+            self._cmd()
+
+    # tk 위젯처럼 state / text 를 바꿀 수 있게
+    def config(self, **kw):
+        state = kw.pop("state", None)
+        text = kw.pop("text", None)
+        if state is not None:
+            self._state = state
+            super().configure(cursor="hand2" if state == "normal" else "arrow")
+        if text is not None:
+            self._text = text
+        if kw:
+            super().configure(**kw)
+        if state is not None or text is not None:
+            self._draw()
+
+    configure = config
+
+
+class StatusPill(tk.Canvas):
+    """상단 바 오른쪽의 상태 배지."""
+
+    def __init__(self, parent, bg=HEAD_BG):
+        super().__init__(parent, height=30, width=190, highlightthickness=0,
+                         bd=0, bg=bg, takefocus=0)
+        self._text, self._color = "준비됨", C_OK
+        self.bind("<Configure>", lambda e: self._draw())
+
+    def _draw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w < 4 or h < 4:
+            return
+        r = h // 2
+        pts = [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
+               w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0]
+        self.create_polygon(pts, smooth=True, fill=PILL_BG, outline=PILL_BG)
+        self.create_oval(14, h // 2 - 4, 22, h // 2 + 4,
+                         fill=self._color, outline=self._color)
+        self.create_text(30, h // 2 + 1, text=self._text, anchor="w",
+                         fill="#dbe3ef", font=(FONT, 9, "bold"))
+
+    def set(self, text, color):
+        self._text, self._color = text, color
+        self._draw()
 
 
 class App(tk.Tk):
@@ -136,12 +249,15 @@ class App(tk.Tk):
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=LINE,
-                        lightcolor=LINE, darkcolor=LINE, padding=5)
         style.configure("TRadiobutton", background=CARD, foreground=INK, font=(FONT, 9))
         style.configure("TCheckbutton", background=CARD, foreground=INK, font=(FONT, 9))
         style.map("TRadiobutton", background=[("active", CARD)])
         style.map("TCheckbutton", background=[("active", CARD)])
+        style.configure("App.Horizontal.TProgressbar", troughcolor=HEAD_BG,
+                        background=BOTH, bordercolor=HEAD_BG,
+                        lightcolor=BOTH, darkcolor=BOTH, thickness=3)
+        style.configure("Card.Vertical.TScrollbar", troughcolor=BG, background="#c7cfda",
+                        bordercolor=BG, arrowcolor=MUTED)
 
         self._build_header()
         self._build_toolbar()
@@ -153,99 +269,135 @@ class App(tk.Tk):
     # ---------- 상단 바 ----------
 
     def _build_header(self):
-        bar = tk.Frame(self, bg=HEAD_BG, height=58)
+        bar = tk.Frame(self, bg=HEAD_BG, height=66)
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
-        tk.Label(bar, text="🎬  유튜브 / 틱톡 자동 업로드", bg=HEAD_BG, fg="#ffffff",
-                 font=(FONT, 15, "bold")).pack(side="left", padx=20)
+        left = tk.Frame(bar, bg=HEAD_BG)
+        left.pack(side="left", padx=22)
+        tk.Label(left, text="유튜브 / 틱톡 자동 업로드", bg=HEAD_BG, fg="#ffffff",
+                 font=(FONT, 15, "bold")).pack(anchor="w", pady=(12, 0))
+        tk.Label(left, text="제목 · 상세정보 · 태그 · 파일 · 예약까지 한 번에",
+                 bg=HEAD_BG, fg=HEAD_SUB, font=(FONT, 9)).pack(anchor="w")
 
-        self.status = tk.Label(bar, text="● 준비됨", bg=HEAD_BG, fg=C_OK,
-                               font=(FONT, 10, "bold"))
-        self.status.pack(side="right", padx=20)
+        self.status = StatusPill(bar)
+        self.status.pack(side="right", padx=22)
+
+        # 진행 막대는 업로드 중에만 보여준다
+        self.prog = ttk.Progressbar(bar, mode="indeterminate",
+                                    style="App.Horizontal.TProgressbar")
 
     def _set_status(self, text, color):
-        self.status.config(text=f"● {text}", fg=color)
+        self.status.set(text, color)
+
+    def _prog_off(self):
+        self.prog.stop()
+        self.prog.pack_forget()
 
     # ---------- 작은 부품 ----------
 
-    def _card(self, parent, **grid):
-        c = tk.Frame(parent, bg=CARD, highlightbackground=LINE,
-                     highlightcolor=LINE, highlightthickness=1)
+    def _card(self, parent, pack=None, grid=None):
+        """흰 카드. 오른쪽·아래에 얇은 그림자를 둬서 평평해 보이지 않게 한다."""
+        holder = tk.Frame(parent, bg=SHADOW)
         if grid:
-            c.grid(**grid)
+            holder.grid(**grid)
+        if pack:
+            holder.pack(**pack)
+        c = tk.Frame(holder, bg=CARD, highlightbackground=LINE,
+                     highlightcolor=LINE, highlightthickness=1)
+        c.pack(fill="both", expand=True, padx=(0, 2), pady=(0, 2))
         return c
 
-    def _chip(self, parent, text, cmd):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=CHIP, fg=INK, activebackground=CHIP_ON, activeforeground=INK,
-                         font=(FONT, 9, "bold"), relief="flat", bd=0,
-                         padx=12, pady=6, cursor="hand2")
+    def _chip(self, parent, text, cmd, behind=CARD, width=0):
+        return RoundButton(parent, text, cmd, fill=CHIP, hover=CHIP_ON,
+                           fg=CHIP_INK, behind=behind, font=(FONT, 9, "bold"),
+                           radius=8, height=30, width=width)
 
-    def _title(self, parent, text):
-        return tk.Label(parent, text=text, bg=CARD, fg=INK, font=(FONT, 10, "bold"))
+    def _title(self, parent, text, bg=CARD):
+        return tk.Label(parent, text=text, bg=bg, fg=INK, font=(FONT, 10, "bold"))
 
     def _label(self, parent, text):
-        return tk.Label(parent, text=text, bg=CARD, fg=INK, font=(FONT, 9))
+        return tk.Label(parent, text=text, bg=CARD, fg=MUTED, font=(FONT, 9))
 
-    def _hint(self, parent, text, **kw):
-        return tk.Label(parent, text=text, bg=CARD, fg=MUTED,
+    def _hint(self, parent, text, bg=CARD, **kw):
+        return tk.Label(parent, text=text, bg=bg, fg=MUTED,
                         font=(FONT, 8), justify="left", **kw)
+
+    def _field(self, parent, widget_maker):
+        """입력칸을 테두리·포커스 표시가 있는 상자로 감싼다."""
+        wrap = tk.Frame(parent, bg=FIELD, highlightthickness=1,
+                        highlightbackground=LINE, highlightcolor=LINE)
+        w = widget_maker(wrap)
+        w.pack(fill="both", expand=True, padx=8, pady=5)
+        w.bind("<FocusIn>", lambda e: wrap.config(highlightbackground=FOCUS,
+                                                  highlightcolor=FOCUS))
+        w.bind("<FocusOut>", lambda e: wrap.config(highlightbackground=LINE,
+                                                   highlightcolor=LINE))
+        return wrap, w
+
+    def _entry(self, parent, var, width=0):
+        def make(p):
+            return tk.Entry(p, textvariable=var, font=(FONT, 9), bd=0,
+                            relief="flat", bg=FIELD, fg=INK, insertbackground=INK,
+                            width=width or 1, highlightthickness=0)
+        return self._field(parent, make)
+
+    def _textbox(self, parent, height):
+        def make(p):
+            return tk.Text(p, width=1, height=height, wrap="word", font=(FONT, 9),
+                           relief="flat", bd=0, bg=FIELD, fg=INK,
+                           insertbackground=INK, highlightthickness=0)
+        return self._field(parent, make)
 
     # ---------- 준비 단계 ----------
 
     def _build_toolbar(self):
-        card = self._card(self)
-        card.pack(fill="x", padx=14, pady=(12, 7))
+        card = self._card(self, pack=dict(fill="x", padx=16, pady=(14, 8)))
 
-        self._title(card, "1단계 · 브라우저 준비").pack(anchor="w", padx=16, pady=(10, 6))
+        self._title(card, "1단계 · 브라우저 준비").pack(anchor="w", padx=18, pady=(10, 6))
 
         row = tk.Frame(card, bg=CARD)
-        row.pack(fill="x", padx=16)
-        for text, cmd in [
-            ("① 크롬 로그인 정보 가져오기", self.on_copy_profile),
-            ("② 업로드용 크롬 열기", self.on_open_chrome),
-            ("③ 화면 진단하기", self.on_check),
-            ("④ 연습 진단(자동)", self.on_dryrun),
+        row.pack(fill="x", padx=18)
+        for text, cmd, w in [
+            ("①  크롬 로그인 정보 가져오기", self.on_copy_profile, 210),
+            ("②  업로드용 크롬 열기", self.on_open_chrome, 175),
+            ("③  화면 진단하기", self.on_check, 140),
+            ("④  연습 진단 (자동)", self.on_dryrun, 155),
         ]:
-            self._chip(row, text, cmd).pack(side="left", padx=(0, 8))
+            self._chip(row, text, cmd, width=w).pack(side="left", padx=(0, 9))
 
         self._hint(
             card,
             "①은 크롬을 완전히 종료한 뒤 한 번만 · ③은 열려 있는 화면 하나를, "
             "④는 업로드 과정을 따라가며 여러 화면을 자동 진단합니다 (게시는 하지 않음)",
-        ).pack(anchor="w", padx=16, pady=(8, 10))
+        ).pack(anchor="w", padx=18, pady=(8, 10))
 
     # ---------- 동시 업로드 ----------
 
     def _build_combo(self):
-        card = self._card(self)
-        card.pack(side="bottom", fill="x", padx=14, pady=(0, 7))
+        card = self._card(self, pack=dict(side="bottom", fill="x", padx=16, pady=(0, 8)))
 
         inner = tk.Frame(card, bg=CARD)
-        inner.pack(fill="x", padx=16, pady=10)
+        inner.pack(fill="x", padx=18, pady=10)
 
-        self.combo_btn = tk.Button(
-            inner, text="⚡   유튜브(숏)  +  틱톡   동시 업로드",
-            command=self.on_upload_both,
-            bg=BOTH, fg="#ffffff", activebackground=BOTH_ON, activeforeground="#ffffff",
-            disabledforeground="#c8ccd2",
-            font=(FONT, 12, "bold"), relief="flat", bd=0, cursor="hand2", pady=10)
+        self.combo_btn = RoundButton(
+            inner, "⚡   유튜브(숏)  +  틱톡   동시 업로드",
+            self.on_upload_both, fill=BOTH, hover=BOTH_ON,
+            font=(FONT, 12, "bold"), radius=10, height=42)
         self.combo_btn.pack(side="left", fill="x", expand=True)
 
-        self._hint(
-            inner,
-            "유튜브 먼저 → 틱톡 순서\n하나라도 덜 채워지면 둘 다 안 올림",
-        ).pack(side="left", padx=(12, 0))
+        self._hint(inner, "유튜브 먼저 → 틱톡 순서\n하나라도 덜 채워지면 둘 다 안 올림").pack(
+            side="left", padx=(14, 0))
 
     # ---------- 세 칸 ----------
 
     def _build_sections(self):
         outer = tk.Frame(self, bg=BG)
-        outer.pack(fill="both", expand=True, padx=14, pady=7)
+        outer.pack(fill="both", expand=True, padx=16, pady=8)
 
         canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview,
+                            style="Card.Vertical.TScrollbar")
         canvas.configure(yscrollcommand=vsb.set)
         canvas.pack(side="left", fill="both", expand=True)
 
@@ -279,7 +431,7 @@ class App(tk.Tk):
         mid.rowconfigure(0, weight=1)
 
         for i, spec in enumerate(SPECS):
-            pad = (0 if i == 0 else 5, 0 if i == len(SPECS) - 1 else 5)
+            pad = (0 if i == 0 else 6, 0 if i == len(SPECS) - 1 else 6)
             self.secs[spec["key"]] = self._build_section(mid, i, spec, pad)
 
     def _on_wheel(self, event):
@@ -295,89 +447,84 @@ class App(tk.Tk):
 
     def _build_section(self, parent, col, spec, pad):
         accent, accent_on = spec["accent"], spec["accent_on"]
-        card = self._card(parent, row=0, column=col, sticky="nsew", padx=pad)
+        card = self._card(parent, grid=dict(row=0, column=col, sticky="nsew", padx=pad))
 
-        tk.Frame(card, bg=accent, height=4).pack(fill="x")
+        # ---- 색 띠 제목 ----
+        strip = tk.Frame(card, bg=accent, height=38)
+        strip.pack(fill="x")
+        strip.pack_propagate(False)
+        tk.Label(strip, text=spec["glyph"], bg=accent, fg="#ffffff",
+                 font=(FONT, 12, "bold")).pack(side="left", padx=(16, 8))
+        tk.Label(strip, text=spec["name"], bg=accent, fg="#ffffff",
+                 font=(FONT, 12, "bold")).pack(side="left")
+        tk.Label(strip, text=spec["tag"], bg=accent, fg="#ffffff",
+                 font=(FONT, 9)).pack(side="right", padx=16)
 
-        head = tk.Frame(card, bg=CARD)
-        head.pack(fill="x", padx=14, pady=(12, 0))
-        tk.Label(head, text=spec["name"], bg=CARD, fg=accent,
-                 font=(FONT, 14, "bold")).pack(anchor="w")
-        self._hint(head, spec["note"], wraplength=400).pack(anchor="w", pady=(2, 0))
+        self._hint(card, spec["note"], wraplength=420).pack(
+            anchor="w", padx=16, pady=(6, 0))
 
         # 업로드 버튼은 내용이 길어도 잘리면 안 되므로 카드 아래쪽에 먼저 고정
-        btn = tk.Button(card, text=spec["btn"], command=lambda k=spec["key"]: self.on_upload(k),
-                        bg=accent, fg="#ffffff",
-                        activebackground=accent_on, activeforeground="#ffffff",
-                        disabledforeground="#c8ccd2",
-                        font=(FONT, 11, "bold"), relief="flat", bd=0,
-                        cursor="hand2", pady=11)
-        btn.pack(side="bottom", fill="x", padx=14, pady=(8, 14))
+        btn = RoundButton(card, "▶   " + spec["btn"],
+                          lambda k=spec["key"]: self.on_upload(k),
+                          fill=accent, hover=accent_on,
+                          font=(FONT, 11, "bold"), radius=9, height=42)
+        btn.pack(side="bottom", fill="x", padx=16, pady=(6, 12))
 
         extra = tk.Frame(card, bg=CARD)
-        extra.pack(side="bottom", fill="x", padx=14)
+        extra.pack(side="bottom", fill="x", padx=16)
 
         f = tk.Frame(card, bg=CARD)
-        f.pack(fill="both", expand=True, padx=14, pady=(10, 0))
+        f.pack(fill="both", expand=True, padx=16, pady=(6, 0))
         f.columnconfigure(1, weight=1)
 
         s = {"spec": spec, "button": btn, "extra": extra}
         r = 0
 
         def row_label(text, sticky="w"):
-            self._label(f, text).grid(row=r, column=0, sticky=sticky, pady=4, padx=(0, 8))
+            self._label(f, text).grid(row=r, column=0, sticky=sticky, pady=3, padx=(0, 10))
 
         # 제목
         row_label("제목")
         s["title"] = tk.StringVar()
-        ttk.Entry(f, textvariable=s["title"], font=(FONT, 9)).grid(
-            row=r, column=1, columnspan=2, sticky="ew", pady=4)
+        self._entry(f, s["title"])[0].grid(row=r, column=1, columnspan=2,
+                                           sticky="ew", pady=3)
         r += 1
-
 
         # 상세정보
         row_label("상세정보", "nw")
-        s["desc"] = tk.Text(f, width=1, height=3, wrap="word", font=(FONT, 9),
-                            relief="flat", bd=0, padx=8, pady=6,
-                            highlightbackground=LINE, highlightcolor="#9aa4b2",
-                            highlightthickness=1)
-        s["desc"].grid(row=r, column=1, columnspan=2, sticky="ew", pady=4)
+        wrap, s["desc"] = self._textbox(f, 3)
+        wrap.grid(row=r, column=1, columnspan=2, sticky="ew", pady=3)
         r += 1
 
         # 태그 (유튜브만)
         if spec["has_tags"]:
-            row_label("태그")  # 쉼표로 구분
+            row_label("태그")
             s["tags"] = tk.StringVar()
-            ttk.Entry(f, textvariable=s["tags"], font=(FONT, 9)).grid(
-                row=r, column=1, columnspan=2, sticky="ew", pady=4)
+            self._entry(f, s["tags"])[0].grid(row=r, column=1, columnspan=2,
+                                              sticky="ew", pady=3)
             r += 1
 
         # 고정 댓글 (유튜브만)
         if spec["has_pin"]:
             row_label("고정 댓글", "nw")
-            s["pin"] = tk.Text(f, width=1, height=2, wrap="word", font=(FONT, 9),
-                               relief="flat", bd=0, padx=8, pady=6,
-                               highlightbackground=LINE, highlightcolor="#9aa4b2",
-                               highlightthickness=1)
-            s["pin"].grid(row=r, column=1, columnspan=2, sticky="ew", pady=4)
+            wrap, s["pin"] = self._textbox(f, 2)
+            wrap.grid(row=r, column=1, columnspan=2, sticky="ew", pady=3)
             r += 1
 
         # 영상 파일
         row_label("영상 파일")
         s["video"] = tk.StringVar()
-        ttk.Entry(f, textvariable=s["video"], font=(FONT, 9)).grid(
-            row=r, column=1, sticky="ew", pady=4)
-        self._chip(f, "찾기", lambda v=s["video"]: self._pick(v, VIDEO_TYPES)).grid(
-            row=r, column=2, padx=(6, 0))
+        self._entry(f, s["video"])[0].grid(row=r, column=1, sticky="ew", pady=3)
+        self._chip(f, "찾기", lambda v=s["video"]: self._pick(v, VIDEO_TYPES),
+                   width=52).grid(row=r, column=2, padx=(8, 0))
         r += 1
 
         # 썸네일 / 커버 + 미리보기
         row_label(spec["thumb_label"])
         s["thumb"] = tk.StringVar()
-        ttk.Entry(f, textvariable=s["thumb"], font=(FONT, 9)).grid(
-            row=r, column=1, sticky="ew", pady=4)
-        self._chip(f, "찾기", lambda v=s["thumb"]: self._pick(v, IMAGE_TYPES)).grid(
-            row=r, column=2, padx=(6, 0))
+        self._entry(f, s["thumb"])[0].grid(row=r, column=1, sticky="ew", pady=3)
+        self._chip(f, "찾기", lambda v=s["thumb"]: self._pick(v, IMAGE_TYPES),
+                   width=52).grid(row=r, column=2, padx=(8, 0))
         r += 1
 
         self._build_preview(f, s, r, spec)
@@ -388,7 +535,7 @@ class App(tk.Tk):
             row_label("공개 설정")
             s["privacy"] = tk.StringVar(value=spec["privacy"][0][1])
             pf = tk.Frame(f, bg=CARD)
-            pf.grid(row=r, column=1, columnspan=2, sticky="w", pady=4)
+            pf.grid(row=r, column=1, columnspan=2, sticky="w", pady=3)
             for lb, val in spec["privacy"]:
                 ttk.Radiobutton(pf, text=lb, value=val,
                                 variable=s["privacy"]).pack(side="left", padx=(0, 10))
@@ -405,13 +552,12 @@ class App(tk.Tk):
 
         sf = tk.Frame(f, bg=CARD)
         sf.grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
-        ttk.Checkbutton(sf, text="예약", variable=s["sched_on"]).pack(side="left", padx=(0, 6))
-        ttk.Entry(sf, textvariable=s["sched_date"], width=11,
-                  font=(FONT, 9)).pack(side="left", padx=(0, 4))
-        ttk.Entry(sf, textvariable=s["sched_time"], width=6,
-                  font=(FONT, 9)).pack(side="left", padx=(0, 6))
-        self._chip(sf, "오늘", lambda d=s: self._set_today(d)).pack(side="left", padx=2)
-        self._chip(sf, "+1일", lambda v=s["sched_date"]: self._shift_day(v, 1)).pack(side="left", padx=2)
+        ttk.Checkbutton(sf, text="예약", variable=s["sched_on"]).pack(side="left", padx=(0, 8))
+        self._entry(sf, s["sched_date"], width=11)[0].pack(side="left", padx=(0, 5))
+        self._entry(sf, s["sched_time"], width=6)[0].pack(side="left", padx=(0, 8))
+        self._chip(sf, "오늘", lambda d=s: self._set_today(d), width=50).pack(side="left", padx=2)
+        self._chip(sf, "+1일", lambda v=s["sched_date"]: self._shift_day(v, 1),
+                   width=50).pack(side="left", padx=2)
         r += 1
 
         # 아동용 (유튜브만)
@@ -438,12 +584,12 @@ class App(tk.Tk):
         box.pack(side="left")
         box.pack_propagate(False)
 
-        img = tk.Label(box, bg=SHADE, fg=MUTED, font=(FONT, 8),
-                       text="이미지를 고르면\n여기에 미리보기")
+        img = tk.Label(box, bg=SHADE, fg=FAINT, font=(FONT, 8),
+                       text="이미지를 고르면\n미리보기")
         img.pack(expand=True)
 
         info = tk.Label(wrap, bg=CARD, fg=MUTED, font=(FONT, 8), justify="left")
-        info.pack(side="left", padx=(10, 0), anchor="n")
+        info.pack(side="left", padx=(12, 0), anchor="n")
 
         s["_preview"] = (img, info, bw, bh, spec["ratio"])
 
@@ -458,7 +604,7 @@ class App(tk.Tk):
 
         path = s["thumb"].get().strip()
         if not path:
-            return show("이미지를 고르면\n여기에 미리보기")
+            return show("이미지를 고르면\n미리보기", "", FAINT)
         if not os.path.exists(path):
             return show("파일 없음", "경로를 확인하세요", WARN_TXT)
         if Image is None:
@@ -485,18 +631,21 @@ class App(tk.Tk):
     # ---------- 로그 ----------
 
     def _build_log(self):
-        card = self._card(self)
-        card.pack(side="bottom", fill="x", padx=14, pady=(7, 14))
+        card = self._card(self, pack=dict(side="bottom", fill="x", padx=16, pady=(8, 16)))
 
-        self._title(card, "진행 상황").pack(anchor="w", padx=16, pady=(10, 6))
+        head = tk.Frame(card, bg=CARD)
+        head.pack(fill="x", padx=18, pady=(8, 5))
+        self._title(head, "진행 상황").pack(side="left")
+        self._chip(head, "지우기", self._clear_log, width=58).pack(side="right")
 
         box = tk.Frame(card, bg=CARD)
-        box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        box.pack(fill="both", expand=True, padx=18, pady=(0, 12))
 
-        self.log_box = tk.Text(box, width=1, height=6, wrap="word",
+        self.log_box = tk.Text(box, width=1, height=5, wrap="word",
                                bg=LOG_BG, fg=LOG_FG, insertbackground=LOG_FG,
                                font=(MONO, 9), state="disabled",
-                               relief="flat", bd=0, padx=12, pady=10)
+                               relief="flat", bd=0, padx=14, pady=10,
+                               highlightthickness=1, highlightbackground="#1c2434")
         self.log_box.pack(side="left", fill="both", expand=True)
 
         sb = ttk.Scrollbar(box, command=self.log_box.yview)
@@ -507,6 +656,10 @@ class App(tk.Tk):
                            ("step", C_STEP), ("dim", C_DIM)):
             self.log_box.tag_config(tag, foreground=color)
 
+    def _clear_log(self):
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
     # ==================== 입력 도우미 ====================
 
     def _pick(self, var, types):
@@ -871,9 +1024,11 @@ class App(tk.Tk):
         self._save_settings()
         self.busy = True
         self._set_buttons(False)
+        self.prog.pack(side="bottom", fill="x")
+        self.prog.start(14)
 
         names = " + ".join(n for n, _, _ in jobs)
-        self._set_status(f"{names} 업로드 중...", C_WARN)
+        self._set_status(f"{names} 업로드 중", C_WARN)
 
         def work():
             done, failed = [], []
@@ -916,6 +1071,7 @@ class App(tk.Tk):
 
             # 결과 확인용으로 탭은 일부러 닫지 않는다
             self.busy = False
+            self.after(0, self._prog_off)
             self.after(0, lambda: self._set_buttons(True))
 
         threading.Thread(target=work, daemon=True).start()
