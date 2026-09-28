@@ -196,7 +196,7 @@ class BinanceAPI:
         # 🔥 positionRisk 캐시 (LONG/SHORT 봇 공유, API 호출 감소)
         self._position_cache = None
         self._position_cache_time = 0
-        self._position_cache_ttl = 3  # 3초간 캐시
+        self._position_cache_ttl = 1.0  # 1초 캐시 (봇 20개 공유) — 확인 주기 1초와 맞물려 최대 약 1.4초 안에 감지
         self._position_cache_lock = threading.Lock()
         
         # 🔥 klines 캐시 (같은 코인 LONG/SHORT 봇 공유)
@@ -1493,20 +1493,21 @@ class TradingBot:
                         print(f"[⚠️ 리셋] {self.config['symbol']}: is_closing 30초 stuck")
                         self.config['is_closing'] = False
                 
-                # 🔥🔥🔥 루프 주기: 포지션 있으면 3초, 없으면 5초
+                # 🔥🔥🔥 루프 주기: 포지션 있으면 1초, 없으면 5초
+                #   (측정: 코인 10개 모두 보유 시 API 가중치 분당 약 640 = 한도 2,400의 27%)
                 if not first_check:
-                    loop_interval = 3 if self.config.get('has_position') else 5
+                    loop_interval = 1 if self.config.get('has_position') else 5
                     time.sleep(loop_interval)
                 first_check = False
                 
-                # 🔥🔥🔥 캔들 조회 주기
-                # 포지션 있으면 4초마다 (2초 루프 × 2회)
+                # 🔥🔥🔥 캔들 조회 주기 (1시간봉이라 더 자주 볼 필요 없음)
+                # 포지션 있으면 6초마다 (1초 루프 × 6회)
                 # 포지션 없으면 15초마다 (5초 루프 × 3회)
                 if not hasattr(self, '_kline_check_count'):
                     self._kline_check_count = 0
                 self._kline_check_count += 1
                 
-                kline_interval = 2 if self.config.get('has_position') else 3
+                kline_interval = 6 if self.config.get('has_position') else 3
                 
                 if self._kline_check_count >= kline_interval:
                     self._kline_check_count = 0
