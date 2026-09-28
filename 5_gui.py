@@ -3893,6 +3893,11 @@ class App:
         self.global_fee_label = tk.Label(stats_frame, text="💸 수수료: -$0.00",
                                          font=('Arial', 10), bg='#2d2d2d', fg='#ff6666')
         self.global_fee_label.pack(side='top')
+
+        # 💰 총 펀딩비 (8시간마다 낸 돈 / 받은 돈 합계 — 순수익에 이미 포함)
+        self.global_funding_label = tk.Label(stats_frame, text="💰 펀딩비: $0.00",
+                                             font=('Arial', 10), bg='#2d2d2d', fg='#aaaaaa')
+        self.global_funding_label.pack(side='top')
         
         self.global_trades_label = tk.Label(stats_frame, text="거래: 0회 | 승률: 0%",
                                             font=('Arial', 10), bg='#2d2d2d', fg='#aaaaaa')
@@ -5031,10 +5036,13 @@ class App:
             out[f'{sd}_profit'] += tr['net']
             out[f'{sd}_fee'] += tr['fee']
         open_net = 0.0
+        out['open_count'], out['open_fee'] = 0, 0.0
         for cur in st['open'].values():
             if cur and abs(cur['qty']) > 1e-12:
                 out[f"{cur['side'].lower()}_fee"] += cur['fee']   # 진입 수수료는 이미 냈다
                 open_net += cur['pnl'] - cur['fee']
+                out['open_count'] += 1
+                out['open_fee'] += cur['fee']
         out['total_fee'] = out['long_fee'] + out['short_fee']
         out['funding_total'] = funding
         out['total_pnl'] = out['long_profit'] + out['short_profit'] + open_net + funding
@@ -5537,7 +5545,7 @@ class App:
             win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
             
             self.global_pnl_label.config(text=f"📊 순수익: {pnl_sign}${total_pnl:.2f}", fg=pnl_color)
-            self.global_fee_label.config(text=f"💸 수수료: -${total_fee:.2f}", fg='#ff6666')
+            self._set_fee_funding_labels(total_fee)
             self.global_trades_label.config(text=f"거래: {total_trades}회 | 승률: {win_rate:.1f}%")
             
             # 각 코인별 통계 UI 업데이트
@@ -6853,6 +6861,25 @@ class App:
         # 자동 스크롤 (맨 아래로)
         log_text.see('end')
     
+    def _set_fee_funding_labels(self, total_fee):
+        """맨 위 수수료·펀딩비 표시. 수수료에는 '아직 보유 중인 포지션의 진입 수수료'도 들어 있다고 알려준다."""
+        coins = list(self.coins)
+        open_n = sum(int(c['stats'].get('open_count', 0) or 0) for c in coins)
+        open_fee = sum(float(c['stats'].get('open_fee', 0) or 0) for c in coins)
+        fee_txt = f"💸 수수료: -${total_fee:.2f}"
+        if open_n:
+            fee_txt += f"  (보유 중 {open_n}개 진입분 ${open_fee:.2f} 포함)"
+        self.global_fee_label.config(text=fee_txt, fg='#ff6666')
+        fund = sum(float(c['stats'].get('funding_total', 0) or 0) for c in coins)
+        lbl = getattr(self, 'global_funding_label', None)
+        if lbl is not None:
+            if abs(fund) < 0.005:
+                lbl.config(text="💰 펀딩비: $0.00", fg='#aaaaaa')
+            elif fund < 0:
+                lbl.config(text=f"💰 펀딩비: -${abs(fund):.2f} (낸 돈, 순수익에 포함)", fg='#ff6666')
+            else:
+                lbl.config(text=f"💰 펀딩비: +${fund:.2f} (받은 돈, 순수익에 포함)", fg='#00ff00')
+
     def update_stats(self, coin):
         """진입·청산 뒤 불린다 → 화면 갱신 + 바이낸스 기록으로 다시 맞추기 요청."""
         self._refresh_stats_ui(coin)
@@ -6896,7 +6923,7 @@ class App:
                 pnl_sign = '+' if total_pnl >= 0 else ''
                 win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
                 self.global_pnl_label.config(text=f"📊 순수익: {pnl_sign}${total_pnl:.2f}", fg=pnl_color)
-                self.global_fee_label.config(text=f"💸 수수료: -${total_fee:.2f}", fg='#ff6666')
+                self._set_fee_funding_labels(total_fee)
                 self.global_trades_label.config(text=f"거래: {total_trades}회 | 승률: {win_rate:.1f}%")
             except Exception as e:
                 print(f"통계 업데이트 오류: {e}")
