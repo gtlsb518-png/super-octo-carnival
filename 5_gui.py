@@ -200,12 +200,12 @@ class CustomMessageBox:
 #   "on"     : 차트·포지션 변화를 웹소켓으로 받는다 → API 사용량이 크게 줄어 프로그램을 여러 개 돌릴 수 있음
 #              끊기면 자동 재접속, 그동안은 조회 방식으로 자동 대체
 try:
-    WEBSOCKET_MODE = str(getattr(importlib.import_module('1_config'), 'WEBSOCKET_MODE', 'shadow')).strip().lower()
+    WEBSOCKET_MODE = str(getattr(importlib.import_module('1_config'), 'WEBSOCKET_MODE', 'on')).strip().lower()
 except Exception:
-    WEBSOCKET_MODE = 'shadow'
+    WEBSOCKET_MODE = 'on'
 if WEBSOCKET_MODE not in ('off', 'shadow', 'on'):
-    print(f"⚠️ WEBSOCKET_MODE='{WEBSOCKET_MODE}' 는 없는 값 → 'shadow' 로 실행")
-    WEBSOCKET_MODE = 'shadow'
+    print(f"⚠️ WEBSOCKET_MODE='{WEBSOCKET_MODE}' 는 없는 값 → 'on' 으로 실행")
+    WEBSOCKET_MODE = 'on'
 
 WS_AVAILABLE = False
 if WEBSOCKET_MODE != 'off':
@@ -228,6 +228,10 @@ if WEBSOCKET_MODE != 'off':
 _INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
                 '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
                 '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000}
+
+
+def _now_ms():
+    return int(time.time() * 1000)
 
 
 class WSConn:
@@ -432,8 +436,17 @@ class KlineFeed:
     def ready(self, symbol, interval):
         key = (symbol.replace('/', '').upper(), interval)
         with self.lock:
-            return (self.conn.healthy(self.STALE_SEC) and key not in self.need_seed
-                    and len(self.rows.get(key) or []) >= 100)
+            rows = self.rows.get(key) or []
+            if not (self.conn.healthy(self.STALE_SEC) and key not in self.need_seed and len(rows) >= 100):
+                return False
+            # 🛡️ 마지막 봉이 '지금 봉'이어야 한다 (한 코인만 멈춘 경우 대비)
+            iv = _INTERVAL_MS.get(interval, 3_600_000)
+            now = _now_ms()
+            cur_open = (now // iv) * iv
+            if rows[-1][0] < cur_open - 30_000 and now - cur_open > 30_000:
+                self.need_seed.add(key)
+                return False
+            return True
 
     def get(self, symbol, interval, limit):
         """조회(REST)와 같은 모양의 DataFrame. 준비 안 됐으면 None"""
@@ -461,7 +474,7 @@ class KlineFeed:
             return
         self.cmp['checks'] += 1
         iv_ms = _INTERVAL_MS.get(interval, 3_600_000)
-        now_ms = time.time() * 1000
+        now_ms = _now_ms()
         for ts in rest_df.index[-3:-1]:                       # 끝난 봉 2개는 똑같아야 함
             if ts not in ws.index:
                 continue
@@ -920,6 +933,20 @@ class BinanceAPI:
         if ws is not None and self.ws_mode == 'on':
             df = ws.klines.get(symbol, interval, limit)
             if df is not None:
+                # 🛡️ 5분마다 코인별로 한 번 조회와 맞춰본다. 끝난 봉이 다르면 조회 값을 쓰고 다시 채움
+                key = (symbol, interval)
+                chk = self.__dict__.setdefault('_ws_spot', {})
+                if limit >= 100 and time.time() - chk.get(key, 0) > 300:
+                    chk[key] = time.time()
+                    rest = self._rest_klines(symbol, interval, limit)
+                    if rest is not None:
+                        bad0 = ws.klines.cmp['closed_bad']
+                        ws.klines.compare(symbol, interval, rest)
+                        if ws.klines.cmp['closed_bad'] > bad0:
+                            print(f"⚠️ [웹소켓 점검] {symbol} 차트가 조회 값과 다름 → 조회 값 사용 + 다시 채움")
+                            with ws.klines.lock:
+                                ws.klines.need_seed.add((symbol.replace('/', '').upper(), interval))
+                            return rest
                 return df
         df = self._rest_klines(symbol, interval, limit)
         if ws is not None and self.ws_mode == 'shadow' and df is not None and limit >= 100:
@@ -932,9 +959,8 @@ class BinanceAPI:
     def _rest_klines(self, symbol, interval, limit=200, fresh=False):
         """차트 데이터를 조회(REST)로 — 메인넷. fresh=True 면 캐시 안 씀 (웹소켓 빈 구간 채우기용)"""
         cache_key = f"{symbol}_{interval}_{limit}"   # 개수도 구분 (limit=1 결과를 봇이 받아가던 문제)
+        # 웹소켓이 끊겨 여러 프로그램이 한꺼번에 조회로 바뀌어도, IP 전체 사용량을 보고 자동으로 느려진다
         ttl = self._klines_cache_ttl * self._slow('chart')
-        if self.ws is not None and self.ws_mode == 'on':
-            ttl = max(ttl, 15)       # 웹소켓 끊긴 동안 대신하는 중 — 여러 프로그램이 한꺼번에 몰리지 않게
         
         # 🔥 캐시 확인 (같은 코인의 LONG/SHORT 봇이 공유)
         with self._klines_cache_lock:
