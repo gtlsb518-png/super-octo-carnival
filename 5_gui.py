@@ -208,22 +208,53 @@ if WEBSOCKET_MODE not in ('off', 'shadow', 'on'):
     WEBSOCKET_MODE = 'on'
 
 WS_AVAILABLE = False
+_WS_INSTALLING = False
+
+
+def _install_ws_lib_background():
+    """websocket-client 가 없으면 뒤에서 설치 (프로그램은 기다리지 않고 조회 방식으로 먼저 시작)"""
+    global websocket, WS_AVAILABLE, _WS_INSTALLING
+    _WS_INSTALLING = True
+    try:
+        import subprocess, sys as _sys
+        print("📦 웹소켓 라이브러리 설치 중 (뒤에서 진행 — 그동안 조회 방식으로 거래)...")
+        subprocess.check_call([_sys.executable, '-m', 'pip', 'install', '-q', 'websocket-client'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+        import websocket as _w
+        websocket = _w
+        WS_AVAILABLE = True
+        print("   ✅ 웹소켓 라이브러리 설치 완료 → 곧 웹소켓으로 전환")
+    except Exception as _e:
+        print(f"⚠️ 웹소켓 라이브러리 설치 실패({_e}) → 조회 방식으로 계속 (수동: pip install websocket-client)")
+    finally:
+        _WS_INSTALLING = False
+
+
 if WEBSOCKET_MODE != 'off':
     try:
         import websocket  # websocket-client
         WS_AVAILABLE = True
     except ImportError:
-        try:
-            import subprocess, sys as _sys
-            print("📦 웹소켓 라이브러리(websocket-client) 설치 중...")
-            subprocess.check_call([_sys.executable, '-m', 'pip', 'install', '-q', 'websocket-client'],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
-            import websocket
-            WS_AVAILABLE = True
-            print("   ✅ 설치 완료")
-        except Exception as _e:
-            print(f"⚠️ 웹소켓 라이브러리 설치 실패({_e}) → 조회 방식만 사용합니다")
-            print("   수동 설치: pip install websocket-client")
+        threading.Thread(target=_install_ws_lib_background, daemon=True).start()
+
+
+def _disable_console_quickedit():
+    """윈도우 콘솔을 마우스로 클릭하면 '선택' 모드가 되어 출력이 멈추고, 콘솔에 글을 쓰던
+    봇까지 같이 멈춘다. 그 모드를 꺼서 클릭해도 안 멈추게 한다."""
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.GetStdHandle(-10)                      # 입력 핸들
+        mode = ctypes.c_uint32()
+        if k32.GetConsoleMode(h, ctypes.byref(mode)):
+            k32.SetConsoleMode(h, (mode.value & ~0x0040) | 0x0080)   # QUICK_EDIT 끄기
+    except Exception:
+        pass
+
+
+_disable_console_quickedit()
 
 _INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
                 '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
@@ -920,7 +951,19 @@ class BinanceAPI:
     def start_websockets(self, pairs_fn, mode=None):
         """pairs_fn(): [(심볼, 봉 간격), ...] — 코인 목록이 바뀌면 자동으로 다시 구독"""
         mode = mode or WEBSOCKET_MODE
-        if mode == 'off' or not WS_AVAILABLE or self.ws is not None:
+        if mode == 'off' or self.ws is not None:
+            return None
+        if not WS_AVAILABLE:
+            if _WS_INSTALLING:
+                def _later():
+                    for _ in range(80):              # 최대 약 7분 기다림
+                        time.sleep(5)
+                        if WS_AVAILABLE:
+                            self.start_websockets(pairs_fn, mode)
+                            return
+                        if not _WS_INSTALLING:
+                            return
+                threading.Thread(target=_later, daemon=True).start()
             return None
         self.ws_mode = mode
         self.ws = WSManager(self, mode, pairs_fn)
