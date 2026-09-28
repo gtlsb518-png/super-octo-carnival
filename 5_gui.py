@@ -453,7 +453,7 @@ class BinanceAPI:
         'DOGEUSDT': '1', 'TRXUSDT': '1',
         # 프로그램 #2
         'AVAXUSDT': '1', 'LTCUSDT': '0.1', 'BCHUSDT': '0.01', 'DOTUSDT': '1', 'XLMUSDT': '1',
-        'HBARUSDT': '1', 'ETCUSDT': '0.1', 'NEARUSDT': '1', 'AAVEUSDT': '0.1', 'ATOMUSDT': '1',
+        'HBARUSDT': '1', 'ETCUSDT': '0.1', 'UNIUSDT': '1', 'NEARUSDT': '1', 'AAVEUSDT': '0.1', 'ATOMUSDT': '1',
     }
 
     def is_tradable(self, symbol):
@@ -584,7 +584,7 @@ class BinanceAPI:
         'TRXUSDT': '0.00001', 'SUIUSDT': '0.0001', 'LINKUSDT': '0.001',
         # 프로그램 #2 (실제 단위의 배수가 되도록 일부러 거칠게)
         'AVAXUSDT': '0.01', 'LTCUSDT': '0.1', 'BCHUSDT': '0.1', 'DOTUSDT': '0.001', 'XLMUSDT': '0.0001',
-        'HBARUSDT': '0.0001', 'ETCUSDT': '0.01', 'NEARUSDT': '0.001', 'AAVEUSDT': '0.1', 'ATOMUSDT': '0.001',
+        'HBARUSDT': '0.0001', 'ETCUSDT': '0.01', 'UNIUSDT': '0.001', 'NEARUSDT': '0.001', 'AAVEUSDT': '0.1', 'ATOMUSDT': '0.001',
     }
 
     def round_price(self, symbol, price):
@@ -2969,13 +2969,16 @@ class App:
                 {'symbol': 'AAVE/USDT', 'name': 'Aave'},
                 {'symbol': 'ATOM/USDT', 'name': 'Cosmos'},
             ],
+            3: [  # 21 ~ 30 — 🚧 준비 중 (아직 배포 안 함). 코인 정해지면 여기에 추가
+                {'symbol': 'UNI/USDT', 'name': 'Uniswap'},
+            ],
         }
 
         # 프로그램 번호 선택
         prog_num = self.select_program_number()
         wanted = program_coins.get(prog_num)
         if wanted is None:
-            print(f"⚠️ 프로그램 #{prog_num} 코인 목록이 없습니다 (1번·2번만 있음)")
+            print(f"⚠️ 프로그램 #{prog_num} 코인 목록이 없습니다 (1~3번만 있음)")
             wanted = []
 
         # ✅ 이 서버(테스트넷/메인넷)에서 실제로 거래되는 코인만 쓴다
