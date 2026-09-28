@@ -85,9 +85,9 @@ def save_settings(s):
 
 _settings = load_settings()
 
-# 📊 통계 기준일 (1_config.py 의 STATS_START_DATE = "2026-09-01" 형식).
-#    비워두면 처음 켠 날 기준 30일 전부터 → 그 날짜를 bot_stats.json 에 기억해서 계속 씀.
-#    ⭐ 컴퓨터를 옮겨도 숫자를 똑같이 보려면 두 컴퓨터의 1_config.py 에 같은 날짜를 적으세요.
+# 📊 통계 기준일 (1_config.py 의 STATS_START_DATE = "2026-09-01" 또는 "2026-09-28 22:30").
+#    비워두면 처음 켠 시각부터 → bot_stats.json 에 기억. 그 파일을 지우고 켜면 다시 '지금부터' (초기화).
+#    ⭐ 컴퓨터를 옮겨도 숫자를 똑같이 보려면 bot_stats.json 을 복사하거나 두 컴퓨터에 같은 날짜를 적으세요.
 try:
     STATS_START_DATE = str(getattr(importlib.import_module('1_config'), 'STATS_START_DATE', '') or '').strip()
 except Exception:
@@ -4662,7 +4662,10 @@ class App:
     STATS_FUNDING_EVERY = 600   # 초 — 펀딩은 8시간마다라 10분에 한 번이면 충분
 
     def _stats_start_ms(self):
-        """통계 기준 시각(ms). 설정 > 저장된 값 > 30일 전 순서."""
+        """통계 기준 시각(ms). 설정 > 저장된 값(bot_stats.json) > 지금 순서.
+
+        파일을 다 지우고 켜면 '지금부터' 새로 시작 (초기화).
+        """
         now = int(time.time() * 1000)
         oldest = now - 179 * 86400 * 1000   # 바이낸스는 체결 기록을 6개월까지만 준다
         ms = None
@@ -4678,7 +4681,8 @@ class App:
         if ms is None:
             ms = getattr(self, '_saved_stats_start_ms', None)
         if ms is None:
-            ms = now - 30 * 86400 * 1000
+            ms = now
+            print("📊 저장된 통계가 없어 지금부터 새로 셉니다 (다른 컴퓨터에서 이어 보려면 bot_stats.json 을 복사하세요)")
         if ms < oldest:
             print("⚠️ 통계 기준일이 6개월보다 오래됨 → 바이낸스가 주는 6개월치부터 계산")
             ms = oldest
@@ -4887,6 +4891,10 @@ class App:
         if self._stats_state is None:
             start = self._stats_start_ms()
             self._saved_stats_start_ms = start
+            try:
+                self.save_stats()          # 시작 시각을 바로 파일에 남긴다
+            except Exception:
+                pass
             self._stats_state = {'start_ms': start, 'syms': {},
                                  'fund_ids': set(), 'fund': {}, 'fund_from': start, 'fund_at': 0}
         S = self._stats_state
@@ -5259,9 +5267,16 @@ class App:
         try:
             import json
             
+            start_ms = getattr(self, '_saved_stats_start_ms', None)
+            if start_ms is None and os.path.exists(STATS_FILE):
+                try:   # 아직 시작 시각을 못 정했으면 파일에 있던 값을 지킨다 (켜자마자 끄면 초기화되던 문제 방지)
+                    with open(STATS_FILE, 'r', encoding='utf-8') as f:
+                        start_ms = json.load(f).get('stats_start_ms')
+                except Exception:
+                    pass
             data = {
                 'global_stats': self.global_stats,
-                'stats_start_ms': getattr(self, '_saved_stats_start_ms', None),
+                'stats_start_ms': start_ms,
                 'coins': {}
             }
             
