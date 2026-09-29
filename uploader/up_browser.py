@@ -210,18 +210,26 @@ def launch_chrome(log=print, port=DEBUG_PORT, headless=False):
 
 # ==================== Playwright 연결 ====================
 
-def attach(playwright, log=print, port=DEBUG_PORT, auto_launch=True):
+def attach(playwright, log=print, port=DEBUG_PORT, auto_launch=False):
     """
-    켜져 있는 크롬에 붙는다. 없으면 전용 프로필로 새로 켠다.
+    이미 켜져 있는 크롬 창에 붙는다.
+
+    새 창을 띄우지 않는다. 화면에 띄워둔 그 창을 그대로 쓴다.
+    (auto_launch=True 로 부르면 없을 때만 새로 켠다)
 
     반환: (browser, context)
     """
     if not is_port_open(port):
         if not auto_launch:
-            raise RuntimeError(f"디버그 크롬이 켜져 있지 않습니다 (포트 {port})")
+            raise RuntimeError(
+                f"연결할 크롬 창이 없습니다 (포트 {port}).\n\n"
+                "'② 업로드용 크롬 열기' 를 한 번 눌러 창을 띄운 뒤,\n"
+                "그 창에서 유튜브·틱톡에 로그인해두고 다시 실행하세요.\n"
+                "(그 창은 계속 열어두시면 됩니다)"
+            )
         launch_chrome(log=log, port=port)
     else:
-        log(f"켜져 있는 크롬에 연결합니다 (포트 {port})")
+        log(f"켜져 있는 크롬 창에 연결합니다 (포트 {port})")
 
     browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
 
@@ -312,8 +320,43 @@ def set_file(page, locator, path, log=print):
     return True
 
 
-def get_page(context, log=print):
-    """새 탭을 연다 (기존 탭은 건드리지 않음)."""
+# 건드리면 안 되는 주소 (크롬 내부 페이지)
+_SKIP_URLS = ("chrome://", "devtools://", "chrome-extension://", "edge://", "about:blank")
+
+
+def get_page(context, log=print, reuse=True):
+    """
+    작업할 탭을 고른다.
+
+    reuse=True (기본): 화면에 띄워둔 그 창의 탭을 그대로 쓴다.
+      새 탭을 만들지 않으므로, 로그인된 창 하나로 계속 작업하게 된다.
+      보이는 탭이 여럿이면 가장 최근 것을 쓴다.
+    """
+    if reuse:
+        usable = [p for p in context.pages
+                  if not (p.url or "").startswith(_SKIP_URLS)]
+
+        # 지금 화면에 보이는 탭을 먼저 찾는다 (뒤쪽 탭은 hidden 으로 나온다)
+        visible = []
+        for pg in usable:
+            try:
+                if pg.evaluate("document.visibilityState") == "visible":
+                    visible.append(pg)
+            except Exception:
+                continue
+
+        page = (visible[-1] if visible else (usable[-1] if usable else None))
+        if page is not None:
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+            page.set_default_timeout(60000)
+            log(f"  - 열려 있는 탭을 사용합니다 ({(page.url or '')[:50]})")
+            return page
+
+        log("  - 쓸 수 있는 탭이 없어 새 탭을 엽니다")
+
     page = context.new_page()
     page.set_default_timeout(60000)
     return page
