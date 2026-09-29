@@ -88,6 +88,12 @@ DEFAULTS = {
     # 🔥 진입 전략: 'base'=UT+EMA(+스위칭) / 'goldfib'=황금피보 / 'bollinger'=볼린저
     'strategy': 'base',
     'sl_pct': 0.0,         # 손절 % (0=끔). 롱전용 전략(goldfib/bollinger)에 사용
+    # 🧱 지지·저항 손절 (sl_mode='swing'): 롱은 최근 N봉 최저점 아래, 숏은 최고점 위에서 손절
+    'sl_mode': 'pct',      # 'pct' = 고정 % (sl_pct) / 'swing' = 지지·저항
+    'sl_swing_n': 48,      # 지지·저항을 찾을 봉 개수 (1시간봉 48 = 이틀)
+    'sl_swing_buf': 0.3,   # 지지선 아래 여유 % (꼬리에 살짝 찍고 올라오는 것 대비)
+    'sl_swing_min': 1.0,   # 손절 거리 최소 % (너무 가까우면 흔들림에 잘리므로 이만큼은 둠)
+    'sl_swing_max': 15.0,  # 손절 거리 최대 % (지지선이 너무 멀면 여기서 끊음 = 청산 전)
     'bb_len': 20,          # 볼린저 기간
     'bb_mult': 2.0,        # 볼린저 표준편차 배수
     'bb_squeeze': 125,     # 볼린저 스퀴즈 판단 기간
@@ -517,13 +523,33 @@ def run_backtest(df, p):
     def tp_pct_at(i):
         return p['tp_trend'] if adx[i] >= p['adx_th'] else p['tp_sideways']
 
+    # 🧱 지지·저항 손절: 진입 신호봉까지의 최근 N봉 최저점/최고점
+    swing = p.get('sl_mode', 'pct') == 'swing' and not long_only
+    if swing:
+        _n = max(2, int(p.get('sl_swing_n', 48)))
+        swing_low = pd.Series(l).rolling(_n, min_periods=2).min().values
+        swing_high = pd.Series(h).rolling(_n, min_periods=2).max().values
+
+    def sl_for(side, entry, i):
+        if swing:
+            buf = p.get('sl_swing_buf', 0.3) / 100
+            mn, mx = p.get('sl_swing_min', 1.0) / 100, p.get('sl_swing_max', 15.0) / 100
+            if side == 'LONG':
+                lv = swing_low[i] * (1 - buf) if not np.isnan(swing_low[i]) else entry * (1 - mx)
+                dist = min(max((entry - lv) / entry, mn), mx)
+                return entry * (1 - dist)
+            lv = swing_high[i] * (1 + buf) if not np.isnan(swing_high[i]) else entry * (1 + mx)
+            dist = min(max((lv - entry) / entry, mn), mx)
+            return entry * (1 + dist)
+        if sl_pct > 0:
+            return entry * (1 - sl_pct / 100) if side == 'LONG' else entry * (1 + sl_pct / 100)
+        return None
+
     def open_pos(side, i):
         entry = o[i + 1]
         if tp_mode == 'switch':
             # TP 없음 — 반대신호(스위칭)나 강제청산(또는 SL)으로만 나감
-            sl_price = None
-            if sl_pct > 0:
-                sl_price = entry * (1 - sl_pct / 100) if side == 'LONG' else entry * (1 + sl_pct / 100)
+            sl_price = sl_for(side, entry, i)
             return {'side': side, 'entry': entry, 'qty': amount * lev / entry,
                     'tp_price': None, 'tp_pct': 0.0, 'sl_price': sl_price,
                     'entry_i': i + 1, 'min_roi': 0.0}
@@ -540,9 +566,7 @@ def run_backtest(df, p):
         else:  # 'adx'
             tp = tp_pct_at(i)
         tp_price = entry * (1 + tp / 100) if side == 'LONG' else entry * (1 - tp / 100)
-        sl_price = None
-        if sl_pct > 0:
-            sl_price = entry * (1 - sl_pct / 100) if side == 'LONG' else entry * (1 + sl_pct / 100)
+        sl_price = sl_for(side, entry, i)
         return {'side': side, 'entry': entry, 'qty': amount * lev / entry,
                 'tp_price': tp_price, 'tp_pct': round(tp, 3), 'sl_price': sl_price,
                 'entry_i': i + 1, 'min_roi': 0.0}
@@ -1658,6 +1682,12 @@ def run_cli():
                     help='진입 전략: base(기본)/goldfib(황금피보)/bollinger(볼린저)')
     ap.add_argument('--sl', type=float, default=DEFAULTS['sl_pct'],
                     help='손절 %% (0=끔, 롱전용 전략에 권장)')
+    ap.add_argument('--sl-swing', type=int, default=0, metavar='N',
+                    help='지지·저항 손절: 최근 N봉 최저점(롱)/최고점(숏) 기준 (예: 96 = 1시간봉 나흘). 0=끔')
+    ap.add_argument('--sl-swing-min', type=float, default=DEFAULTS['sl_swing_min'],
+                    help='지지·저항 손절 최소 거리 %% (기본 1)')
+    ap.add_argument('--sl-swing-max', type=float, default=DEFAULTS['sl_swing_max'],
+                    help='지지·저항 손절 최대 거리 %% (기본 15 = 3배 기준 ROI -45%%, 청산 전)')
     ap.add_argument('--funding', type=float, default=DEFAULTS['funding_pct'],
                     help='펀딩비 %% (1회당, 기본 0.01). 0=끔')
     ap.add_argument('--funding-hours', type=int, default=DEFAULTS['funding_hours'],
@@ -1680,6 +1710,9 @@ def run_cli():
     # 시간봉: 지정 없으면 전략 권장값 (황금피보/볼린저 = 1h)
     p['interval'] = args.interval or STRAT_INTERVAL.get(args.strategy, DEFAULTS['interval'])
     p['sl_pct'] = args.sl
+    if args.sl_swing > 0:
+        p.update(sl_mode='swing', sl_swing_n=args.sl_swing,
+                 sl_swing_min=args.sl_swing_min, sl_swing_max=args.sl_swing_max)
     if p['strategy'] in ('goldfib', 'bollinger') and p['sl_pct'] <= 0:
         p['sl_pct'] = 2.0
     p['ema_fast'], p['ema_slow'] = [int(x) for x in args.ema.split(',')]
