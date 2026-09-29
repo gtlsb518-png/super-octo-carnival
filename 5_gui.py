@@ -1562,6 +1562,15 @@ class BinanceAPI:
             return sum(float(t['price']) * float(t['qty']) for t in ts) / q if q else 0.0
         realized = sum(float(t.get('realizedPnl', 0) or 0) for t in got)
         fee = self.get_fee_usdt(got)
+        # 실제 수수료율 학습 (수수료 ÷ 체결금액) → 진입 로그의 예상 수수료에 사용
+        try:
+            notional = sum(float(t['qty']) * float(t['price']) for t in got)
+            if notional > 0 and fee > 0:
+                r = fee / notional
+                old = getattr(self, '_fee_rate_obs', None)
+                self._fee_rate_obs = r if old is None else old * 0.7 + r * 0.3
+        except Exception:
+            pass
         return {
             'realized_pnl': realized, 'commission': fee, 'net_pnl': realized - fee,
             'entry_fee': self.get_fee_usdt(opens), 'close_fee': self.get_fee_usdt(closes),
@@ -1570,6 +1579,20 @@ class BinanceAPI:
             'open_time': int(got[0]['time']), 'close_time': int(got[-1]['time']),
             'side': 'LONG' if close_side == 'SELL' else 'SHORT', 'fills': len(got),
         }
+
+    def fee_rate(self):
+        """수수료율: 실제 체결에서 배운 값이 있으면 그것, 없으면 1_config.py 의 FEE_RATE"""
+        return getattr(self, '_fee_rate_obs', None) or FEE_RATE
+
+    def get_funding_between(self, symbol, start_ms, end_ms):
+        """이 포지션을 들고 있는 동안 낸(−)/받은(+) 펀딩비 합계. 실패 시 None"""
+        rows = self._request('GET', '/fapi/v1/income', params={
+            'symbol': symbol.replace('/', ''), 'incomeType': 'FUNDING_FEE',
+            'startTime': int(start_ms), 'endTime': int(end_ms) + 1000, 'limit': 1000},
+            signed=True, quiet=True)
+        if rows is None:
+            return None
+        return sum(float(r.get('income', 0) or 0) for r in rows)
 
     def get_last_trade_info(self, symbol):
         """방금 청산된 거래의 실현손익·수수료 (바이낸스 체결 기록 기준).
@@ -1966,19 +1989,32 @@ class TradingBot:
             return
         a_pnl, a_fee, a_net, a_roi = pnl_usd, total_fee, net_profit, roi_pct
         a_efee, a_cfee = entry_fee, close_fee
+        actual = None
         try:
             time.sleep(1)
             bd = self.api.get_last_trade_info(self.config['symbol'])
             if bd and bd.get('realized_pnl', 0) != 0:
                 a_pnl = bd['realized_pnl']
                 a_fee = bd['commission']
-                a_net = bd['net_pnl']
                 # 체결 기록으로 복원된 경우 진입/청산 수수료를 실제 값으로 나눠 적는다
                 a_efee = bd.get('entry_fee', a_fee / 2)
                 a_cfee = bd.get('close_fee', a_fee / 2)
-                if self.config['amount'] > 0:
-                    a_roi = (a_pnl / self.config['amount']) * 100
-                print(f"[📊 바이낸스] {self.config['symbol']} {pos_type} 실현:{a_pnl:.4f} 수수료:{a_fee:.4f} 순:{a_net:.4f}")
+                # 실제 증거금 = 실제 체결금액 ÷ 배율 (BTC 처럼 수량 단위로 깎이면 진입금과 다름)
+                margin = self.config['amount']
+                if bd.get('qty') and bd.get('entry_price'):
+                    margin = bd['qty'] * bd['entry_price'] / max(1, self.config['leverage'])
+                if margin > 0:
+                    a_roi = (a_pnl / margin) * 100
+                # 들고 있는 동안의 펀딩비
+                fund = None
+                if bd.get('open_time') and bd.get('close_time'):
+                    fund = self.api.get_funding_between(self.config['symbol'], bd['open_time'], bd['close_time'])
+                a_net = a_pnl - a_fee + (fund or 0.0)
+                actual = {'pnl': a_pnl, 'fee': a_fee, 'fund': fund, 'net': a_net, 'roi': a_roi,
+                          'exit_px': bd.get('exit_price'), 'entry_px': bd.get('entry_price'),
+                          'notional': (bd.get('qty') or 0) * (bd.get('entry_price') or 0)}
+                print(f"[📊 바이낸스] {self.config['symbol']} {pos_type} 실현:{a_pnl:.4f} 수수료:{a_fee:.4f} "
+                      f"펀딩:{(fund or 0):+.4f} 순:{a_net:.4f}")
         except Exception as e:
             print(f"[⚠️ 바이낸스 조회 실패] {e}")
         if True:
@@ -1998,6 +2034,15 @@ class TradingBot:
                 net_profit=a_net,
                 trade_type=trade_type
             )
+        return actual
+
+    @staticmethod
+    def _fund_text(actual):
+        """청산 로그용 펀딩비 문구 (없으면 빈칸)"""
+        f = (actual or {}).get('fund')
+        if not f:
+            return ''
+        return f" | 펀딩: {'+' if f > 0 else '-'}${abs(f):.3f}"
     
     def place_exchange_tp(self, pos_type, entry_price, tp_pct):
         """🔥 진입 직후 거래소에 TP 트리거 주문 등록
@@ -2112,19 +2157,23 @@ class TradingBot:
         count = self.config['stats'][f'{side}_count']
         profit_sign = '+' if net_profit >= 0 else ''
 
-        # 엑셀 저장
-        self.save_trade_excel(pos_type, roi_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, label)
+        # 엑셀 저장 (+ 바이낸스 실제 체결 기준 값으로 로그)
+        _a = self.save_trade_excel(pos_type, roi_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, label)
+        if _a:
+            pnl_usd, total_fee, net_profit = _a['pnl'], _a['fee'], _a['net']
+        profit_sign = '+' if net_profit >= 0 else '-'
+        fund_txt = self._fund_text(_a)
 
         # 로그
         if reason == 'tp':
             self.log(f"✅ {pos_type} 익절! 거래소 TP 주문 체결 (#{count})", pos_type)
             self.log(f"   💰 실현 수익: ${pnl_usd:.2f}", pos_type)
-            self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
+            self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
             print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
         else:
             icon = '🛑' if reason == 'manual' else '💀'
             self.log(f"{icon} {pos_type} {label} 감지! (#{count})", pos_type)
-            self.log(f"   💰 실현 손익: ${pnl_usd:.2f} | 수수료: ${total_fee:.2f} "
+            self.log(f"   💰 실현 손익: ${pnl_usd:.2f} | 수수료: ${total_fee:.3f}{fund_txt} "
                      f"| 순손익: {profit_sign}${abs(net_profit):.2f}", pos_type)
             print(f"[{icon} {label}] {symbol} {pos_type} | 순손익 {profit_sign}${abs(net_profit):.2f}")
 
@@ -2777,7 +2826,7 @@ class TradingBot:
                                 target_tp_roi = dynamic_tp * self.config['leverage']
                                 
                                 # 🔥 목표 USDT 계산 (LONG/SHORT 분리!)
-                                target_usdt = self.config['amount'] * (target_tp_roi / 100)
+                                target_usdt = float(qty) * float(signals['price']) * (dynamic_tp / 100)  # 실제 주문금액 × TP%
                                 if pos_type == 'LONG':
                                     self.config['target_usdt_long'] = target_usdt
                                 else:  # SHORT
@@ -2785,8 +2834,8 @@ class TradingBot:
                                 
                                 # 🔥 수수료 계산 및 즉시 통계 반영!
                                 leverage = self.config['leverage']
-                                position_size = self.config['amount'] * leverage
-                                entry_fee = position_size * FEE_RATE  # 0.04%
+                                position_size = float(qty) * float(signals['price'])  # 실제 주문금액 (수량 단위 반영)
+                                entry_fee = position_size * self.api.fee_rate()  # 실제 수수료율 (체결에서 학습, 없으면 FEE_RATE)
                                 
                                 # 🔥 진입 수수료 저장
                                 if pos_type == 'LONG':
@@ -2820,7 +2869,10 @@ class TradingBot:
                                 self.log(f"   📊 ADX: {adx_value:.1f} ({market_type}) → TP {dynamic_tp}%", pos_type)
                                 if self.config.get('exit_mode', 'tp') != 'switch':
                                     self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", pos_type)
-                                self.log(f"   💸 예상 수수료: ${entry_fee:.2f} + ${entry_fee:.2f} = ${entry_fee*2:.2f} (0.08%)", pos_type)
+                                self.log(f"   💵 주문금액 ${position_size:,.2f} (진입금 {self.config['amount']:g} × {leverage}배"
+                                         + (f", 수량 단위 때문에 {position_size / (self.config['amount'] * leverage) * 100:.0f}%" if abs(position_size - self.config['amount'] * leverage) > 0.02 * self.config['amount'] * leverage else "")
+                                         + ")", pos_type)
+                                self.log(f"   💸 예상 수수료: ${entry_fee:.3f} + ${entry_fee:.3f} = ${entry_fee*2:.3f} ({self.api.fee_rate()*200:.3f}%)", pos_type)
                                 self.log(f"   🛡️ SL: AUTO (스위칭)", pos_type)
                                 # 🔍 즉시진입 모드면 리페인팅 추적 시작
                                 self.mark_live_entry(pos_type, df_closed, signals['price'])
@@ -2834,7 +2886,7 @@ class TradingBot:
                                 
                                 # 콘솔 출력
                                 print(f"[✅ 진입] {self.config['symbol']} {pos_type} ${entry_price_str} | ADX={adx_value:.1f} ({market_type}) | TP={dynamic_tp}%")
-                                print(f"   💰 목표 USDT: ${target_usdt:.2f} | 💸 예상 수수료: ${entry_fee*2:.2f} (0.08%)")
+                                print(f"   💰 목표 USDT: ${target_usdt:.2f} | 💸 예상 수수료: ${entry_fee*2:.3f} ({self.api.fee_rate()*200:.3f}%)")
                                 
                                 # 🔥 order response에서 평균 체결가 가져오기!
                                 filled_price = None
@@ -3020,12 +3072,17 @@ class TradingBot:
                             count = self.config['stats']['long_count']
                             
                             # 엑셀 저장
-                            self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '익절')
+                            _a = self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '익절')
+                            if _a:   # 바이낸스 실제 체결 기준 (수량 단위·실제 수수료율·펀딩 반영)
+                                pnl_usd, total_fee, net_profit, pnl_pct = _a['pnl'], _a['fee'], _a['net'], _a['roi']
+                                close_price = _a.get('exit_px') or close_price
+                            profit_sign = '+' if net_profit >= 0 else '-'
+                            fund_txt = self._fund_text(_a)
                             
                             # 로그
                             self.log(f"✅ LONG 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'LONG')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
-                            self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
+                            self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
                             print(f"[✅ 익절] {self.config['symbol']} LONG ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%)")
                             
@@ -3119,12 +3176,17 @@ class TradingBot:
                             profit_sign = '+' if net_profit >= 0 else ''
                             
                             # 🔥 엑셀 저장!
-                            self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '스위칭')
+                            _a = self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '스위칭')
+                            if _a:   # 바이낸스 실제 체결 기준 (수량 단위·실제 수수료율·펀딩 반영)
+                                pnl_usd, total_fee, net_profit, pnl_pct = _a['pnl'], _a['fee'], _a['net'], _a['roi']
+                                close_price = _a.get('exit_px') or close_price
+                            profit_sign = '+' if net_profit >= 0 else '-'
+                            fund_txt = self._fund_text(_a)
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"🔄 LONG→SHORT 스위칭! 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'LONG')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
-                            self.log(f"   💸 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
+                            self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
                             # 콘솔 출력
                             print(f"[🔄 스위칭] {self.config['symbol']} LONG→SHORT {'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}%")
@@ -3189,7 +3251,7 @@ class TradingBot:
                                         target_tp_roi = dynamic_tp * self.config['leverage']
 
                                         # 🔥 목표 USDT 계산 (SHORT 전용!)
-                                        target_usdt = self.config['amount'] * (target_tp_roi / 100)
+                                        target_usdt = float(qty) * float(signals['price']) * (dynamic_tp / 100)  # 실제 주문금액 × TP%
                                         self.config['target_usdt_short'] = target_usdt  # 저장!
                                         self.config['entry_tp_short'] = dynamic_tp
                                         self.config['tp_reached_short'] = False
@@ -3199,8 +3261,8 @@ class TradingBot:
                                         
                                         # 🔥 수수료 계산 및 즉시 통계 반영!
                                         leverage = self.config['leverage']
-                                        position_size = self.config['amount'] * leverage
-                                        entry_fee = position_size * FEE_RATE  # 0.04%
+                                        position_size = float(qty) * float(signals['price'])  # 실제 주문금액 (수량 단위 반영)
+                                        entry_fee = position_size * self.api.fee_rate()  # 실제 수수료율 (체결에서 학습, 없으면 FEE_RATE)
                                         
                                         # 🔥 진입 수수료 저장 및 즉시 통계 반영!
                                         self.config['entry_fee_short'] = entry_fee
@@ -3368,12 +3430,17 @@ class TradingBot:
                             count = self.config['stats']['short_count']
                             
                             # 엑셀 저장
-                            self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '익절')
+                            _a = self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '익절')
+                            if _a:   # 바이낸스 실제 체결 기준 (수량 단위·실제 수수료율·펀딩 반영)
+                                pnl_usd, total_fee, net_profit, pnl_pct = _a['pnl'], _a['fee'], _a['net'], _a['roi']
+                                close_price = _a.get('exit_px') or close_price
+                            profit_sign = '+' if net_profit >= 0 else '-'
+                            fund_txt = self._fund_text(_a)
                             
                             # 로그
                             self.log(f"✅ SHORT 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'SHORT')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
-                            self.log(f"   💸 수수료: ${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
+                            self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
                             print(f"[✅ 익절] {self.config['symbol']} SHORT ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%)")
                             
@@ -3469,12 +3536,17 @@ class TradingBot:
                             profit_sign = '+' if net_profit >= 0 else ''
                             
                             # 🔥 엑셀 저장!
-                            self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '스위칭')
+                            _a = self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '스위칭')
+                            if _a:   # 바이낸스 실제 체결 기준 (수량 단위·실제 수수료율·펀딩 반영)
+                                pnl_usd, total_fee, net_profit, pnl_pct = _a['pnl'], _a['fee'], _a['net'], _a['roi']
+                                close_price = _a.get('exit_px') or close_price
+                            profit_sign = '+' if net_profit >= 0 else '-'
+                            fund_txt = self._fund_text(_a)
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"🔄 SHORT→LONG 스위칭! 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'SHORT')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
-                            self.log(f"   💸 총 수수료: -${total_fee:.2f} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
+                            self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
                             # 콘솔 출력
                             print(f"[🔄 스위칭] {self.config['symbol']} SHORT→LONG {'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}%")
@@ -3539,7 +3611,7 @@ class TradingBot:
                                         target_tp_roi = dynamic_tp * self.config['leverage']
 
                                         # 🔥 목표 USDT 계산 (LONG 전용!)
-                                        target_usdt = self.config['amount'] * (target_tp_roi / 100)
+                                        target_usdt = float(qty) * float(signals['price']) * (dynamic_tp / 100)  # 실제 주문금액 × TP%
                                         self.config['target_usdt_long'] = target_usdt  # 저장!
                                         self.config['entry_tp_long'] = dynamic_tp
                                         self.config['tp_reached_long'] = False
@@ -3549,8 +3621,8 @@ class TradingBot:
                                         
                                         # 🔥 수수료 계산 및 즉시 통계 반영!
                                         leverage = self.config['leverage']
-                                        position_size = self.config['amount'] * leverage
-                                        entry_fee = position_size * FEE_RATE  # 0.04%
+                                        position_size = float(qty) * float(signals['price'])  # 실제 주문금액 (수량 단위 반영)
+                                        entry_fee = position_size * self.api.fee_rate()  # 실제 수수료율 (체결에서 학습, 없으면 FEE_RATE)
                                         
                                         # 🔥 진입 수수료 저장 및 즉시 통계 반영!
                                         self.config['entry_fee_long'] = entry_fee
@@ -6534,11 +6606,27 @@ class App:
                         trade_type='강제청산'
                     )
                     
-                    # 로그
-                    profit_sign = '+' if net_profit >= 0 else ''
+                    # 로그 (먼저 추정값, 몇 초 뒤 바이낸스 실제 값)
+                    profit_sign = '+' if net_profit >= 0 else '-'
                     self.add_log(coin, side, f"🛑 강제 청산!")
-                    self.add_log(coin, side, f"   수익: ${pnl_usd:.2f} | 청산수수료: -${close_fee:.2f}")
-                    self.add_log(coin, side, f"   순수익: {profit_sign}${net_profit:.2f}")
+                    self.add_log(coin, side, f"   (추정) 수익: ${pnl_usd:.2f} | 수수료: -${total_fee:.3f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
+
+                    def _actual_log(c=coin, sd=side):
+                        try:
+                            time.sleep(1)
+                            bd = self.api.get_last_trade_info(c['symbol'])
+                            if not bd or not bd.get('realized_pnl'):
+                                return
+                            fund = None
+                            if bd.get('open_time') and bd.get('close_time'):
+                                fund = self.api.get_funding_between(c['symbol'], bd['open_time'], bd['close_time'])
+                            net = bd['realized_pnl'] - bd['commission'] + (fund or 0)
+                            self.add_log(c, sd, f"   📊 바이낸스 실제: 실현 ${bd['realized_pnl']:+.2f} | 수수료 -${bd['commission']:.3f}"
+                                               + (f" | 펀딩 {'+' if fund > 0 else '-'}${abs(fund):.3f}" if fund else "")
+                                               + f" | 순수익 {'+' if net >= 0 else '-'}${abs(net):.2f}")
+                        except Exception as e:
+                            print(f"[강제청산 실제값 조회 실패] {e}")
+                    threading.Thread(target=_actual_log, daemon=True).start()
                     
                     # 통계 업데이트
                     self.update_stats(coin)
@@ -6739,7 +6827,7 @@ class App:
                         target_roi = dynamic_tp * coin['leverage']
                         
                         # 🔥 목표 USDT 계산 (LONG/SHORT 분리!)
-                        target_usdt = coin['amount'] * (target_roi / 100)
+                        target_usdt = float(qty) * float(current_price) * (dynamic_tp / 100)  # 실제 주문금액 × TP%
                         if side == 'LONG':
                             coin['target_usdt_long'] = target_usdt  # 저장!
                         else:
@@ -6780,8 +6868,8 @@ class App:
                             print(f"[{coin['symbol']}] 강제 진입 완료 (체결가 조회 실패 - position에서 확인 예정)")
                         
                         # 🔥 수수료 계산 (진입만)
-                        position_size = coin['amount'] * coin['leverage']
-                        entry_fee = position_size * FEE_RATE  # 진입 수수료
+                        position_size = float(qty) * float(current_price)   # 실제 주문금액 (수량 단위 반영)
+                        entry_fee = position_size * self.api.fee_rate()     # 진입 수수료 (실제 수수료율)
                         
                         # 🔥 has_position + 캐시 설정 (봇 루프 연동!)
                         coin['has_position'] = True
