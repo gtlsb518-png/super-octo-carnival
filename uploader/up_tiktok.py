@@ -21,6 +21,8 @@ import re
 import time
 from datetime import datetime, timedelta
 
+import up_browser
+
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=upload&lang=ko"
 
 # 틱톡 예약 가능 범위 (대략 20분 뒤 ~ 10일 뒤)
@@ -229,7 +231,7 @@ def upload(page, cfg, log):
     # ---------- 2. 영상 파일 선택 ----------
     log(f"[2/7] 영상 업로드 시작: {os.path.basename(video)}")
     fin, _ = _find_any(page, SEL["영상 파일 입력칸"], timeout=40000, state="attached")
-    fin.set_input_files(video)
+    up_browser.set_file(page, fin, video, log)
     time.sleep(5)
 
     # ---------- 3. 캡션(제목+설명+태그) ----------
@@ -279,7 +281,7 @@ def upload(page, cfg, log):
 
             cin, _ = _find_any(page, ["input[type=file][accept*='image']"],
                                timeout=10000, state="attached")
-            cin.set_input_files(cover)
+            up_browser.set_file(page, cin, cover, log)
             time.sleep(3)
 
             _click_if(page, SEL["커버 저장 버튼"], timeout=8000)

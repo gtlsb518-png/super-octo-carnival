@@ -18,6 +18,8 @@ import re
 import time
 from datetime import datetime
 
+import up_browser
+
 # ==================== 날짜/시간 입력 형식 ====================
 # 유튜브 스튜디오 언어 설정에 따라 받아들이는 형식이 다르다.
 # 아래 순서대로 넣어보고, 입력칸이 값을 그대로 유지하는 형식을 사용한다.
@@ -328,7 +330,11 @@ def upload(page, cfg, log):
 
     if not _dialog_open(2000):
         try:
-            page.locator("#create-icon, ytcp-button#create-icon, #create-button").first.click(timeout=15000)
+            page.locator(
+                "#create-icon, ytcp-button#create-icon, #create-button, "
+                "[aria-label*='만들기'], [aria-label*='Create'], "
+                "ytcp-button:has-text('만들기')"
+            ).first.click(timeout=15000)
             time.sleep(1.2)
             page.locator(
                 "tp-yt-paper-item#text-item-0, ytcp-text-menu-item#text-item-0, "
@@ -364,7 +370,7 @@ def upload(page, cfg, log):
         )
 
     try:
-        file_input.set_input_files(video)
+        up_browser.set_file(page, file_input, video, log)
     except Exception as e:
         raise RuntimeError(f"영상 파일을 넣지 못했습니다: {e}\n파일: {video}")
 
@@ -404,7 +410,7 @@ def upload(page, cfg, log):
                 _click_if(page, SEL["썸네일 파일 업로드 칸"], timeout=8000)
                 time.sleep(1.5)
                 tin = _first(page, SEL["썸네일 입력칸"], timeout=15000, state="attached")
-            tin.set_input_files(thumb)
+            up_browser.set_file(page, tin, thumb, log)
             time.sleep(3)
             log("  - 썸네일 등록 완료")
         except Exception as e:

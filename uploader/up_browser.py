@@ -235,6 +235,83 @@ def attach(playwright, log=print, port=DEBUG_PORT, auto_launch=True):
     return browser, context
 
 
+# ==================== 파일 넣기 (용량 제한 우회) ====================
+
+def set_file(page, locator, path, log=print):
+    """
+    파일 선택칸에 파일을 넣는다.
+
+    켜져 있는 크롬에 붙어 있으면(CDP 연결) 플레이라이트는 크롬을 '원격'으로 보고
+    파일을 통째로 전송하려 한다. 그래서 50MB 가 넘으면 이렇게 거부한다.
+        Cannot transfer files larger than 50Mb to a browser not co-located with the server
+
+    하지만 크롬은 같은 컴퓨터에 있으므로 전송할 필요가 없다.
+    크롬에게 "이 경로의 파일을 쓰라"고 직접 알려주면(DOM.setFileInputFiles)
+    용량 제한 없이 들어간다. 그게 안 되면 원래 방식으로 넘어간다.
+    """
+    path = os.path.abspath(path)
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+
+    marked = False
+    try:
+        locator.evaluate("el => el.setAttribute('data-up-target', '1')")
+        marked = True
+    except Exception as e:
+        log(f"  ! 파일칸 표시 실패: {e}")
+
+    if marked:
+        session = None
+        try:
+            session = page.context.new_cdp_session(page)
+            session.send("DOM.enable")
+            session.send("DOM.getDocument", {"depth": -1, "pierce": True})
+
+            # 그림자 DOM 안쪽까지 찾아 들어간다
+            js = """(() => {
+              const find = (root) => {
+                const el = root.querySelector('[data-up-target]');
+                if (el) return el;
+                for (const e of root.querySelectorAll('*')) {
+                  if (e.shadowRoot) { const f = find(e.shadowRoot); if (f) return f; }
+                }
+                return null;
+              };
+              return find(document);
+            })()"""
+            res = session.send("Runtime.evaluate", {"expression": js, "returnByValue": False})
+            obj_id = (res.get("result") or {}).get("objectId")
+            if not obj_id:
+                raise RuntimeError("크롬에서 파일칸을 찾지 못했습니다")
+
+            node = session.send("DOM.requestNode", {"objectId": obj_id})
+            session.send("DOM.setFileInputFiles",
+                         {"files": [path], "nodeId": node["nodeId"]})
+            log(f"  - 파일 지정 완료 ({size_mb:.1f}MB · 크롬에 경로로 전달)")
+            return True
+        except Exception as e:
+            log(f"  - 경로 전달 실패, 일반 방식으로 시도합니다: {e}")
+        finally:
+            if session is not None:
+                try:
+                    session.detach()
+                except Exception:
+                    pass
+            try:
+                locator.evaluate("el => el.removeAttribute('data-up-target')")
+            except Exception:
+                pass
+
+    # 일반 방식 (50MB 미만만 가능)
+    if size_mb > 50:
+        raise RuntimeError(
+            f"파일이 {size_mb:.0f}MB 인데 크롬에 경로로 전달하지 못했습니다.\n"
+            "크롬을 '② 업로드용 크롬 열기' 로 다시 켠 뒤 시도해 주세요."
+        )
+    locator.set_input_files(path)
+    log(f"  - 파일 지정 완료 ({size_mb:.1f}MB)")
+    return True
+
+
 def get_page(context, log=print):
     """새 탭을 연다 (기존 탭은 건드리지 않음)."""
     page = context.new_page()

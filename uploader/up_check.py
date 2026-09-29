@@ -281,7 +281,7 @@ def dryrun_tiktok(page, video, log=print):
     try:
         fin, _ = up_tiktok._find_any(page, up_tiktok.SEL["영상 파일 입력칸"],
                                      timeout=40000, state="attached")
-        fin.set_input_files(video)
+        up_browser.set_file(page, fin, video, log)
         time.sleep(8)
     except Exception as e:
         log(f"  ❌ 영상 선택 실패: {e}")
@@ -350,7 +350,7 @@ def dryrun_youtube(page, video, existing_url=None, log=print):
         try:
             fin = up_youtube._first(page, up_youtube.SEL["영상 파일 입력칸"],
                                     timeout=30000, state="attached")
-            fin.set_input_files(video)
+            up_browser.set_file(page, fin, video, log)
             up_youtube._first(page, up_youtube.SEL["제목 입력칸"], timeout=120000)
             time.sleep(2)
         except Exception as e:
