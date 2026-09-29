@@ -2032,7 +2032,8 @@ class TradingBot:
                 close_fee=a_cfee,
                 total_fee=a_fee,
                 net_profit=a_net,
-                trade_type=trade_type
+                trade_type=trade_type,
+                funding=(actual or {}).get('fund')
             )
         return actual
 
@@ -4802,7 +4803,7 @@ class App:
                 '년도', '월', '일', '시간', '분', '코인', '포지션',
                 '진입금액', '레버리지', 'TP%', 'SL%', 'ROI%',
                 '수익(USDT)', '손실(USDT)', '진입수수료', '청산수수료',
-                '총수수료', '순수익', '거래유형'
+                '총수수료', '순수익', '거래유형', '펀딩비'
             ]
             
             # 코인 시트 목록 (10개)
@@ -5428,8 +5429,9 @@ class App:
 
     def save_trade_to_excel(self, coin, position_type, entry_amount, leverage,
                            tp_pct, sl_pct, roi_pct, profit_usdt, loss_usdt,
-                           entry_fee, close_fee, total_fee, net_profit, trade_type):
-        """거래 기록을 엑셀에 저장 - 코인별 시트 + 파일 잠금 처리"""
+                           entry_fee, close_fee, total_fee, net_profit, trade_type, funding=None):
+        """거래 기록을 엑셀에 저장 - 코인별 시트 + 파일 잠금 처리
+        funding: 이 포지션을 들고 있는 동안 낸(−)/받은(+) 펀딩비 (순수익에 이미 포함). 모르면 빈칸"""
         if not OPENPYXL_AVAILABLE:
             return
         
@@ -5459,7 +5461,8 @@ class App:
             round(close_fee, 4),
             round(total_fee, 4),
             round(net_profit, 2),
-            trade_type
+            trade_type,
+            round(funding, 4) if funding is not None else None,
         ]
         
         # 🔥 파일 잠금 대비 - 최대 3회 재시도
@@ -5479,7 +5482,7 @@ class App:
                             '년도', '월', '일', '시간', '분', '코인', '포지션',
                             '진입금액', '레버리지', 'TP%', 'SL%', 'ROI%',
                             '수익(USDT)', '손실(USDT)', '진입수수료', '청산수수료',
-                            '총수수료', '순수익', '거래유형'
+                            '총수수료', '순수익', '거래유형', '펀딩비'
                         ]
                         header_font = Font(bold=True, color='FFFFFF')
                         header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
@@ -5489,6 +5492,12 @@ class App:
                             cell.fill = header_fill
                             cell.alignment = Alignment(horizontal='center')
                 
+                    # 예전 파일은 '펀딩비' 칸이 없으니 맨 끝(20번째)에 제목만 붙인다 (기존 기록은 그대로)
+                    if ws.cell(row=1, column=20).value != '펀딩비':
+                        hc = ws.cell(row=1, column=20, value='펀딩비')
+                        hc.font = Font(bold=True, color='FFFFFF')
+                        hc.fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+                        hc.alignment = Alignment(horizontal='center')
                     ws.append(row_data)
                     wb.save(TRADE_HISTORY_FILE)
                     wb.close()
