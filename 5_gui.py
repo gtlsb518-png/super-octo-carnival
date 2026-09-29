@@ -5129,6 +5129,18 @@ class App:
                   f"순수익 ${tot:+.2f} | 수수료 -${fee:.2f} | 펀딩 ${fund:+.2f}")
             self.save_stats()
 
+    @staticmethod
+    def min_entry_usdt(units, price, leverage):
+        """이 코인에 진입할 수 있는 최소 진입금(증거금, USDT).
+        바이낸스 규칙: 수량 ≥ 최소 수량, 수량은 단위의 배수, 주문금액(수량×가격) ≥ 최소 주문금액"""
+        from decimal import Decimal, ROUND_CEILING
+        step = Decimal(str(units['step']))
+        need = max(Decimal(str(units['min'])),
+                   (Decimal(str(units['notional'])) / Decimal(str(price)) / step)
+                   .to_integral_value(rounding=ROUND_CEILING) * step)
+        # 가격이 조금 움직여도 되게 2% 여유
+        return float(need) * price / leverage * 1.02
+
     def check_coin_units(self):
         """📏 켤 때 코인마다 '바이낸스 주문 단위'와 실제 주문 수량을 한 번 보여준다.
 
@@ -5156,6 +5168,8 @@ class App:
                 continue
             qs, q = self.api.round_qty(sym, target / price)
             real = q * price
+            min_in = self.min_entry_usdt(u, price, coin['leverage'])
+            self.__dict__.setdefault('_min_entry', {})[sym] = min_in
             mark = '✅'
             note = ''
             if q < float(u['min']) or q <= 0:
@@ -5168,11 +5182,17 @@ class App:
                 note += ' (거래소 정보 못 받아 예비값 사용)'
             if mark != '✅':
                 bad += 1
-            lines.append(f"{head} → {qs}개 = {real:,.1f} USDT {mark}{note}")
+            lines.append(f"{head} → {qs}개 = {real:,.1f} USDT {mark} | 최소 진입금 {min_in:,.1f}{note}")
         print("=" * 60)
         print(f"📏 주문 수량 소수점 점검 (진입금 × 레버리지 기준, 프로그램 #{PROGRAM_NUMBER})")
         for l in lines:
             print(l)
+        mins = self.__dict__.get('_min_entry') or {}
+        if mins:
+            top = max(mins, key=mins.get)
+            lev = self.coins[0].get('leverage', 3) if self.coins else 3
+            print(f"   💡 모든 코인이 진입되려면 코인당 진입금 최소 {mins[top]:,.1f} USDT "
+                  f"({lev}배 기준, 가장 비싼 코인: {top})")
         if bad:
             print(f"   ⚠️ 확인 필요 {bad}개")
         elif unknown:
