@@ -68,6 +68,14 @@ def _time_candidates(dt):
 # up_check.py 로 어떤 선택자가 실제로 잡히는지 확인할 수 있다.
 
 SEL = {
+    # 업로드 창이 실제로 열렸는지 확인용 (캡처 4번의 '파일 선택' 화면)
+    "업로드 창": [
+        "ytcp-uploads-file-picker",
+        "ytcp-uploads-dialog",
+        "text='파일 선택'",
+        "text='Select files'",
+        "text='동영상 파일을 드래그 앤 드롭하여 업로드'",
+    ],
     "영상 파일 입력칸": [
         "ytcp-uploads-file-picker input[type=file]",
         "input[type=file]#content-file-picker",
@@ -308,27 +316,67 @@ def upload(page, cfg, log):
         )
 
     # ---------- 2. 업로드 창 열기 ----------
+    # 캡처 3·4번: 만들기 → 동영상 업로드 → '파일 선택' 화면
     log("[2/10] 업로드 창 여는 중...")
-    opened = False
-    try:
-        page.locator("#create-icon").first.click(timeout=15000)
-        time.sleep(1)
-        page.locator("tp-yt-paper-item#text-item-0, ytcp-text-menu-item#text-item-0").first.click(timeout=8000)
-        opened = True
-    except Exception:
-        log("  - 업로드 버튼을 못 찾아 주소로 직접 이동합니다")
 
-    if not opened:
+    def _dialog_open(timeout=6000):
+        try:
+            _first(page, SEL["업로드 창"], timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    if not _dialog_open(2000):
+        try:
+            page.locator("#create-icon, ytcp-button#create-icon, #create-button").first.click(timeout=15000)
+            time.sleep(1.2)
+            page.locator(
+                "tp-yt-paper-item#text-item-0, ytcp-text-menu-item#text-item-0, "
+                "tp-yt-paper-item:has-text('동영상 업로드'), "
+                "tp-yt-paper-item:has-text('Upload video')"
+            ).first.click(timeout=8000)
+            time.sleep(2)
+        except Exception as e:
+            log(f"  - '만들기' 메뉴를 못 눌렀습니다 ({e})")
+
+    if not _dialog_open(8000):
+        log("  - 주소로 직접 이동합니다: youtube.com/upload")
         page.goto("https://www.youtube.com/upload", wait_until="domcontentloaded", timeout=90000)
-    time.sleep(2)
+        time.sleep(3)
+
+    if not _dialog_open(15000):
+        raise RuntimeError(
+            "업로드 창이 열리지 않았습니다.\n"
+            f"현재 주소: {page.url}\n"
+            "· 채널이 여러 개면 올릴 채널이 선택돼 있는지\n"
+            "· 크롬 창에서 유튜브에 로그인돼 있는지 확인하세요."
+        )
+    log(f"  - 업로드 창 확인 ({page.url[:60]})")
 
     # ---------- 3. 영상 파일 선택 ----------
     log(f"[3/10] 영상 업로드 시작: {os.path.basename(video)}")
-    file_input = _first(page, SEL["영상 파일 입력칸"], timeout=30000, state="attached")
-    file_input.set_input_files(video)
+    try:
+        file_input = _first(page, SEL["영상 파일 입력칸"], timeout=30000, state="attached")
+    except Exception:
+        raise RuntimeError(
+            "업로드 창은 열렸는데 파일을 넣을 칸을 찾지 못했습니다.\n"
+            f"현재 주소: {page.url}"
+        )
+
+    try:
+        file_input.set_input_files(video)
+    except Exception as e:
+        raise RuntimeError(f"영상 파일을 넣지 못했습니다: {e}\n파일: {video}")
 
     log("  - 업로드 시작됨, 상세정보 창 대기 중...")
-    title_box = _first(page, SEL["제목 입력칸"], timeout=120000)
+    try:
+        title_box = _first(page, SEL["제목 입력칸"], timeout=180000)
+    except Exception:
+        raise RuntimeError(
+            "영상은 넣었는데 세부정보 화면이 뜨지 않았습니다.\n"
+            f"현재 주소: {page.url}\n"
+            "영상 형식이 맞는지, 업로드가 진행 중인지 크롬 창에서 확인하세요."
+        )
 
     # ---------- 4. 제목 / 설명 ----------
     log("[4/10] 제목·설명 입력 중...")

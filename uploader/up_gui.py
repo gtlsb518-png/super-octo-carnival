@@ -1236,6 +1236,19 @@ class App(tk.Tk):
 
         self._start(jobs)
 
+    def _dump_failure(self, page, name):
+        """업로드가 실패하면 그 순간 화면을 '진단결과' 폴더에 남긴다."""
+        if page is None:
+            return
+        try:
+            self.log("  - 멈춘 화면을 저장하는 중...")
+            label = "실패_" + name.replace(" ", "").replace("(", "").replace(")", "")
+            r = up_check.check_page(page, log=self.log, label=label)
+            if r:
+                self.log(f"  → '{os.path.basename(up_check.OUT_DIR)}' 폴더의 파일을 보내주세요")
+        except Exception as e:
+            self.log(f"  ! 화면 저장 실패: {e}")
+
     def _set_buttons(self, enabled):
         state = "normal" if enabled else "disabled"
         for s in self.secs.values():
@@ -1269,6 +1282,7 @@ class App(tk.Tk):
                         self.log(f"🚀 {name} 업로드 시작"
                                  + (f"  (예약: {cfg['schedule']})" if cfg["schedule"] else "  (바로 게시)"))
                         self.log("=" * 60)
+                        page = None
                         try:
                             page = up_browser.get_page(context, log=self.log)
                             func(page, cfg, self.log)
@@ -1277,6 +1291,8 @@ class App(tk.Tk):
                             failed.append(name)
                             self.log(f"❌ {name} 업로드 실패: {e}")
                             self.log(traceback.format_exc())
+                            # 멈춘 화면을 자동으로 저장해 둔다 (원인 찾기용)
+                            self._dump_failure(page, name)
 
             except Exception as e:
                 failed.append("브라우저")
@@ -1291,6 +1307,8 @@ class App(tk.Tk):
                     self.log(f"✘ 실패: {', '.join(failed)}")
 
             if failed:
+                self.log("")
+                self.log("※ 멈춘 화면이 '진단결과' 폴더에 저장됐습니다. 그 폴더를 통째로 보내주세요.")
                 self.after(0, lambda: self._set_status("실패", C_ERR))
             else:
                 self.after(0, lambda: self._set_status("완료", C_OK))
