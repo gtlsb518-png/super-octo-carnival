@@ -3796,7 +3796,8 @@ class App:
         """프로그램 번호 (9_main.py 의 DEFAULT_PROGRAM: 프로그램1 폴더=1, 프로그램2 폴더=2)"""
         prog_num = PROGRAM_NUMBER
         self.program_number = prog_num
-        self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}  |  키 {key_hint()}")
+        mode = '테스트넷(모의)' if TESTNET else '🔴 메인넷(실거래)'
+        self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}  |  {mode}  |  키 {key_hint()}  ({key_source()})")
         return prog_num
     
     def add_default_coins(self):
