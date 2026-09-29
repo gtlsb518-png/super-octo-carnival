@@ -1633,22 +1633,6 @@ def refund_entry_charge(cfg, side):
         st['total_fee'] = st.get('total_fee', 0) - amt
         st['total_pnl'] = st.get('total_pnl', 0) + amt
 
-# 💵 코인별 진입금 (1_config.py 의 COIN_AMOUNT / DEFAULT_AMOUNT). 설정이 없으면 BTC 60, 나머지 50
-try:
-    _cfgmod = importlib.import_module('1_config')
-    DEFAULT_AMOUNT = float(getattr(_cfgmod, 'DEFAULT_AMOUNT', 50))
-    COIN_AMOUNT = {str(k).upper().replace('/USDT', '').replace('USDT', ''): float(v)
-                   for k, v in dict(getattr(_cfgmod, 'COIN_AMOUNT', {'BTC': 60})).items()}
-except Exception as _e:
-    print(f"⚠️ 진입금 설정 읽기 실패({_e}) → BTC 60, 나머지 50")
-    DEFAULT_AMOUNT, COIN_AMOUNT = 50.0, {'BTC': 60.0}
-
-
-def coin_amount(symbol):
-    base = symbol.upper().replace('/USDT', '').replace('USDT', '')
-    return COIN_AMOUNT.get(base, DEFAULT_AMOUNT)
-
-
 # 🪙 프로그램별 코인 (프로그램 1 = 1~10번, 2 = 11~20번 ...)
 # 실제로 돌리는 프로그램 번호 (여기 없는 번호의 코인 포지션은 '관리 안 됨' 경고 대상)
 PROGRAMS_IN_USE = (1, 2)
@@ -3855,7 +3839,7 @@ class App:
             coin = {
                 'symbol': coin_info['symbol'],
                 'timeframe': '1h',  # 🔥 1시간봉
-                'amount': coin_amount(coin_info['symbol']),  # 진입금 (코인별, 1_config.py)
+                'amount': 50,  # 진입금 50 USDT
                 'leverage': 3,  # 레버리지 3배 (안전)
                 'tp': 1.2,  # 기본 TP (동적 TP 비활성화 시)
                 'sl': 0,  # AUTO 고정
@@ -3881,10 +3865,8 @@ class App:
             
             self.add_coin(coin)
             num = (prog_num - 1) * 10 + i
-            print(f"  #{num:3d}. {coin_info['symbol']:15s} ({coin_info['name']})  진입금 {coin['amount']:g} USDT × {coin['leverage']}배")
+            print(f"  #{num:3d}. {coin_info['symbol']:15s} ({coin_info['name']})")
         
-        margin = sum(coin_amount(c['symbol']) for c in selected_coins)
-        print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * 4:,.0f} USDT (이 프로그램만, 4배 기준)")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
         print("=" * 60)
