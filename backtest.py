@@ -295,6 +295,11 @@ def atr_rma(df, period):
 
 
 def ut_bot(df, sensitivity, atr_period):
+    return ut_bot_full(df, sensitivity, atr_period)[0]
+
+
+def ut_bot_full(df, sensitivity, atr_period):
+    """UT Bot: (포지션 배열, 트레일링 스톱 배열, ATR 배열)"""
     atr = atr_rma(df, atr_period)
     close = df['close'].values
     n_loss = (sensitivity * atr).values
@@ -322,7 +327,7 @@ def ut_bot(df, sensitivity, atr_period):
             pos[i] = -1
         else:
             pos[i] = pos[i - 1]
-    return pos
+    return pos, stop, atr.values
 
 
 def ema_pair(df, fast, slow):
@@ -360,6 +365,141 @@ def adx_full_series(df, period):
     minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     return dx.ewm(alpha=1 / period, adjust=False).mean().fillna(20.0)
+
+
+# ==================== 🔴 실제 봇 방식 백테스트 (진행 중인 봉 + 즉시 재진입) ====================
+def run_backtest_live(sub, p, bar='1h'):
+    """실제 봇처럼 계산한다.
+
+    - 신호: 매매 시간봉(bar, 예 1h)의 '진행 중인 봉'으로 UT·EMA 계산 (봇의 '즉시' 모드)
+    - 하위봉(sub, 예 15분봉)마다 가격·신호 확인
+    - 익절하면 신호가 그대로면 그 자리에서 바로 재진입 → 한 봉 안에서도 여러 번 익절
+    - 반대 신호면 스위칭, 가격이 청산가에 닿으면 강제청산, sl_pct 가 있으면 손절
+
+    sub: 하위봉 DataFrame (open/high/low/close, 시간 인덱스)
+    Returns: (거래 DataFrame, 최대낙폭)
+    """
+    hb = sub.resample(bar).agg({'open': 'first', 'high': 'max', 'low': 'min',
+                                'close': 'last', 'volume': 'sum'}).dropna()
+    Hh, Hl, Hc = hb['high'].values, hb['low'].values, hb['close'].values
+    per, sens = int(p['ut_atr']), float(p['ut_sens'])
+    # 완성봉 기준 UT 트레일링 스톱·포지션 (진행 중인 봉 계산의 출발점) — 봇과 같은 계산식
+    upos, stop, atr = ut_bot_full(hb, sens, per)
+    fast, slow = int(p['ema_fast']), int(p['ema_slow'])
+    ef_arr = hb['close'].ewm(span=fast, adjust=False).mean().values
+    es_arr = hb['close'].ewm(span=slow, adjust=False).mean().values
+    af, as_ = 2 / (fast + 1), 2 / (slow + 1)
+    adx = adx_full_series(hb, int(p.get('adx_period', 10))).values
+    warm = max(60, slow + 5)
+
+    so, sh, sl_, sc = (sub[k].values for k in ('open', 'high', 'low', 'close'))
+    hidx = hb.index.get_indexer(sub.index.floor(bar))
+    ts = sub.index.values.astype('datetime64[s]').astype(np.int64)
+
+    fee_rate = p['fee_pct'] / 100.0
+    amount, lev = p['amount'], p['leverage']
+    liq_move = 100.0 / lev
+    sl_pct = float(p.get('sl_pct', 0.0) or 0.0)
+    fund_rate = (p.get('funding_pct', 0.01) / 100.0) if p.get('funding_on', True) else 0.0
+    fund_sec = max(1, int(p.get('funding_hours', 8))) * 3600
+
+    def tp_pct(H):
+        return p['tp_trend'] if adx[H - 1] >= p['adx_th'] else p['tp_sideways']
+
+    trades = []
+    equity = peak = 0.0
+    max_dd = 0.0
+    pos = None
+
+    def open_pos(side, price, H, t):
+        tp = tp_pct(H)
+        return {'side': side, 'entry': price, 'qty': amount * lev / price, 'tp_pct': tp,
+                'tp_price': price * (1 + tp / 100) if side == 'LONG' else price * (1 - tp / 100),
+                'sl_price': (price * (1 - sl_pct / 100) if side == 'LONG' else price * (1 + sl_pct / 100))
+                            if sl_pct > 0 else None,
+                'liq': price * (1 - liq_move / 100) if side == 'LONG' else price * (1 + liq_move / 100),
+                't0': ts[t], 'min_roi': 0.0}
+
+    def close_pos(pp, price, t, reason):
+        nonlocal equity, peak, max_dd
+        gross = pp['qty'] * ((price - pp['entry']) if pp['side'] == 'LONG' else (pp['entry'] - price))
+        fee = fee_rate * pp['qty'] * (pp['entry'] + price)
+        n_f = int(ts[t] // fund_sec - pp['t0'] // fund_sec)
+        fund = pp['qty'] * pp['entry'] * fund_rate * max(0, n_f)
+        net = gross - fee - fund
+        equity += net; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
+        trades.append({'시각': sub.index[t], '포지션': pp['side'], '진입가': pp['entry'], '청산가': price,
+                       'TP%': pp['tp_pct'], 'ROI%': round(gross / amount * 100, 2), '수익': gross,
+                       '수수료': fee, '펀딩비': fund, '순손익': net, '최저ROI%': round(pp['min_roi'], 2),
+                       '유형': reason, '보유(봉)': (ts[t] - pp['t0']) / 3600.0})
+
+    state = 0          # 직전 확인 시점의 신호 (1 롱 / -1 숏 / 0 없음)
+    cur_h, hi, lo = -1, 0.0, 0.0
+    confirmed = p.get('signal_mode', 'live') == 'confirmed'   # 봉 확정 후에만 신호 반영
+    next_bar = p.get('reentry', 'immediate') == 'next_bar'     # 익절 후 다음 봉에서만 재진입
+    blocked_h = -1
+    n_sub = len(sub)
+    for t in range(n_sub):
+        H = hidx[t]
+        if H < warm:
+            continue
+        if H != cur_h:
+            cur_h, hi, lo = H, sh[t], sl_[t]
+        else:
+            hi, lo = max(hi, sh[t]), min(lo, sl_[t])
+
+        if pos is not None:
+            side = pos['side']
+            # 1) 불리한 쪽 먼저 (보수적): 청산가 → 손절
+            adverse = sl_[t] if side == 'LONG' else sh[t]
+            roi_low = ((adverse - pos['entry']) if side == 'LONG' else (pos['entry'] - adverse)) / pos['entry'] * 100 * lev
+            pos['min_roi'] = min(pos['min_roi'], roi_low)
+            if (side == 'LONG' and sl_[t] <= pos['liq']) or (side == 'SHORT' and sh[t] >= pos['liq']):
+                close_pos(pos, pos['liq'], t, '강제청산'); pos = None
+            elif pos['sl_price'] is not None and ((side == 'LONG' and sl_[t] <= pos['sl_price']) or
+                                                  (side == 'SHORT' and sh[t] >= pos['sl_price'])):
+                close_pos(pos, pos['sl_price'], t, '손절'); pos = None
+            else:
+                # 2) 유리한 쪽: 익절 → 신호가 그대로면 그 가격에서 바로 재진입 (여러 번 가능)
+                fav = sh[t] if side == 'LONG' else sl_[t]
+                while pos is not None and ((side == 'LONG' and fav >= pos['tp_price']) or
+                                           (side == 'SHORT' and fav <= pos['tp_price'])):
+                    px = pos['tp_price']
+                    close_pos(pos, px, t, 'TP익절')
+                    if next_bar:
+                        pos, blocked_h = None, H
+                    else:
+                        pos = open_pos(side, px, H, t) if state == (1 if side == 'LONG' else -1) else None
+
+        # 3) 이 시점 신호 (진행 중인 봉 기준)
+        c = sc[t]
+        pc, a0 = Hc[H - 1], atr[H - 1]
+        tr = max(hi - lo, abs(hi - pc), abs(lo - pc))
+        nl = sens * (a0 + (tr - a0) / per)
+        ps = stop[H - 1]
+        if c > ps and pc > ps:   st = max(ps, c - nl)
+        elif c < ps and pc < ps: st = min(ps, c + nl)
+        elif c > ps:             st = c - nl
+        else:                    st = c + nl
+        up = 1 if (pc < ps and c > st) else -1 if (pc > ps and c < st) else upos[H - 1]
+        ef = ef_arr[H - 1] + af * (c - ef_arr[H - 1])
+        es = es_arr[H - 1] + as_ * (c - es_arr[H - 1])
+        new_state = 1 if (up == 1 and ef > es) else -1 if (up == -1 and ef < es) else 0
+        bar_end = (t + 1 >= n_sub) or (hidx[t + 1] != H)
+        if not confirmed or bar_end:
+            state = new_state
+        if p.get('_dbg') is not None:          # 검증용: (봉, 하위봉, 반영 신호, UT, EMA롱)
+            p['_dbg'].append((H, t, state, up, ef > es))
+
+        # 4) 스위칭 / 신규 진입
+        if pos is not None and state == (-1 if pos['side'] == 'LONG' else 1):
+            new_side = 'SHORT' if pos['side'] == 'LONG' else 'LONG'
+            close_pos(pos, c, t, '스위칭')
+            pos = open_pos(new_side, c, H, t)
+        elif pos is None and state != 0 and H != blocked_h:
+            pos = open_pos('LONG' if state == 1 else 'SHORT', c, H, t)
+
+    return pd.DataFrame(trades), max_dd
 
 
 # ==================== 추가 진입 전략 (롱 전용) ====================
