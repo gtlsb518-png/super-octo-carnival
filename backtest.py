@@ -94,6 +94,7 @@ DEFAULTS = {
     'sl_swing_buf': 0.3,   # 지지선 아래 여유 % (꼬리에 살짝 찍고 올라오는 것 대비)
     'sl_swing_min': 1.0,   # 손절 거리 최소 % (너무 가까우면 흔들림에 잘리므로 이만큼은 둠)
     'sl_swing_max': 15.0,  # 손절 거리 최대 % (지지선이 너무 멀면 여기서 끊음 = 청산 전)
+    'sl_reverse': False,   # 손절하면 바로 반대 방향으로 진입 (스톱 앤 리버스)
     'bb_len': 20,          # 볼린저 기간
     'bb_mult': 2.0,        # 볼린저 표준편차 배수
     'bb_squeeze': 125,     # 볼린저 스퀴즈 판단 기간
@@ -637,7 +638,7 @@ def run_backtest(df, p):
                 pos = None
             elif sl is not None and l[j] <= sl:   # 손절(SL) — 보수적으로 TP보다 먼저
                 close_pos(pos, min(sl, o[j]), j, '손절')
-                pos = None
+                pos = open_pos('SHORT', j) if (p.get('sl_reverse') and not long_only and can_open()) else None
             elif pos['tp_price'] is not None and h[j] >= pos['tp_price']:
                 close_pos(pos, max(pos['tp_price'], o[j]), j, 'TP익절')
                 pos = None
@@ -658,7 +659,7 @@ def run_backtest(df, p):
                 pos = None
             elif sl is not None and h[j] >= sl:   # 손절(SL)
                 close_pos(pos, max(sl, o[j]), j, '손절')
-                pos = None
+                pos = open_pos('LONG', j) if (p.get('sl_reverse') and can_open()) else None
             elif pos['tp_price'] is not None and l[j] <= pos['tp_price']:
                 close_pos(pos, min(pos['tp_price'], o[j]), j, 'TP익절')
                 pos = None
