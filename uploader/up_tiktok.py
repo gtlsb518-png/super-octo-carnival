@@ -35,6 +35,13 @@ MAX_AHEAD_DAYS = 10
 # up_check.py 로 어떤 선택자가 실제로 잡히는지 확인할 수 있다.
 
 SEL = {
+    # 파일칸이 숨겨져 있어 사람처럼 이 버튼을 눌러 넣는다
+    "동영상 선택 버튼": [
+        "text='동영상 선택'",
+        "button:has-text('동영상 선택')",
+        "text='Select video'",
+        "text='업로드할 동영상 선택'",
+    ],
     "영상 파일 입력칸": [
         "input[type=file][accept*='video']",
         "input[type=file]",
@@ -224,14 +231,27 @@ def upload(page, cfg, log):
 
     if "/login" in page.url:
         raise RuntimeError(
-            "틱톡 로그인이 안 되어 있습니다.\n"
-            "열린 크롬 창에서 틱톡에 먼저 로그인한 뒤 다시 실행하세요."
+            "지금 쓰는 크롬 창이 틱톡에 로그인돼 있지 않습니다.\n"
+            "그 창에서 틱톡에 직접 로그인한 뒤 다시 실행하세요.\n"
+            "(창이 여러 개면, 로그인된 창을 앞으로 꺼내두고 실행하세요)"
         )
 
     # ---------- 2. 영상 파일 선택 ----------
     log(f"[2/7] 영상 업로드 시작: {os.path.basename(video)}")
-    fin, _ = _find_any(page, SEL["영상 파일 입력칸"], timeout=40000, state="attached")
-    up_browser.set_file(page, fin, video, log)
+    fin = None
+    try:
+        btn, _ = _find_any(page, SEL["동영상 선택 버튼"], timeout=10000)
+        fin = up_browser.set_file_by_button(page, btn, video, log)
+        log("  - '동영상 선택' 을 눌러 넣었습니다")
+    except Exception as e:
+        log(f"  - 버튼으로 넣기 실패, 파일칸에 직접 넣어봅니다 ({str(e)[:60]})")
+
+    if fin is None:
+        fin, _ = _find_any(page, SEL["영상 파일 입력칸"], timeout=40000, state="attached")
+        up_browser.set_file(page, fin, video, log)
+
+    if not up_browser.check_file_set(fin, log):
+        raise RuntimeError(f"파일칸에 영상이 들어가지 않았습니다.\n파일: {video}")
     time.sleep(5)
 
     # ---------- 3. 캡션(제목+설명+태그) ----------

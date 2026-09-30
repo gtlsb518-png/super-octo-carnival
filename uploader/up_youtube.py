@@ -78,6 +78,13 @@ SEL = {
         "text='Select files'",
         "text='동영상 파일을 드래그 앤 드롭하여 업로드'",
     ],
+    # 파일칸은 display:none 이라 사람처럼 이 버튼을 눌러서 넣는다
+    "파일 선택 버튼": [
+        "text='파일 선택'",
+        "ytcp-button:has-text('파일 선택')",
+        "button:has-text('파일 선택')",
+        "text='Select files'",
+    ],
     "영상 파일 입력칸": [
         "ytcp-uploads-file-picker input[type=file]",
         "input[type=file]#content-file-picker",
@@ -313,8 +320,9 @@ def upload(page, cfg, log):
 
     if "accounts.google.com" in page.url or "signin" in page.url:
         raise RuntimeError(
-            "구글 로그인이 안 되어 있습니다.\n"
-            "열린 크롬 창에서 유튜브에 먼저 로그인한 뒤 다시 실행하세요."
+            "지금 쓰는 크롬 창이 구글에 로그인돼 있지 않습니다.\n"
+            "그 창에서 유튜브에 직접 로그인한 뒤 다시 실행하세요.\n"
+            "(창이 여러 개면, 로그인된 창을 앞으로 꺼내두고 실행하세요)"
         )
 
     # ---------- 2. 업로드 창 열기 ----------
@@ -361,18 +369,31 @@ def upload(page, cfg, log):
 
     # ---------- 3. 영상 파일 선택 ----------
     log(f"[3/10] 영상 업로드 시작: {os.path.basename(video)}")
-    try:
-        file_input = _first(page, SEL["영상 파일 입력칸"], timeout=30000, state="attached")
-    except Exception:
-        raise RuntimeError(
-            "업로드 창은 열렸는데 파일을 넣을 칸을 찾지 못했습니다.\n"
-            f"현재 주소: {page.url}"
-        )
+    file_input = None
 
+    # ① 사람이 하는 방식: '파일 선택' 을 눌러 파일창을 띄우고 경로를 넣는다
     try:
-        up_browser.set_file(page, file_input, video, log)
+        btn = _first(page, SEL["파일 선택 버튼"], timeout=10000)
+        file_input = up_browser.set_file_by_button(page, btn, video, log)
+        log("  - '파일 선택' 을 눌러 넣었습니다")
     except Exception as e:
-        raise RuntimeError(f"영상 파일을 넣지 못했습니다: {e}\n파일: {video}")
+        log(f"  - 버튼으로 넣기 실패, 파일칸에 직접 넣어봅니다 ({str(e)[:60]})")
+
+    # ② 안 되면 숨어 있는 파일칸에 직접
+    if file_input is None:
+        try:
+            file_input = _first(page, SEL["영상 파일 입력칸"], timeout=20000, state="attached")
+            up_browser.set_file(page, file_input, video, log)
+        except Exception as e:
+            raise RuntimeError(f"영상 파일을 넣지 못했습니다: {e}\n파일: {video}")
+
+    # ③ 진짜 들어갔는지 확인
+    if not up_browser.check_file_set(file_input, log):
+        raise RuntimeError(
+            "파일칸에 영상이 들어가지 않았습니다.\n"
+            f"파일: {video}\n"
+            "파일 경로에 한글·공백이 있어도 보통은 괜찮지만, 경로가 맞는지 확인해 주세요."
+        )
 
     log("  - 업로드 시작됨, 상세정보 창 대기 중...")
     try:

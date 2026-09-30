@@ -320,17 +320,51 @@ def set_file(page, locator, path, log=print):
     return True
 
 
+def check_file_set(locator, log=print):
+    """파일칸에 파일이 정말 들어갔는지 확인한다."""
+    try:
+        info = locator.evaluate(
+            "el => el.files && el.files.length "
+            "? (el.files[0].name + '|' + el.files[0].size) : ''")
+    except Exception as e:
+        log(f"  ! 파일 확인 실패: {e}")
+        return None
+    if not info:
+        return None
+    name, size = info.split("|")
+    log(f"  - 파일칸 확인: {name} ({int(size)/1024/1024:.1f}MB)")
+    return name
+
+
+def set_file_by_button(page, button, path, log=print, timeout=15000):
+    """
+    '파일 선택' 같은 버튼을 눌러서 파일을 넣는다.
+
+    유튜브·틱톡의 파일칸은 display:none 으로 숨겨져 있고, 버튼을 눌러야
+    사이트가 업로드 준비를 한다. 그래서 사람이 하는 것처럼 버튼을 누르고,
+    그때 열리는 파일 선택창에 경로를 넣어준다.
+    """
+    with page.expect_file_chooser(timeout=timeout) as fc:
+        button.click()
+    chooser = fc.value
+    element = chooser.element
+    set_file(page, element, path, log)
+    return element
+
+
 # 건드리면 안 되는 주소 (크롬 내부 페이지)
 _SKIP_URLS = ("chrome://", "devtools://", "chrome-extension://", "edge://", "about:blank")
 
 
-def get_page(context, log=print, reuse=True):
+def get_page(context, log=print, reuse=True, prefer=None):
     """
     작업할 탭을 고른다.
 
     reuse=True (기본): 화면에 띄워둔 그 창의 탭을 그대로 쓴다.
       새 탭을 만들지 않으므로, 로그인된 창 하나로 계속 작업하게 된다.
-      보이는 탭이 여럿이면 가장 최근 것을 쓴다.
+
+    prefer: 'youtube.com' 처럼 주소 일부를 주면 그 사이트가 열려 있는 탭을
+      먼저 고른다. 창이 여러 개일 때 로그인된 창을 잡을 확률이 높아진다.
     """
     if reuse:
         usable = [p for p in context.pages
@@ -345,7 +379,17 @@ def get_page(context, log=print, reuse=True):
             except Exception:
                 continue
 
-        page = (visible[-1] if visible else (usable[-1] if usable else None))
+        # 해당 사이트가 이미 열려 있는 탭이 있으면 그것을 쓴다
+        page = None
+        if prefer:
+            for group in (visible, usable):
+                match = [pg for pg in group if prefer in (pg.url or "")]
+                if match:
+                    page = match[-1]
+                    break
+
+        if page is None:
+            page = (visible[-1] if visible else (usable[-1] if usable else None))
         if page is not None:
             try:
                 page.bring_to_front()

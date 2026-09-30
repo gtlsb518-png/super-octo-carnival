@@ -1202,9 +1202,11 @@ class App(tk.Tk):
 
         if spec["site"] == "youtube":
             cfg["thumbnail"] = cfg.pop("thumb", "")
+            cfg["_site"] = "youtube.com"
             func = up_youtube.upload
         else:
             cfg["cover"] = cfg.pop("thumb", "")
+            cfg["_site"] = "tiktok.com"
             func = up_tiktok.upload
 
         return name, func, cfg
@@ -1284,7 +1286,8 @@ class App(tk.Tk):
                         self.log("=" * 60)
                         page = None
                         try:
-                            page = up_browser.get_page(context, log=self.log)
+                            page = up_browser.get_page(context, log=self.log,
+                                                       prefer=cfg.get("_site"))
                             func(page, cfg, self.log)
                             done.append(name)
                         except Exception as e:
