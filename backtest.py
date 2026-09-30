@@ -411,9 +411,12 @@ def run_backtest_live(sub, p, bar='1h'):
     max_dd = 0.0
     pos = None
 
+    dca_roi = float(p.get('dca_roi', 0.0) or 0.0)      # 물타기: ROI 가 이만큼(음수, 예 -65) 빠지면 같은 금액 추가 진입
+    dca_times = int(p.get('dca_times', 1) or 0)
+
     def open_pos(side, price, H, t):
         tp = tp_pct(H)
-        return {'side': side, 'entry': price, 'qty': amount * lev / price, 'tp_pct': tp,
+        return {'side': side, 'entry': price, 'qty': amount * lev / price, 'tp_pct': tp, 'margin': amount, 'adds': 0,
                 'tp_price': price * (1 + tp / 100) if side == 'LONG' else price * (1 - tp / 100),
                 'sl_price': (price * (1 - sl_pct / 100) if side == 'LONG' else price * (1 + sl_pct / 100))
                             if sl_pct > 0 else None,
@@ -429,7 +432,8 @@ def run_backtest_live(sub, p, bar='1h'):
         net = gross - fee - fund
         equity += net; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
         trades.append({'시각': sub.index[t], '포지션': pp['side'], '진입가': pp['entry'], '청산가': price,
-                       'TP%': pp['tp_pct'], 'ROI%': round(gross / amount * 100, 2), '수익': gross,
+                       'TP%': pp['tp_pct'], 'ROI%': round(gross / pp.get('margin', amount) * 100, 2), '수익': gross,
+                       '물타기': pp.get('adds', 0), '증거금': pp.get('margin', amount),
                        '수수료': fee, '펀딩비': fund, '순손익': net, '최저ROI%': round(pp['min_roi'], 2),
                        '유형': reason, '보유(봉)': (ts[t] - pp['t0']) / 3600.0})
 
@@ -453,6 +457,19 @@ def run_backtest_live(sub, p, bar='1h'):
             # 1) 불리한 쪽 먼저 (보수적): 청산가 → 손절
             adverse = sl_[t] if side == 'LONG' else sh[t]
             roi_low = ((adverse - pos['entry']) if side == 'LONG' else (pos['entry'] - adverse)) / pos['entry'] * 100 * lev
+            # 물타기: ROI 가 dca_roi 에 닿으면 그 가격에 같은 금액 추가 → 평균가·익절가·청산가 다시 계산
+            if dca_roi < 0 and pos['adds'] < dca_times and roi_low <= dca_roi:
+                add_px = pos['entry'] * (1 + dca_roi / 100 / lev) if side == 'LONG' else pos['entry'] * (1 - dca_roi / 100 / lev)
+                add_q = amount * lev / add_px
+                new_q = pos['qty'] + add_q
+                pos['entry'] = (pos['entry'] * pos['qty'] + add_px * add_q) / new_q
+                pos['qty'] = new_q
+                pos['margin'] += amount
+                pos['adds'] += 1
+                tp = pos['tp_pct']
+                pos['tp_price'] = pos['entry'] * (1 + tp / 100) if side == 'LONG' else pos['entry'] * (1 - tp / 100)
+                pos['liq'] = pos['entry'] * (1 - liq_move / 100) if side == 'LONG' else pos['entry'] * (1 + liq_move / 100)
+                roi_low = ((adverse - pos['entry']) if side == 'LONG' else (pos['entry'] - adverse)) / pos['entry'] * 100 * lev
             pos['min_roi'] = min(pos['min_roi'], roi_low)
             if (side == 'LONG' and sl_[t] <= pos['liq']) or (side == 'SHORT' and sh[t] >= pos['liq']):
                 close_pos(pos, pos['liq'], t, '강제청산'); pos = None
