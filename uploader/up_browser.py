@@ -208,6 +208,56 @@ def launch_chrome(log=print, port=DEBUG_PORT, headless=False):
     raise RuntimeError("크롬이 디버그 모드로 뜨지 않았습니다. 기존 크롬 창을 모두 닫고 다시 시도하세요.")
 
 
+
+def write_launcher(log=print, port=DEBUG_PORT):
+    """
+    크롬 창을 띄우는 바로가기 파일을 만든다.
+
+    이 파일을 더블클릭하면 업로드용 크롬 창이 뜬다. 거기서 한 번만 로그인해두면
+    그 창은 계속 로그인 상태로 남는다. 프로그램은 그 창을 그대로 쓴다.
+
+    ※ 평소 쓰는 크롬을 그냥 켜면 프로그램이 붙을 수 없다.
+      외부에서 조작할 수 있게 열린 창이어야 한다(--remote-debugging-port).
+    """
+    chrome = find_chrome()
+    if not chrome:
+        return None
+
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    if sys.platform.startswith("win"):
+        path = os.path.join(here, "크롬 열기.bat")
+        body = (
+            "@echo off\r\n"
+            "chcp 65001 > nul\r\n"
+            "echo 업로드용 크롬 창을 엽니다...\r\n"
+            f'start "" "{chrome}" --remote-debugging-port={port} '
+            f'--user-data-dir="{PROFILE_DIR}" '
+            "--no-first-run --no-default-browser-check "
+            "--disable-blink-features=AutomationControlled --start-maximized\r\n"
+        )
+    else:
+        path = os.path.join(here, "크롬 열기.sh")
+        body = (
+            "#!/bin/sh\n"
+            f'"{chrome}" --remote-debugging-port={port} '
+            f'--user-data-dir="{PROFILE_DIR}" '
+            "--no-first-run --no-default-browser-check "
+            "--disable-blink-features=AutomationControlled --start-maximized &\n"
+        )
+
+    try:
+        with open(path, "w", encoding="utf-8") as fp:
+            fp.write(body)
+        if not sys.platform.startswith("win"):
+            os.chmod(path, 0o755)
+        return path
+    except Exception as e:
+        log(f"  ! 바로가기 파일 만들기 실패: {e}")
+        return None
+
+
 # ==================== Playwright 연결 ====================
 
 def attach(playwright, log=print, port=DEBUG_PORT, auto_launch=False):
@@ -223,9 +273,11 @@ def attach(playwright, log=print, port=DEBUG_PORT, auto_launch=False):
         if not auto_launch:
             raise RuntimeError(
                 f"연결할 크롬 창이 없습니다 (포트 {port}).\n\n"
-                "'② 업로드용 크롬 열기' 를 한 번 눌러 창을 띄운 뒤,\n"
-                "그 창에서 유튜브·틱톡에 로그인해두고 다시 실행하세요.\n"
-                "(그 창은 계속 열어두시면 됩니다)"
+                "평소처럼 켠 크롬 창에는 프로그램이 붙을 수 없습니다.\n"
+                "'② 업로드용 크롬 열기' 로 띄운 창이어야 합니다.\n\n"
+                "· 그 창에서 유튜브·틱톡에 한 번만 로그인해두세요\n"
+                "· 그 창을 닫지 말고 계속 열어두시면 됩니다\n"
+                "· 폴더의 '크롬 열기' 파일을 더블클릭해도 같은 창이 뜹니다"
             )
         launch_chrome(log=log, port=port)
     else:

@@ -22,3 +22,5 @@ goldfib_trades.csv
 uploader/chrome_profile/
 uploader/uploader_settings.json
 uploader/진단결과/
+uploader/크롬 열기.bat
+uploader/크롬 열기.sh

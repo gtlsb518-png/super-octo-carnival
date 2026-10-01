@@ -200,7 +200,7 @@ class StatusPill(tk.Canvas):
     def __init__(self, parent, bg=HEAD_BG):
         super().__init__(parent, height=30, width=190, highlightthickness=0,
                          bd=0, bg=bg, takefocus=0)
-        self._text, self._color = "준비됨", C_OK
+        self._text, self._color = "크롬 창 확인 중", C_WARN
         self.bind("<Configure>", lambda e: self._draw())
 
     def _draw(self):
@@ -419,6 +419,17 @@ class App(tk.Tk):
         for s in self.secs.values():
             self._update_preview(s)
         self.after(100, self._drain_log)
+
+        # 크롬 창을 띄우는 바로가기 파일 만들어두기
+        try:
+            path = up_browser.write_launcher(log=self.log)
+            if path:
+                self.log(f"크롬 창을 띄우려면 '{os.path.basename(path)}' 를 더블클릭해도 됩니다.")
+        except Exception:
+            pass
+
+        self._chrome_ok = None
+        self._watch_chrome()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ==================== 화면 구성 ====================
@@ -469,6 +480,20 @@ class App(tk.Tk):
 
     def _set_status(self, text, color):
         self.status.set(text, color)
+
+    def _watch_chrome(self):
+        """업로드용 크롬 창이 열려 있는지 계속 지켜보며 상태 배지를 바꾼다."""
+        if not self.busy:
+            ok = up_browser.is_port_open()
+            if ok != self._chrome_ok:
+                self._chrome_ok = ok
+                if ok:
+                    self._set_status("크롬 연결됨", C_OK)
+                    self.log("✔ 업로드용 크롬 창을 찾았습니다. 바로 업로드할 수 있습니다.")
+                else:
+                    self._set_status("크롬 창 없음", C_WARN)
+                    self.log("크롬 창이 없습니다 — '② 업로드용 크롬 열기' 를 눌러주세요.")
+        self.after(3000, self._watch_chrome)
 
     def _prog_off(self):
         self.prog.stop()
@@ -548,8 +573,8 @@ class App(tk.Tk):
 
         self._hint(
             card,
-            "①은 크롬을 완전히 종료한 뒤 한 번만 · ②로 연 창 하나를 계속 씁니다 (새 창·새 탭을 만들지 않음)\n"
-            "③은 열려 있는 화면 하나를, ④는 업로드 과정을 따라가며 여러 화면을 자동 진단합니다 (게시는 하지 않음)",
+            "②로 연 창에 한 번만 로그인해두고 계속 열어두세요 (그 창에서 바로 업로드) · "
+            "①은 평소 크롬 로그인 가져오기(크롬 종료 후 1회) · ③④는 멈췄을 때 진단",
         ).pack(anchor="w", padx=18, pady=(6, 8))
 
     # ---------- 동시 업로드 ----------
