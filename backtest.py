@@ -390,7 +390,13 @@ def run_backtest_live(sub, p, bar='1h'):
     es_arr = hb['close'].ewm(span=slow, adjust=False).mean().values
     af, as_ = 2 / (fast + 1), 2 / (slow + 1)
     adx = adx_full_series(hb, int(p.get('adx_period', 10))).values
-    warm = max(60, slow + 5)
+    # 장기 추세 필터 (예 EMA365): 롱은 가격이 위, 숏은 아래일 때만. 0 이면 끔
+    trend_n = int(p.get('ema_trend', 0) or 0)
+    et_arr = hb['close'].ewm(span=trend_n, adjust=False).mean().values if trend_n else None
+    at_ = 2 / (trend_n + 1) if trend_n else 0.0
+    # 필터 때문에 스위칭이 막혔을 때: 'hold' 그대로 버팀 / 'close' 청산만 하고 기다림
+    trend_close = p.get('trend_exit', 'hold') == 'close'
+    warm = max(60, slow + 5, int(p.get('warm_min', 0) or 0))
 
     so, sh, sl_, sc = (sub[k].values for k in ('open', 'high', 'low', 'close'))
     hidx = hb.index.get_indexer(sub.index.floor(bar))
@@ -514,9 +520,17 @@ def run_backtest_live(sub, p, bar='1h'):
         ef = ef_arr[H - 1] + af * (c - ef_arr[H - 1])
         es = es_arr[H - 1] + as_ * (c - es_arr[H - 1])
         new_state = 1 if (up == 1 and ef > es) else -1 if (up == -1 and ef < es) else 0
+        raw_new = new_state
+        if trend_n:
+            et = et_arr[H - 1] + at_ * (c - et_arr[H - 1])
+            if (new_state == 1 and c <= et) or (new_state == -1 and c >= et):
+                new_state = 0
         bar_end = (t + 1 >= n_sub) or (hidx[t + 1] != H)
         if not confirmed or bar_end:
-            state = new_state
+            state, raw_state = new_state, raw_new
+            if (trend_close and pos is not None and state == 0 and
+                    raw_state == (-1 if pos['side'] == 'LONG' else 1)):
+                close_pos(pos, c, t, '필터청산'); pos = None   # UT·EMA 는 반대인데 추세선 반대편 아님 → 청산만
         if p.get('_dbg') is not None:          # 검증용: (봉, 하위봉, 반영 신호, UT, EMA롱)
             p['_dbg'].append((H, t, state, up, ef > es))
 
