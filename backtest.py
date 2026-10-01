@@ -411,10 +411,13 @@ def run_backtest_live(sub, p, bar='1h'):
     max_dd = 0.0
     pos = None
 
+    adx_min = float(p.get('adx_entry_min', 0.0) or 0.0)   # 횡보 필터: ADX 가 이보다 낮으면 새 진입 안 함 (청산·스위칭 청산은 함)
     dca_roi = float(p.get('dca_roi', 0.0) or 0.0)      # 물타기: ROI 가 이만큼(음수, 예 -65) 빠지면 같은 금액 추가 진입
     dca_times = int(p.get('dca_times', 1) or 0)
 
     def open_pos(side, price, H, t):
+        if adx_min > 0 and adx[H - 1] < adx_min:
+            return None            # 횡보 (추세 약함) → 들어가지 않고 기다림
         tp = tp_pct(H)
         return {'side': side, 'entry': price, 'qty': amount * lev / price, 'tp_pct': tp, 'margin': amount, 'adds': 0,
                 'tp_price': price * (1 + tp / 100) if side == 'LONG' else price * (1 - tp / 100),
