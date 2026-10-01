@@ -1074,7 +1074,18 @@ class BinanceAPI:
     
     def set_leverage(self, symbol, leverage):
         params = {'symbol': symbol.replace('/', ''), 'leverage': leverage}
-        return self._request('POST', '/fapi/v1/leverage', params=params, signed=True) is not None
+        ok = self._request('POST', '/fapi/v1/leverage', params=params, signed=True) is not None
+        if ok:
+            if not hasattr(self, '_lev_set'):
+                self._lev_set = {}
+            self._lev_set[symbol] = int(leverage)
+        return ok
+
+    def ensure_leverage(self, symbol, leverage):
+        """이번 실행에서 이 코인 레버리지를 아직 안 맞췄으면 맞춘다 (스위칭 진입 전용 — 매번 호출 안 하게)"""
+        if getattr(self, '_lev_set', {}).get(symbol) == int(leverage):
+            return True
+        return self.set_leverage(symbol, leverage)
     
     def set_margin_type(self, symbol, margin_type='ISOLATED'):
         """마진 타입 설정 (ISOLATED: 격리, CROSSED: 교차)"""
@@ -1672,6 +1683,57 @@ def coin_amount(symbol):
     return COIN_AMOUNT.get(base, DEFAULT_AMOUNT)
 
 
+# 🎯 전략 설정 (1_config.py 의 LEVERAGE / SIGNAL_MODE / REENTRY). 없거나 잘못되면 아래 기본값
+#   SIGNAL_MODE  'ut_close'  = UT 는 봉 마감 기준, EMA34/55 는 실시간 (기본·추천)
+#                'live'      = 둘 다 실시간 (진행 중인 봉, 리페인팅 있음)
+#                'confirmed' = 둘 다 봉 마감 기준
+#   REENTRY      'next_bar'  = 익절한 봉에서는 다시 안 들어가고 다음 봉부터 (기본·추천)
+#                'immediate' = 익절 후 신호가 그대로면 바로 재진입
+SIGNAL_MODES = ('ut_close', 'live', 'confirmed')
+REENTRY_MODES = ('next_bar', 'immediate')
+try:
+    LEVERAGE = int(getattr(_cfgmod, 'LEVERAGE', 5))
+    if not 1 <= LEVERAGE <= 20:
+        raise ValueError(f"LEVERAGE={LEVERAGE} (1~20만 가능)")
+except Exception as _e:
+    print(f"⚠️ 레버리지 설정 오류({_e}) → 5배")
+    LEVERAGE = 5
+try:
+    SIGNAL_MODE = str(getattr(_cfgmod, 'SIGNAL_MODE', 'ut_close')).strip().lower()
+except Exception:
+    SIGNAL_MODE = 'ut_close'
+if SIGNAL_MODE not in SIGNAL_MODES:
+    print(f"⚠️ SIGNAL_MODE='{SIGNAL_MODE}' 은 없는 값 → 'ut_close'")
+    SIGNAL_MODE = 'ut_close'
+try:
+    REENTRY_MODE = str(getattr(_cfgmod, 'REENTRY', 'next_bar')).strip().lower()
+except Exception:
+    REENTRY_MODE = 'next_bar'
+if REENTRY_MODE not in REENTRY_MODES:
+    print(f"⚠️ REENTRY='{REENTRY_MODE}' 은 없는 값 → 'next_bar'")
+    REENTRY_MODE = 'next_bar'
+
+SIGNAL_MODE_TEXT = {'ut_close': 'UT 봉마감 + EMA 실시간', 'live': '즉시 (둘 다 실시간)',
+                    'confirmed': '확정 (둘 다 봉마감)'}
+REENTRY_TEXT = {'next_bar': '익절 후 다음 봉', 'immediate': '익절 후 바로'}
+
+
+def calc_signals(df, coin):
+    """봇·화면이 똑같이 쓰는 신호 계산. df 는 진행 중인 봉까지 포함된 원본 캔들.
+
+    - 'ut_close' : UT 는 마감된 봉까지(df[:-1]), EMA·가격은 진행 중인 봉까지(df)
+    - 'live'     : 전부 진행 중인 봉까지
+    - 'confirmed': 전부 마감된 봉까지
+    """
+    mode = coin.get('signal_mode', SIGNAL_MODE)
+    args = (coin['ut_sens'], coin['ut_atr'], coin['ema_fast'], coin['ema_slow'])
+    if mode == 'confirmed':
+        return Indicators.get_signals(df[:-1], *args)
+    if mode == 'ut_close':
+        return Indicators.get_signals(df, *args, ut_df=df[:-1])
+    return Indicators.get_signals(df, *args)
+
+
 # 🪙 프로그램별 코인 (프로그램 1 = 1~10번, 2 = 11~20번 ...)
 # 실제로 돌리는 프로그램 번호 (여기 없는 번호의 코인 포지션은 '관리 안 됨' 경고 대상)
 PROGRAMS_IN_USE = (1, 2)
@@ -2002,7 +2064,7 @@ class TradingBot:
                 # 실제 증거금 = 실제 체결금액 ÷ 배율 (BTC 처럼 수량 단위로 깎이면 진입금과 다름)
                 margin = self.config['amount']
                 if bd.get('qty') and bd.get('entry_price'):
-                    margin = bd['qty'] * bd['entry_price'] / max(1, self.config['leverage'])
+                    margin = bd['qty'] * bd['entry_price'] / max(1, self._pos_leverage())
                 if margin > 0:
                     a_roi = (a_pnl / margin) * 100
                 # 들고 있는 동안의 펀딩비
@@ -2022,7 +2084,7 @@ class TradingBot:
                 coin=self.config,
                 position_type=pos_type,
                 entry_amount=self.config['amount'],
-                leverage=self.config['leverage'],
+                leverage=self._pos_leverage(),
                 tp_pct=self.config.get('entry_tp_long', 0) if pos_type == 'LONG' else self.config.get('entry_tp_short', 0),
                 sl_pct=0,
                 roi_pct=a_roi,
@@ -2110,6 +2172,7 @@ class TradingBot:
         close_fee = position_size * FEE_RATE
         total_fee = entry_fee + close_fee
         realized_ok = False
+        info = None
         try:
             time.sleep(1)
             info = self.api.get_last_trade_info(symbol)
@@ -2180,6 +2243,8 @@ class TradingBot:
 
         self.stats_callback()
         self.config['last_close_time'] = time.time()
+        if reason == 'tp':
+            self._block_reentry_this_bar((info or {}).get('close_time'))
 
         # 🛑 봇이 건 TP가 아니면 = 내가 껐거나 바이낸스가 끊은 것 → 이 코인만 정지
         if reason != 'tp':
@@ -2298,6 +2363,34 @@ class TradingBot:
     def stop(self):
         self.running = False
         
+    def _pos_leverage(self):
+        """방금까지 들고 있던 포지션의 실제 배율 (모르면 설정값)"""
+        return self.config.get('_pos_lev') or self.config['leverage']
+
+    # ==================== ⏳ 익절 후 다음 봉 재진입 ====================
+    def _bar_no(self, ms=None):
+        """그 시각이 몇 번째 봉인지 (바이낸스 봉은 UTC 기준 시간 단위로 끊긴다)"""
+        tf_ms = _INTERVAL_MS.get(self.config.get('timeframe', '1h'), 3_600_000)
+        return int((ms if ms else _now_ms()) // tf_ms)
+
+    def _block_reentry_this_bar(self, close_ms=None):
+        """익절했으면 그 봉이 끝날 때까지 새 진입 금지 (REENTRY='next_bar' 일 때만)"""
+        if REENTRY_MODE != 'next_bar':
+            return
+        if not close_ms or _now_ms() - close_ms > 15 * 60 * 1000:
+            close_ms = None          # 체결 시각을 모르거나 오래된 기록이면 지금 시각 기준
+        bar = self._bar_no(close_ms)
+        if self.config.get('tp_block_bar') == bar:
+            return
+        self.config['tp_block_bar'] = bar
+        self.config['_tp_block_logged'] = False
+        if bar >= self._bar_no():
+            print(f"[⏳ 다음 봉 대기] {self.config['symbol']}: 익절한 봉이라 다음 봉부터 진입")
+
+    def _reentry_blocked(self):
+        b = self.config.get('tp_block_bar')
+        return b is not None and self._bar_no() <= b
+
     def _tp_watch_interval(self):
         # 다시 걸기가 계속 실패하면 간격을 늘린다 (3분 → 최대 15분)
         return 180 * min(5, 1 + getattr(self, '_tp_watch_fails', 0))
@@ -2322,10 +2415,14 @@ class TradingBot:
         if not tp:
             try:
                 df = self.api.get_klines(self.config['symbol'], self.config['timeframe'])
-                tp = self.get_dynamic_tp(df) if df is not None else None
+                r = self.get_dynamic_tp(df) if df is not None else None
+                tp = r[0] if isinstance(r, tuple) else r      # (TP%, ADX, 장세) 중 TP% 만
             except Exception:
                 tp = None
-            tp = tp or self.config.get('tp', 1.2)
+            try:
+                tp = float(tp) if tp else float(self.config.get('tp', 1.2))
+            except (TypeError, ValueError):
+                tp = float(self.config.get('tp', 1.2))
             self.config[f'entry_tp_{side}'] = tp
         self.log(f"🛡️ 거래소 익절 주문이 없어서 다시 겁니다 (TP {tp}%)", side.upper())
         ok = self.place_exchange_tp(side.upper(), pos['entry_price'], tp)
@@ -2524,19 +2621,21 @@ class TradingBot:
                     consecutive_errors = 0
                     
                     # 🔥🔥🔥 신호 기준 봉 선택
+                    #   'ut_close'  = UT 는 완성된 봉, EMA 는 진행 중인 봉 포함 (UT 리페인팅 없음)
                     #   'confirmed' = 완성된 봉만 (트레이딩뷰와 동일, 리페인팅 없음)
                     #   'live'      = 진행 중인 봉 포함 (신호 즉시 반응, 리페인팅 가능)
-                    if self.config.get('signal_mode', 'live') == 'live':
-                        df_closed = df
-                        # 🔍 진행 중이던 기준봉이 닫혔으면 리페인팅 여부 판정 후 로그
-                        self.check_repaint(df)
-                    else:
+                    _mode = self.config.get('signal_mode', SIGNAL_MODE)
+                    if _mode == 'confirmed':
                         df_closed = df[:-1]
-                    
+                    else:
+                        df_closed = df
+                        if _mode == 'live':
+                            # 🔍 진행 중이던 기준봉이 닫혔으면 리페인팅 여부 판정 후 로그
+                            self.check_repaint(df)
+
                     # 캐시에 저장
                     self._cached_df = df_closed
-                    self._cached_signals = Indicators.get_signals(df_closed, self.config['ut_sens'], self.config['ut_atr'],
-                                                    self.config['ema_fast'], self.config['ema_slow'])
+                    self._cached_signals = calc_signals(df, self.config)
                     self._cached_dynamic_tp = self.get_dynamic_tp(df_closed)
 
                     # 💸 포지션 보유 중이면 10분마다 누적 펀딩비 보고
@@ -2569,6 +2668,11 @@ class TradingBot:
                         # 이래야 TP/SL 체크가 계속 됨 (익절 가능!)
                         current_position = self.config.get('_cached_position')
                     elif current_position is False or not current_position:
+                        if (self.config.get('_cached_position') and not self.config.get('is_closing')
+                                and self.config.get('tp_block_bar') != self._bar_no()):
+                            # 봇이 닫은 게 아닌데 포지션이 사라짐 → 원인 확인(몇 초) 전에 먼저 이번 봉 진입을 막는다
+                            #   (롱·숏 봇 스레드가 따로 돌아서, 그 사이 다른 쪽이 바로 재진입하는 것 방지)
+                            self._block_reentry_this_bar()
                         self.config['has_position'] = False  # 실제로 포지션 없음
                         # 🔥 봇이 청산한 게 아니면 = 거래소 TP 주문 체결 → 기록!
                         self._handle_external_close()
@@ -2589,6 +2693,9 @@ class TradingBot:
                 # 🔥 봇 루프에서 가져온 포지션을 coin에 캐시 (ROI 표시용)
                 if current_position and isinstance(current_position, dict):
                     self.config['_cached_position'] = current_position
+                    if current_position.get('leverage'):
+                        # 실제 포지션 배율 (설정을 3배→5배로 바꾼 직후 남아 있던 3배 포지션도 정확히 계산)
+                        self.config['_pos_lev'] = int(current_position['leverage'])
                 elif current_position is False:
                     self.config['_cached_position'] = None
 
@@ -2764,6 +2871,13 @@ class TradingBot:
                         # 🔥 진입 안 하는 경우 신호 업데이트 안 함!
                         # prev 상태 유지 → 다음에 버튼 켜면 진입 가능
                     
+                    # ⏳ 익절한 봉에서는 재진입하지 않고 다음 봉에서 신호를 다시 확인 (REENTRY='next_bar')
+                    if side and self._reentry_blocked():
+                        if not self.config.get('_tp_block_logged'):
+                            self.config['_tp_block_logged'] = True
+                            self.log(f"⏳ 익절한 봉이라 다음 봉에서 신호 확인 후 진입", pos_type)
+                        side = None
+
                     if side:
                         # 🔒 진입 전 Lock으로 원자적 체크!
                         entering_key = f'is_entering_{self.bot_type}'
@@ -2793,7 +2907,8 @@ class TradingBot:
                             self.api.set_margin_type(self.config['symbol'], 'ISOLATED')
                             
                             # 진입
-                            self.api.set_leverage(self.config['symbol'], self.config['leverage'])
+                            if self.api.set_leverage(self.config['symbol'], self.config['leverage']):
+                                self.config['_pos_lev'] = self.config['leverage']
                             
                             # 수량 계산 (레버리지 고려)
                             qty = (self.config['amount'] * self.config['leverage']) / signals['price']
@@ -3049,6 +3164,7 @@ class TradingBot:
                                 print(f"[❌ 청산 실패] {self.config['symbol']} LONG - 수동 청산 필요!")
                                 self.config["is_closing"] = False
                                 continue
+                            self._block_reentry_this_bar()   # 기록·통계 처리 전에 먼저 (다른 봇 스레드가 그 사이 진입 못 하게)
                             
                             # 🔥 수수료 계산
                             position_size = self.config['amount'] * self.config['leverage']
@@ -3237,6 +3353,12 @@ class TradingBot:
                                         self.config["is_entering_short"] = False
                                         continue
                                     
+                                    # 레버리지 설정 바꾼 뒤 첫 스위칭이면 거래소 레버리지도 맞춘다 (예: 3배→5배)
+                                    try:
+                                        if self.api.ensure_leverage(self.config['symbol'], self.config['leverage']):
+                                            self.config['_pos_lev'] = self.config['leverage']
+                                    except Exception as e:
+                                        print(f"[{self.config['symbol']}] 레버리지 설정 실패: {e}")
                                     # 소수점 처리 = 바이낸스 거래소 정보(stepSize) 그대로
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
                                     _, qty = self.api.round_qty(self.config['symbol'], raw_qty)
@@ -3407,6 +3529,7 @@ class TradingBot:
                                 print(f"[❌ 청산 실패] {self.config['symbol']} SHORT - 수동 청산 필요!")
                                 self.config["is_closing"] = False
                                 continue
+                            self._block_reentry_this_bar()   # 기록·통계 처리 전에 먼저 (다른 봇 스레드가 그 사이 진입 못 하게)
                             
                             # 🔥 수수료 계산
                             position_size = self.config['amount'] * self.config['leverage']
@@ -3597,6 +3720,12 @@ class TradingBot:
                                         self.config["is_entering_long"] = False
                                         continue
                                     
+                                    # 레버리지 설정 바꾼 뒤 첫 스위칭이면 거래소 레버리지도 맞춘다 (예: 3배→5배)
+                                    try:
+                                        if self.api.ensure_leverage(self.config['symbol'], self.config['leverage']):
+                                            self.config['_pos_lev'] = self.config['leverage']
+                                    except Exception as e:
+                                        print(f"[{self.config['symbol']}] 레버리지 설정 실패: {e}")
                                     # 소수점 처리 = 바이낸스 거래소 정보(stepSize) 그대로
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
                                     _, qty = self.api.round_qty(self.config['symbol'], raw_qty)
@@ -3929,7 +4058,7 @@ class App:
                 'symbol': coin_info['symbol'],
                 'timeframe': '1h',  # 🔥 1시간봉
                 'amount': coin_amount(coin_info['symbol']),  # 진입금 (코인별, 1_config.py)
-                'leverage': 3,  # 레버리지 3배 (안전)
+                'leverage': LEVERAGE,  # 레버리지 (1_config.py 의 LEVERAGE, 기본 5배)
                 'tp': 1.2,  # 기본 TP (동적 TP 비활성화 시)
                 'sl': 0,  # AUTO 고정
                 'ut_sens': 10,  # 🔥 UT Bot Key Value
@@ -3943,8 +4072,9 @@ class App:
                 'tp_sideways': 1.2,  # ✅ 횡보장 TP 1.2% (ADX < 21) — 시뮬 검증값
                 # 🔥 청산 방식: 'tp'=TP 도달 시 익절(+스위칭) / 'switch'=반대신호 스위칭만
                 'exit_mode': 'tp',
-                # 🔥 신호 기준: 'confirmed'=완성봉만(안전) / 'live'=진행중 봉 포함(빠름)
-                'signal_mode': 'live',
+                # 🔥 신호 기준 (1_config.py 의 SIGNAL_MODE): 'ut_close'=UT 봉마감+EMA 실시간(기본)
+                #    / 'live'=둘 다 진행중 봉 / 'confirmed'=둘 다 완성봉
+                'signal_mode': SIGNAL_MODE,
                 'adx_period': 10,  # ADX 기간
                 'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
                 # 🔥 거래량 필터 비활성화
@@ -3957,7 +4087,11 @@ class App:
             print(f"  #{num:3d}. {coin_info['symbol']:15s} ({coin_info['name']})  진입금 {coin['amount']:g} USDT × {coin['leverage']}배")
         
         margin = sum(coin_amount(c['symbol']) for c in selected_coins)
-        print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * 4:,.0f} USDT (이 프로그램만, 4배 기준)")
+        # 권장 잔고 배수: 시뮬레이션 최대 낙폭 기준 (3배 ≈ 증거금×4, 5배 ≈ ×5, 그 이상은 ×8)
+        mult = 4 if LEVERAGE <= 3 else 5 if LEVERAGE <= 5 else 8
+        print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * mult:,.0f} USDT "
+              f"(이 프로그램만, {LEVERAGE}배 기준 증거금×{mult})")
+        print(f"  🎯 전략: {LEVERAGE}배 | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
         print("=" * 60)
@@ -4385,7 +4519,7 @@ class App:
                 
                     if current_price:
                         # 실시간 ROI 계산
-                        leverage = coin['leverage']
+                        leverage = position.get('leverage') or coin['leverage']
                         if position['side'] == 'long':
                             roi_pct = ((current_price - entry_price) / entry_price) * 100 * leverage
                         else:  # short
@@ -6132,10 +6266,12 @@ class App:
                 bg='#2d2d2d', fg='#ffaa00' if _sw else '#00ff88',
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
 
-        _lv = coin.get('signal_mode', 'live') == 'live'
-        tk.Label(settings_line, text="신호:즉시" if _lv else "신호:확정",
-                bg='#2d2d2d', fg='#ffaa00' if _lv else '#aaaaaa',
+        _sm = coin.get('signal_mode', SIGNAL_MODE)
+        tk.Label(settings_line, text={'live': "신호:즉시", 'confirmed': "신호:확정"}.get(_sm, "신호:UT마감"),
+                bg='#2d2d2d', fg={'live': '#ffaa00', 'confirmed': '#aaaaaa'}.get(_sm, '#00ff88'),
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
+        tk.Label(settings_line, text="재진입:다음봉" if REENTRY_MODE == 'next_bar' else "재진입:바로",
+                bg='#2d2d2d', fg='#aaaaaa', font=('Arial', 9)).pack(side='left', padx=3)
         
         tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 5)}", bg='#2d2d2d', fg='#aaaaaa',
                 font=('Arial', 9)).pack(side='left', padx=3)
@@ -6234,15 +6370,19 @@ class App:
         # 🔥🔥 신호 기준 봉 선택
         tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
         tk.Label(scrollable_frame, text="⏱️ 신호 기준 봉", bg='#2d2d2d', fg='#00ff88', font=('Arial', 11, 'bold')).pack(pady=5)
-        signal_mode_var = tk.StringVar(value=coin.get('signal_mode', 'live'))
-        tk.Radiobutton(scrollable_frame, text="봉 확정 후 (안전·느림)", variable=signal_mode_var,
+        signal_mode_var = tk.StringVar(value=coin.get('signal_mode', SIGNAL_MODE))
+        tk.Radiobutton(scrollable_frame, text="UT 봉 마감 + EMA 실시간 (추천·기본)",
+                       variable=signal_mode_var, value='ut_close', bg='#2d2d2d', fg='#00ff88',
+                       selectcolor='#1e1e1e', font=('Arial', 10),
+                       activebackground='#2d2d2d').pack(anchor='w', padx=30)
+        tk.Radiobutton(scrollable_frame, text="둘 다 봉 확정 후 (안전·느림)", variable=signal_mode_var,
                        value='confirmed', bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
                        font=('Arial', 10), activebackground='#2d2d2d').pack(anchor='w', padx=30)
-        tk.Radiobutton(scrollable_frame, text="진행 중 봉 포함 (즉시 진입·기본)",
+        tk.Radiobutton(scrollable_frame, text="둘 다 진행 중 봉 (즉시·리페인팅 있음)",
                        variable=signal_mode_var, value='live', bg='#2d2d2d', fg='#ffaa00',
                        selectcolor='#1e1e1e', font=('Arial', 10),
                        activebackground='#2d2d2d').pack(anchor='w', padx=30)
-        tk.Label(scrollable_frame, text="※ 즉시반응: 진입가 유리 / 신호가 사라질 위험(실측 0.3%)",
+        tk.Label(scrollable_frame, text="※ UT 봉마감: UT 신호가 봉 중간에 바뀌어도 무시, EMA 는 바로 반영",
                  bg='#2d2d2d', fg='#888888', font=('Arial', 8)).pack(pady=2)
 
         # 🔥 동적 TP 설정
@@ -6498,9 +6638,8 @@ class App:
                 # 즉시 신호 확인 알림
                 df = self.api.get_klines(coin['symbol'], coin['timeframe'])
                 if df is not None and len(df) >= 60:
-                    signals = Indicators.get_signals(df, coin['ut_sens'], coin['ut_atr'],
-                                                    coin['ema_fast'], coin['ema_slow'])
-                    
+                    signals = calc_signals(df, coin)
+
                     if side == 'LONG':
                         ut_on = signals.get('ut_position_long', False)
                         if ut_on and signals['ema_long']:
@@ -7135,14 +7274,9 @@ class App:
                 # 🔥 화면도 봇과 '같은 봉'으로 계산한다.
                 #    (예전엔 화면은 항상 완성봉, 봇은 즉시 모드라 진행 중 봉을 봐서
                 #     화면엔 '진입 조건 충족'인데 봇은 안 들어가는 일이 생겼다)
-                if coin.get('signal_mode', 'live') == 'live':
-                    df_closed = df
-                else:
-                    df_closed = df[:-1]
-                
-                signals = Indicators.get_signals(df_closed, coin['ut_sens'], coin['ut_atr'],
-                                                coin['ema_fast'], coin['ema_slow'])
-                
+                df_closed = df[:-1] if coin.get('signal_mode', SIGNAL_MODE) == 'confirmed' else df
+                signals = calc_signals(df, coin)
+
                 # 🔥 현재가는 최신 데이터 사용
                 current_price = df['close'].iloc[-1]
                 

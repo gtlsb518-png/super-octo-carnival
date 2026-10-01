@@ -60,16 +60,18 @@ class Indicators:
         return ema_fast, ema_slow
     
     @staticmethod
-    def get_signals(df, ut_sens, ut_atr, ema_fast, ema_slow):
+    def get_signals(df, ut_sens, ut_atr, ema_fast, ema_slow, ut_df=None):
         """
         🔥🔥🔥 트레이딩뷰와 동일한 신호 계산
-        
+
         중요: df는 이미 df[:-1]로 완성된 봉만 전달받아야 함!
         - ut_pos.iloc[-1]: 마지막 완성된 봉의 UT 포지션
         - ut_pos.iloc[-2]: 그 이전 봉의 UT 포지션
         - 크로스: iloc[-2] → iloc[-1] 변화 감지
+
+        ut_df: UT 만 다른 봉으로 계산할 때 (예: UT 는 마감봉 df[:-1], EMA·가격은 진행 중 봉 포함 df)
         """
-        ut_pos = Indicators.ut_bot(df, ut_sens, ut_atr)
+        ut_pos = Indicators.ut_bot(df if ut_df is None else ut_df, ut_sens, ut_atr)
         fast, slow = Indicators.ema(df, ema_fast, ema_slow)
         
         ut_long_cross = False
