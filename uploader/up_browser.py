@@ -258,6 +258,65 @@ def write_launcher(log=print, port=DEBUG_PORT):
         return None
 
 
+
+# ==================== 로그인 확인 ====================
+
+# 로그인돼 있으면 생기는 쿠키들
+LOGIN_COOKIES = {
+    "youtube": (["https://www.youtube.com", "https://studio.youtube.com"],
+                ["SAPISID", "__Secure-3PAPISID", "SID", "LOGIN_INFO"]),
+    "tiktok":  (["https://www.tiktok.com"],
+                ["sessionid", "sessionid_ss", "sid_tt"]),
+}
+
+
+def check_login(context, site):
+    """
+    그 창이 사이트에 로그인돼 있는지 쿠키로 확인한다.
+    (페이지를 옮기지 않으므로 빠르고 안전하다)
+    """
+    urls, names = LOGIN_COOKIES.get(site, ([], []))
+    for url in urls:
+        try:
+            cookies = context.cookies(url)
+        except Exception:
+            continue
+        for c in cookies:
+            if c.get("name") in names and c.get("value"):
+                return True
+    return False
+
+
+def login_hint(site):
+    name = "유튜브" if site == "youtube" else "틱톡"
+    url = "https://studio.youtube.com" if site == "youtube" else "https://www.tiktok.com"
+    return (
+        f"지금 연결된 크롬 창이 {name}에 로그인돼 있지 않습니다.\n\n"
+        f"이 창은 평소 쓰는 크롬과 별개의 창입니다.\n"
+        f"(프로필 폴더: {PROFILE_DIR})\n\n"
+        f"그 창에서 {url} 로 들어가 {name}에 한 번만 로그인해 주세요.\n"
+        f"한 번만 하면 그 창은 계속 로그인 상태로 남습니다."
+    )
+
+
+def open_login_pages(context, log=print):
+    """로그인하라고 유튜브·틱톡 페이지를 띄워준다."""
+    opened = []
+    for site, url in (("youtube", "https://studio.youtube.com/"),
+                      ("tiktok", "https://www.tiktok.com/tiktokstudio/upload")):
+        if check_login(context, site):
+            log(f"  ✔ {'유튜브' if site == 'youtube' else '틱톡'} 로그인돼 있습니다")
+            continue
+        try:
+            pg = context.new_page()
+            pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+            opened.append(site)
+            log(f"  → {'유튜브' if site == 'youtube' else '틱톡'} 로그인 화면을 띄웠습니다")
+        except Exception as e:
+            log(f"  ! 페이지 열기 실패({site}): {e}")
+    return opened
+
+
 # ==================== Playwright 연결 ====================
 
 def attach(playwright, log=print, port=DEBUG_PORT, auto_launch=False):

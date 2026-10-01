@@ -1092,9 +1092,29 @@ class App(tk.Tk):
         def work():
             try:
                 up_browser.launch_chrome(log=self.log)
-                self.log("→ 열린 창에서 유튜브/틱톡 로그인 상태를 확인하세요.")
             except Exception as e:
                 self.log(f"❌ 크롬 실행 실패: {e}")
+                return
+
+            # 창이 떴으면 로그인 상태까지 확인해준다
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    browser, context = up_browser.attach(p, log=self.log)
+                    self.log("로그인 상태 확인 중...")
+                    need = up_browser.open_login_pages(context, log=self.log)
+                if need:
+                    names = ", ".join("유튜브" if n == "youtube" else "틱톡" for n in need)
+                    self.log(f"→ 열린 창에서 {names}에 로그인해 주세요. 한 번만 하면 계속 유지됩니다.")
+                    self.after(0, lambda: messagebox.showinfo(
+                        "로그인이 필요합니다",
+                        f"이 창은 평소 쓰는 크롬과 별개의 창입니다.\n\n"
+                        f"방금 띄운 창에서 {names}에 한 번만 로그인해 주세요.\n"
+                        "한 번만 하면 그 창은 계속 로그인 상태로 남습니다."))
+                else:
+                    self.log("✔ 유튜브·틱톡 모두 로그인돼 있습니다. 바로 업로드할 수 있습니다.")
+            except Exception as e:
+                self.log(f"  ! 로그인 확인 실패: {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1298,11 +1318,30 @@ class App(tk.Tk):
 
         def work():
             done, failed = [], []
+            done_any_upload = False
             try:
                 from playwright.sync_api import sync_playwright
 
                 with sync_playwright() as p:
                     browser, context = up_browser.attach(p, log=self.log)
+
+                    # 올리기 전에 로그인부터 확인한다 (중간에 로그인 화면으로 튕기는 것 방지)
+                    not_logged = []
+                    for name, _, cfg in jobs:
+                        site = "youtube" if "youtube" in cfg.get("_site", "") else "tiktok"
+                        if not up_browser.check_login(context, site):
+                            not_logged.append((name, site))
+
+                    if not_logged:
+                        for name, site in not_logged:
+                            failed.append(name)
+                            self.log(f"❌ {name} 업로드를 시작하지 않았습니다")
+                            self.log(up_browser.login_hint(site))
+                        self.log("")
+                        up_browser.open_login_pages(context, log=self.log)
+                        jobs = []          # 아무것도 올리지 않는다
+                    else:
+                        self.log("✔ 로그인 확인 완료")
 
                     for name, func, cfg in jobs:
                         self.log("=" * 60)
@@ -1310,6 +1349,7 @@ class App(tk.Tk):
                                  + (f"  (예약: {cfg['schedule']})" if cfg["schedule"] else "  (바로 게시)"))
                         self.log("=" * 60)
                         page = None
+                        done_any_upload = True
                         try:
                             page = up_browser.get_page(context, log=self.log,
                                                        prefer=cfg.get("_site"))
@@ -1325,7 +1365,6 @@ class App(tk.Tk):
             except Exception as e:
                 failed.append("브라우저")
                 self.log(f"❌ 브라우저 연결 실패: {e}")
-                self.log(traceback.format_exc())
 
             if len(jobs) > 1 or failed:
                 self.log("─" * 60)
@@ -1334,9 +1373,10 @@ class App(tk.Tk):
                 if failed:
                     self.log(f"✘ 실패: {', '.join(failed)}")
 
-            if failed:
+            if failed and done_any_upload:
                 self.log("")
                 self.log("※ 멈춘 화면이 '진단결과' 폴더에 저장됐습니다. 그 폴더를 통째로 보내주세요.")
+            if failed:
                 self.after(0, lambda: self._set_status("실패", C_ERR))
             else:
                 self.after(0, lambda: self._set_status("완료", C_OK))
