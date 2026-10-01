@@ -1332,8 +1332,9 @@ class App(tk.Tk):
                     browser, context = up_browser.attach(p, log=self.log)
 
                     # 올리기 전에 로그인부터 확인한다 (중간에 로그인 화면으로 튕기는 것 방지)
+                    run_jobs = list(jobs)
                     not_logged = []
-                    for name, _, cfg in jobs:
+                    for name, _, cfg in run_jobs:
                         site = "youtube" if "youtube" in cfg.get("_site", "") else "tiktok"
                         if not up_browser.check_login(context, site):
                             not_logged.append((name, site))
@@ -1345,11 +1346,11 @@ class App(tk.Tk):
                             self.log(up_browser.login_hint(site))
                         self.log("")
                         up_browser.open_login_pages(context, log=self.log)
-                        jobs = []          # 아무것도 올리지 않는다
+                        run_jobs = []          # 아무것도 올리지 않는다
                     else:
                         self.log("✔ 로그인 확인 완료")
 
-                    for name, func, cfg in jobs:
+                    for name, func, cfg in run_jobs:
                         self.log("=" * 60)
                         self.log(f"🚀 {name} 업로드 시작"
                                  + (f"  (예약: {cfg['schedule']})" if cfg["schedule"] else "  (바로 게시)"))
