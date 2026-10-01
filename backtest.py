@@ -449,6 +449,7 @@ def run_backtest_live(sub, p, bar='1h'):
     state = 0          # 직전 확인 시점의 신호 (1 롱 / -1 숏 / 0 없음)
     cur_h, hi, lo = -1, 0.0, 0.0
     confirmed = p.get('signal_mode', 'live') == 'confirmed'   # 봉 확정 후에만 신호 반영
+    ut_conf = p.get('signal_mode', 'live') == 'ut_confirmed'  # UT 만 봉 확정, EMA 는 실시간
     next_bar = p.get('reentry', 'immediate') == 'next_bar'     # 익절 후 다음 봉에서만 재진입
     # 연속 익절 브레이크: 바로 재진입하다가 익절이 chain_max 번 이어지면 멈추고 다음 봉에서 진입
     #   chain_scope='bar' → 같은 봉 안에서 센 횟수 / 'run' → 봉이 바뀌어도 끊기지 않은 연속 횟수
@@ -517,6 +518,8 @@ def run_backtest_live(sub, p, bar='1h'):
         elif c > ps:             st = c - nl
         else:                    st = c + nl
         up = 1 if (pc < ps and c > st) else -1 if (pc > ps and c < st) else upos[H - 1]
+        if ut_conf:
+            up = upos[H - 1]        # UT 는 마감된 봉 기준만 (EMA 는 진행 중인 봉 그대로)
         ef = ef_arr[H - 1] + af * (c - ef_arr[H - 1])
         es = es_arr[H - 1] + as_ * (c - es_arr[H - 1])
         new_state = 1 if (up == 1 and ef > es) else -1 if (up == -1 and ef < es) else 0
