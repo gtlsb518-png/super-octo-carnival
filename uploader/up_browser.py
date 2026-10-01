@@ -26,8 +26,40 @@ import subprocess
 # 디버그 포트 (크롬 제어용)
 DEBUG_PORT = 9222
 
-# 전용 프로필 폴더 (이 파일과 같은 폴더 안에 생성)
-PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
+# 전용 프로필 폴더
+#
+# 프로그램 폴더 안에 두면, 폴더를 옮기거나 다른 곳에 복사하는 순간
+# 프로필이 새로 만들어져 로그인이 통째로 날아간다.
+# 그래서 사용자 폴더의 고정된 자리에 둔다. 프로그램을 어디로 옮겨도 그대로다.
+
+def _profile_root():
+    if sys.platform.startswith("win"):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "YTTok-Uploader", "chrome_profile")
+
+
+PROFILE_DIR = _profile_root()
+
+# 예전 버전은 프로그램 폴더 안에 두었다. 거기에 로그인이 남아 있으면 옮겨준다.
+_OLD_PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
+
+
+def migrate_profile(log=print):
+    """예전 위치(프로그램 폴더 안)의 프로필을 고정 위치로 한 번 옮긴다."""
+    if os.path.isdir(PROFILE_DIR) or not os.path.isdir(_OLD_PROFILE_DIR):
+        return False
+    try:
+        os.makedirs(os.path.dirname(PROFILE_DIR), exist_ok=True)
+        shutil.move(_OLD_PROFILE_DIR, PROFILE_DIR)
+        log(f"로그인 정보를 안전한 위치로 옮겼습니다:\n  {PROFILE_DIR}")
+        return True
+    except Exception as e:
+        log(f"  ! 프로필 옮기기 실패 (그대로 씁니다): {e}")
+        return False
 
 
 # ==================== 크롬 실행 파일 찾기 ====================

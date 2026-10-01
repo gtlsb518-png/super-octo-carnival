@@ -420,6 +420,12 @@ class App(tk.Tk):
             self._update_preview(s)
         self.after(100, self._drain_log)
 
+        # 예전 위치(프로그램 폴더 안)에 있던 로그인 정보를 안전한 곳으로 옮긴다
+        try:
+            up_browser.migrate_profile(log=self.log)
+        except Exception:
+            pass
+
         # 크롬 창을 띄우는 바로가기 파일 만들어두기
         try:
             path = up_browser.write_launcher(log=self.log)
