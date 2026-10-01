@@ -444,6 +444,11 @@ def run_backtest_live(sub, p, bar='1h'):
     cur_h, hi, lo = -1, 0.0, 0.0
     confirmed = p.get('signal_mode', 'live') == 'confirmed'   # 봉 확정 후에만 신호 반영
     next_bar = p.get('reentry', 'immediate') == 'next_bar'     # 익절 후 다음 봉에서만 재진입
+    # 연속 익절 브레이크: 바로 재진입하다가 익절이 chain_max 번 이어지면 멈추고 다음 봉에서 진입
+    #   chain_scope='bar' → 같은 봉 안에서 센 횟수 / 'run' → 봉이 바뀌어도 끊기지 않은 연속 횟수
+    chain_max = int(p.get('chain_max', 0) or 0)
+    chain_run = p.get('chain_scope', 'bar') == 'run'
+    chain_n, chain_h = 0, -1
     blocked_h = -1
     n_sub = len(sub)
     for t in range(n_sub):
@@ -486,8 +491,12 @@ def run_backtest_live(sub, p, bar='1h'):
                                            (side == 'SHORT' and fav <= pos['tp_price'])):
                     px = pos['tp_price']
                     close_pos(pos, px, t, 'TP익절')
-                    if next_bar:
-                        pos, blocked_h = None, H
+                    if chain_max > 0:
+                        if not chain_run and chain_h != H:
+                            chain_n = 0
+                        chain_n, chain_h = chain_n + 1, H
+                    if next_bar or (chain_max > 0 and chain_n >= chain_max):
+                        pos, blocked_h, chain_n = None, H, 0
                     else:
                         pos = open_pos(side, px, H, t) if state == (1 if side == 'LONG' else -1) else None
 
@@ -516,8 +525,10 @@ def run_backtest_live(sub, p, bar='1h'):
             new_side = 'SHORT' if pos['side'] == 'LONG' else 'LONG'
             close_pos(pos, c, t, '스위칭')
             pos = open_pos(new_side, c, H, t)
+            chain_n = 0
         elif pos is None and state != 0 and H != blocked_h:
             pos = open_pos('LONG' if state == 1 else 'SHORT', c, H, t)
+            chain_n = 0
 
     return pd.DataFrame(trades), max_dd
 
