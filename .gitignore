@@ -11,6 +11,8 @@ trade_backup_*.csv
 
 # 백테스터 / 황금피보 봇 실행 산출물
 backtest_data/
+real_data/
+실제차트_비교결과.txt
 backtest_result.csv
 backtest_trades_*.csv
 backtest_월별집계*.xlsx

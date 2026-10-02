@@ -16,7 +16,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 FILES = ['1_config.py', '2_api.py', '3_indicators.py', '4_bot.py', '5_gui.py',
          '6_gui_panels.py', '7_gui_controls.py', '8_gui_signals.py', '9_main.py',
          'requirements.txt', 'README.md', '실행방법.md']
-EXTRA_1 = ['backtest.py', 'btc_1year.py', 'goldfib_bot.py']   # 별개 프로그램 (1번에만)
+EXTRA_1 = ['backtest.py', 'btc_1year.py', 'goldfib_bot.py', 'real_chart_check.py']   # 별개 프로그램 (1번에만)
 PACKS = {1: '프로그램1_코인1-10', 2: '프로그램2_코인11-20'}
 # 3: '프로그램3_코인21-30'  ← 🚧 준비 중 (지금은 UNI 1개). 코인 다 정하면 주석 풀기
 
