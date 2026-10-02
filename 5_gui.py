@@ -957,6 +957,33 @@ class BinanceAPI:
             print(f"[청산 원인 조회 실패] {symbol}: {e}")
             return None
 
+    def last_tp_fill_ms(self, symbol, lookback_ms=2 * 3600 * 1000):
+        """최근 lookback 안에서 '마지막으로 체결된 주문'이 익절(TP)이었으면 그 시각(ms), 아니면 None.
+
+        프로그램이 꺼져 있는 동안 거래소 TP 가 체결됐는지 켤 때 확인하는 용도 (다음 봉 재진입 규칙).
+        """
+        try:
+            sc = symbol.replace('/', '')
+            since = int(time.time() * 1000) - int(lookback_ms)
+            orders = self._request('GET', '/fapi/v1/allOrders', params={'symbol': sc, 'startTime': since, 'limit': 50},
+                                   signed=True, quiet=True)
+            filled = [o for o in (orders or []) if o.get('status') == 'FILLED'
+                      and float(o.get('executedQty', 0) or 0) > 0]
+            if not filled:
+                return None
+            o = max(filled, key=lambda x: int(x.get('updateTime', 0)))
+            t = int(o.get('updateTime', 0))
+            if (str(o.get('type', '')).startswith('TAKE_PROFIT') or str(o.get('origType', '')).startswith('TAKE_PROFIT')
+                    or str(o.get('clientOrderId', '')).startswith(self.TP_CLIENT_PREFIX)):
+                return t
+            algo = self._rows(self._request('GET', '/fapi/v1/allAlgoOrders', params={'symbol': sc, 'startTime': since},
+                                            signed=True, quiet=True)) or []
+            if any(str(a.get('actualOrderId') or '') == str(o.get('orderId')) for a in algo):
+                return t
+        except Exception as e:
+            print(f"[익절 기록 확인 실패] {symbol}: {e}")
+        return None
+
     # ==================== 📊 사용량 / 🔌 웹소켓 ====================
     def _note_weight(self, which, response):
         try:
@@ -1388,16 +1415,28 @@ class BinanceAPI:
             now = time.time()
             if self._position_cache is not None and (now - self._position_cache_time) < ttl:
                 positions = self._position_cache
+            elif now < getattr(self, '_pos_fail_until', 0):
+                # 🧯 방금 조회가 실패함 → 잠깐 쉬는 중 (장애 때 봇 20개가 매초 두드려 IP 차단되는 것 방지)
+                if self._position_cache is not None and (now - self._position_cache_time) < 30:
+                    positions = self._position_cache
+                else:
+                    return None
             else:
                 positions = self._request('GET', '/fapi/v2/positionRisk', signed=True)
                 if positions is not None:
                     self._position_cache = positions
                     self._position_cache_time = now
+                    if self.__dict__.get('_pos_fails'):
+                        print(f"✅ 포지션 조회 복구 (실패 {self._pos_fails}번 뒤)")
+                    self._pos_fails = 0
                     if ws is not None:
                         self._check_position_changes(positions)
                 else:
-                    # API 실패 — 캐시가 있으면 캐시 사용 (10초 이내)
-                    if self._position_cache is not None and (now - self._position_cache_time) < 10:
+                    # API 실패 → 1.5 → 3 → 6 → 12 → 최대 15초 동안 다시 조회하지 않고 기다린다
+                    self._pos_fails = self.__dict__.get('_pos_fails', 0) + 1
+                    self._pos_fail_until = now + min(15.0, 1.5 * 2 ** (self._pos_fails - 1))
+                    # 캐시가 있으면 캐시 사용 (30초 이내 — 장애 중에도 익절·스위칭 판단은 마지막 값으로. 청산은 reduceOnly 라 안전)
+                    if self._position_cache is not None and (now - self._position_cache_time) < 30:
                         positions = self._position_cache
                     else:
                         return None  # API 실패 + 캐시도 없음
@@ -2255,9 +2294,17 @@ class TradingBot:
                 self.config['_tp_block_announced_bar'] = self.config.get('tp_block_bar')
                 self.config['_tp_block_logged'] = True
                 self.log(f"   ⏳ 익절한 봉이라 다음 봉에서 신호 확인 후 진입", pos_type)
+            try:   # 재시작해도 이어지게 기록 (원인 확인 전 먼저 막을 땐 기록 안 했으므로)
+                if getattr(self, 'app', None):
+                    self.app._refresh_running_state()
+            except Exception:
+                pass
 
         # 🛑 봇이 건 TP가 아니면 = 내가 껐거나 바이낸스가 끊은 것 → 이 코인만 정지
         if reason != 'tp':
+            # 원인 확인 전에 걸어둔 '이번 봉 진입 금지'는 익절용이라 푼다
+            # (안 풀면 사용자가 바로 시작 버튼을 눌러도 다음 봉까지 안 들어갔음)
+            self.config['tp_block_bar'] = None
             self.halt_coin(label, pos_type)
 
         # 신호/ROI 초기화 (재진입 대비)
@@ -2402,8 +2449,40 @@ class TradingBot:
             return
         self.config['tp_block_bar'] = bar
         self.config['_tp_block_logged'] = not announce
+        try:   # 같은 봉 안에서 프로그램을 껐다 켜도 이어지게
+            if announce and getattr(self, 'app', None):
+                self.app._refresh_running_state()
+        except Exception:
+            pass
         if announce and bar >= self._bar_no():
             print(f"[⏳ 다음 봉 대기] {self.config['symbol']}: 익절한 봉이라 다음 봉부터 진입")
+
+    def _restore_tp_block(self):
+        """켤 때 포지션이 없으면: 이번 봉에 익절했는지 확인해서 다음 봉 재진입 규칙을 이어간다.
+        (켜져 있을 때 걸어둔 대기는 bot_running.json, 꺼진 사이 체결된 거래소 TP 는 바이낸스 주문 기록으로)
+        """
+        if REENTRY_MODE != 'next_bar':
+            return
+        if time.time() - self.config.get('_tp_restore_at', 0) < 60:   # 롱·숏 봇이 둘 다 부르므로 한 번만
+            return
+        self.config['_tp_restore_at'] = time.time()
+        now_bar = self._bar_no()
+        bar = None
+        try:
+            saved = self.app._saved_tp_block().get(self.config['symbol']) if getattr(self, 'app', None) else None
+            if saved is not None and int(saved) >= now_bar:
+                bar = int(saved)
+        except Exception:
+            pass
+        if bar is None:
+            t = self.api.last_tp_fill_ms(self.config['symbol'])
+            if t and self._bar_no(t) >= now_bar:
+                bar = self._bar_no(t)
+        if bar is not None:
+            self.config['tp_block_bar'] = bar
+            self.config['_tp_block_logged'] = True
+            self.log(f"⏳ 이번 봉에 이미 익절했습니다 → 다음 봉에서 신호 확인 후 진입", self.bot_type.upper())
+            print(f"[⏳ 다음 봉 대기] {self.config['symbol']}: 이번 봉에 익절 기록 있음 (재시작 전/꺼진 사이)")
 
     def _reentry_blocked(self):
         b = self.config.get('tp_block_bar')
@@ -2517,8 +2596,11 @@ class TradingBot:
                 ep = self.api.get_position(self.config['symbol'])
                 if ep:
                     self._takeover_position(ep)
-                else:
+                elif ep is False:
                     print(f"[🔄 재연결] {self.config['symbol']} 포지션 없음")
+                    self._restore_tp_block()
+                else:
+                    print(f"[🔄 재연결] {self.config['symbol']} 포지션 확인 안 됨 (API 응답 없음)")
             except Exception as e:
                 print(f"[🔄 재연결] {self.config['symbol']} 확인 실패: {e}")
         else:
@@ -2538,6 +2620,7 @@ class TradingBot:
                 else:
                     print(f"[✅ 포지션 없음] {self.config['symbol']} 깨끗한 상태로 시작!")
                     print(f"")
+                    self._restore_tp_block()
                     # 🔥 이전 세션의 잔여 TP 주문 정리 (포지션이 확실히 없을 때만)
                     try:
                         self.api.cancel_all_orders(self.config['symbol'])
@@ -4035,6 +4118,13 @@ class App:
         if os.path.exists(BOT_RUNNING_FILE):
             self._save_running_state()
 
+    def _saved_tp_block(self):
+        try:
+            with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
+                return dict(json.load(f).get('tp_block') or {})
+        except Exception:
+            return {}
+
     def _saved_halted(self):
         try:
             with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
@@ -4045,7 +4135,8 @@ class App:
     def _save_running_state(self):
         """봇 실행 상태 저장 — 프로그램 재시작 시 자동 재연결용"""
         try:
-            state = {'running': True, 'timestamp': time.time(), 'halted': self._halted_coins()}
+            state = {'running': True, 'timestamp': time.time(), 'halted': self._halted_coins(),
+                     'tp_block': {c['symbol']: c['tp_block_bar'] for c in self.coins if c.get('tp_block_bar')}}
             with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
@@ -4774,11 +4865,13 @@ class App:
         """전체 롱숏 종료 (정지 + 청산)"""
         prog_info = f"프로그램 #{self.program_number}: " if self.program_number else ""
         if CustomMessageBox.askyesno("⚠️ 전체 종료", 
-            f"{prog_info}모든 코인의 롱과 숏을 종료하시겠습니까?\n\n"
-            f"대상: GUI {len(self.coins)}개 코인 + 바이낸스 모든 포지션\n"
+            f"{prog_info}이 프로그램 코인의 롱과 숏을 종료하시겠습니까?\n\n"
+            f"대상: 이 프로그램 코인 {len(self.coins)}개\n"
+            f"   ({', '.join(c['symbol'].replace('/USDT', '') for c in self.coins)})\n"
             f"동작:\n"
-            f"  1. 모든 봇 정지 (진입 차단) 🛑\n"
-            f"  2. 바이낸스 모든 포지션 강제 청산 🔥\n\n"
+            f"  1. 이 코인들의 봇 정지 (진입 차단) 🛑\n"
+            f"  2. 이 코인들의 바이낸스 포지션 청산 🔥\n\n"
+            f"✅ 다른 프로그램의 코인 포지션은 건드리지 않습니다.\n"
             f"※ 이 작업은 되돌릴 수 없습니다!"):
             
             # 🔥 스레드로 실행 (UI 프리즈 방지!)
@@ -4853,7 +4946,8 @@ class App:
                 
                 # 🔥 2단계: 바이낸스 모든 포지션 청산
                 print("=" * 60)
-                print("🔥 바이낸스 전체 포지션 청산 시작...")
+                print("🔥 이 프로그램 코인의 바이낸스 포지션 청산 시작... (다른 프로그램 코인은 그대로)")
+                mine = {c['symbol'].replace('/', '') for c in self.coins}
                 print("=" * 60)
                 
                 try:
@@ -4864,7 +4958,10 @@ class App:
                         for pos in all_positions:
                             pos_amt = float(pos['positionAmt'])
                             
-                            # 포지션이 있으면 청산
+                            # 이 프로그램 코인의 포지션만 청산 (같은 계정의 다른 프로그램 포지션까지 닫던 문제)
+                            if pos_amt != 0 and pos['symbol'] not in mine:
+                                print(f"   ⏭️ {pos['symbol']} — 이 프로그램 코인이 아니라 그대로 둡니다")
+                                continue
                             if pos_amt != 0:
                                 symbol = pos['symbol']  # BTCUSDT
                                 symbol_display = symbol[:-4] + '/' + symbol[-4:]  # BTC/USDT
@@ -4956,7 +5053,7 @@ class App:
                     if remaining_positions:
                         remaining_count = 0
                         for pos in remaining_positions:
-                            if float(pos['positionAmt']) != 0:
+                            if float(pos['positionAmt']) != 0 and pos['symbol'] in mine:
                                 remaining_count += 1
                                 symbol = pos['symbol']
                                 print(f"⚠️ 남은 포지션: {symbol} (수량: {pos['positionAmt']})")
