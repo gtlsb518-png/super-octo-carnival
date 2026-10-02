@@ -1091,7 +1091,13 @@ class BinanceAPI:
         """마진 타입 설정 (ISOLATED: 격리, CROSSED: 교차)"""
         params = {'symbol': symbol.replace('/', ''), 'marginType': margin_type}
         try:
-            result = self._request('POST', '/fapi/v1/marginType', params=params, signed=True)
+            # 이미 격리면 바이낸스가 -4046 'No need to change margin type' 을 돌려준다 → 정상이라 콘솔에 안 찍음
+            result = self._request('POST', '/fapi/v1/marginType', params=params, signed=True, quiet=True)
+            if result is None:
+                err = self.last_order_error() or {}
+                if err.get('code') == -4046:
+                    return True
+                print(f"[⚠️ 격리 설정 실패] {symbol}: {err}")
             return result is not None
         except Exception as e:
             # 이미 설정되어 있으면 에러 발생 (무시)
@@ -2245,6 +2251,10 @@ class TradingBot:
         self.config['last_close_time'] = time.time()
         if reason == 'tp':
             self._block_reentry_this_bar((info or {}).get('close_time'))
+            if self._reentry_blocked() and not self.config.get('_tp_block_announced_bar') == self.config.get('tp_block_bar'):
+                self.config['_tp_block_announced_bar'] = self.config.get('tp_block_bar')
+                self.config['_tp_block_logged'] = True
+                self.log(f"   ⏳ 익절한 봉이라 다음 봉에서 신호 확인 후 진입", pos_type)
 
         # 🛑 봇이 건 TP가 아니면 = 내가 껐거나 바이낸스가 끊은 것 → 이 코인만 정지
         if reason != 'tp':
@@ -2277,6 +2287,11 @@ class TradingBot:
         self.config['short_active'] = False
         self.config['halted_reason'] = why
         self.config['halted_at'] = time.time()
+        try:   # 프로그램을 껐다 켜도(자동 재연결) 이 코인은 멈춘 채로 두게 기록
+            if self.app:
+                self.app._refresh_running_state()
+        except Exception:
+            pass
 
         # 남아있는 예약 주문(TP 등) 정리
         try:
@@ -2373,8 +2388,11 @@ class TradingBot:
         tf_ms = _INTERVAL_MS.get(self.config.get('timeframe', '1h'), 3_600_000)
         return int((ms if ms else _now_ms()) // tf_ms)
 
-    def _block_reentry_this_bar(self, close_ms=None):
-        """익절했으면 그 봉이 끝날 때까지 새 진입 금지 (REENTRY='next_bar' 일 때만)"""
+    def _block_reentry_this_bar(self, close_ms=None, announce=True):
+        """익절했으면 그 봉이 끝날 때까지 새 진입 금지 (REENTRY='next_bar' 일 때만)
+
+        announce=False: 청산 원인을 아직 모를 때 먼저 막아만 둔다 (화면에 '익절한 봉' 문구 안 띄움)
+        """
         if REENTRY_MODE != 'next_bar':
             return
         if not close_ms or _now_ms() - close_ms > 15 * 60 * 1000:
@@ -2383,8 +2401,8 @@ class TradingBot:
         if self.config.get('tp_block_bar') == bar:
             return
         self.config['tp_block_bar'] = bar
-        self.config['_tp_block_logged'] = False
-        if bar >= self._bar_no():
+        self.config['_tp_block_logged'] = not announce
+        if announce and bar >= self._bar_no():
             print(f"[⏳ 다음 봉 대기] {self.config['symbol']}: 익절한 봉이라 다음 봉부터 진입")
 
     def _reentry_blocked(self):
@@ -2672,7 +2690,7 @@ class TradingBot:
                                 and self.config.get('tp_block_bar') != self._bar_no()):
                             # 봇이 닫은 게 아닌데 포지션이 사라짐 → 원인 확인(몇 초) 전에 먼저 이번 봉 진입을 막는다
                             #   (롱·숏 봇 스레드가 따로 돌아서, 그 사이 다른 쪽이 바로 재진입하는 것 방지)
-                            self._block_reentry_this_bar()
+                            self._block_reentry_this_bar(announce=False)
                         self.config['has_position'] = False  # 실제로 포지션 없음
                         # 🔥 봇이 청산한 게 아니면 = 거래소 TP 주문 체결 → 기록!
                         self._handle_external_close()
@@ -2733,6 +2751,17 @@ class TradingBot:
                             # 🔥 대기 중에는 신호 업데이트 안 함! (False 유지)
                             # 대기 완료 후 False→True 감지
                             continue
+
+                    # ⏳ 익절한 봉이면 신호 확인 자체를 다음 봉까지 쉰다 (콘솔에 5초마다 같은 줄이 쌓이지 않게)
+                    if self._reentry_blocked():
+                        if not self.config.get('_tp_block_logged'):
+                            self.config['_tp_block_logged'] = True
+                            self.log(f"⏳ 익절한 봉이라 다음 봉에서 신호 확인 후 진입", self.bot_type.upper())
+                        continue
+
+                    # 이 봇(롱/숏)이 꺼져 있으면 진입 확인을 건너뛴다 (정지된 코인이 5초마다 콘솔에 신호를 찍던 것 방지)
+                    if not self.config.get(f'{self.bot_type}_active'):
+                        continue
 
                     # 🔍 디버깅 - 신호 상태 (5초마다)
                     if not hasattr(self, '_last_signal_debug'):
@@ -2857,10 +2886,13 @@ class TradingBot:
                     
                     # 🔥 진입 안 하는 경우 상세 로그
                     if not side:
-                        if long_signal_new and not self.config['long_active']:
-                            print(f"[❌ 진입 불가] {self.config['symbol']} LONG: 봇 비활성화")
-                        if short_signal_new and not self.config['short_active']:
-                            print(f"[❌ 진입 불가] {self.config['symbol']} SHORT: 봇 비활성화")
+                        # 꺼진 봇은 10분에 한 번만 알림 (예전엔 5초마다 콘솔에 쌓였음)
+                        _off = [d for d, sig in (('LONG', long_signal_new), ('SHORT', short_signal_new))
+                                if sig and not self.config[f'{d.lower()}_active']]
+                        if _off and time.time() - getattr(self, '_inactive_print_at', 0) > 600:
+                            self._inactive_print_at = time.time()
+                            for d in _off:
+                                print(f"[❌ 진입 불가] {self.config['symbol']} {d}: 봇 비활성화 (시작 버튼을 누르면 진입)")
                         
                         # 신호는 있지만 진입 안된 경우
                         if current_long_signal and not long_signal_new:
@@ -3993,10 +4025,27 @@ class App:
         print("🔄 자동 재연결 시작...")
         threading.Thread(target=self._reconnect_all_thread, daemon=True).start()
     
+    def _halted_coins(self):
+        """수동청산·강제청산으로 멈춘(롱·숏 둘 다 꺼진) 코인 → {심볼: 이유}"""
+        return {c['symbol']: c['halted_reason'] for c in self.coins
+                if c.get('halted_reason') and not c.get('long_active') and not c.get('short_active')}
+
+    def _refresh_running_state(self):
+        """실행 중일 때만(재연결 파일이 있을 때만) 정지 코인 목록을 갱신"""
+        if os.path.exists(BOT_RUNNING_FILE):
+            self._save_running_state()
+
+    def _saved_halted(self):
+        try:
+            with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
+                return dict(json.load(f).get('halted') or {})
+        except Exception:
+            return {}
+
     def _save_running_state(self):
         """봇 실행 상태 저장 — 프로그램 재시작 시 자동 재연결용"""
         try:
-            state = {'running': True, 'timestamp': time.time()}
+            state = {'running': True, 'timestamp': time.time(), 'halted': self._halted_coins()}
             with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
@@ -4244,7 +4293,7 @@ class App:
                 try:
                     if 'labels' in coin and 'long_current_roi' in coin['labels']:
                         try:
-                            self.root.after(0, lambda c=coin: (
+                            self._after_ui(lambda c=coin: (
                                 c['labels']['long_current_roi'].config(text="현재: -", fg='#ffffff'),
                                 c['labels']['long_max_roi'].config(text="최고: -"),
                                 c['labels']['long_min_roi'].config(text="최저: -")
@@ -4343,7 +4392,7 @@ class App:
                 try:
                     if 'labels' in coin and 'short_current_roi' in coin['labels']:
                         try:
-                            self.root.after(0, lambda c=coin: (
+                            self._after_ui(lambda c=coin: (
                                 c['labels']['short_current_roi'].config(text="현재: -", fg='#ffffff'),
                                 c['labels']['short_max_roi'].config(text="최고: -"),
                                 c['labels']['short_min_roi'].config(text="최저: -")
@@ -4422,7 +4471,7 @@ class App:
                         print(f"  🔍 {coin['symbol']} 포지션: {position['side']} entry=${position['entry_price']:.4f} pnl=${position.get('pnl', 0):.4f}")
                         coin['_cached_position'] = position  # 캐시에 저장
                         # 화면은 메인 스레드에서만 건드린다 (다른 스레드에서 직접 바꾸면 강제 종료될 수 있음)
-                        self.root.after(0, lambda c=coin: self._update_roi_display(c))
+                        self._after_ui(lambda c=coin: self._update_roi_display(c))
                     else:
                         # 🔥 포지션 없으면 모든 ROI 데이터 초기화 + "-" 표시!
                         coin['roi']['long_entry'] = None
@@ -4436,7 +4485,7 @@ class App:
                     
                         if 'labels' in coin and 'long_current_roi' in coin['labels']:
                             try:
-                                self.root.after(0, lambda c=coin: (
+                                self._after_ui(lambda c=coin: (
                                     c['labels']['long_current_roi'].config(text="현재: -", fg='#ffffff'),
                                     c['labels']['long_max_roi'].config(text="최고: -"),
                                     c['labels']['long_min_roi'].config(text="최저: -")
@@ -4445,7 +4494,7 @@ class App:
                     
                         if 'labels' in coin and 'short_current_roi' in coin['labels']:
                             try:
-                                self.root.after(0, lambda c=coin: (
+                                self._after_ui(lambda c=coin: (
                                     c['labels']['short_current_roi'].config(text="현재: -", fg='#ffffff'),
                                     c['labels']['short_max_roi'].config(text="최고: -"),
                                     c['labels']['short_min_roi'].config(text="최저: -")
@@ -4494,6 +4543,10 @@ class App:
         try:
             count = 0
             reconnected_positions = []
+            halted = self._saved_halted()
+            for c in self.coins:      # 이번 실행 중에 멈춘 코인도 포함
+                if c.get('halted_reason') and not c.get('long_active') and not c.get('short_active'):
+                    halted.setdefault(c['symbol'], c['halted_reason'])
         
             for i, coin in enumerate(self.coins, 1):
                 print(f"[전체 재연결] {i}/{len(self.coins)}: {coin['symbol']}")
@@ -4506,6 +4559,16 @@ class App:
                         break
                     if retry < 2:
                         time.sleep(1)
+
+                # 🛑 수동청산·강제청산으로 멈췄던 코인은 재연결해도 멈춘 채로 (시작 버튼을 눌러야 다시 진입)
+                if coin['symbol'] in halted and not position:
+                    coin['halted_reason'] = halted[coin['symbol']]
+                    coin['long_active'] = False
+                    coin['short_active'] = False
+                    print(f"  🛑 {coin['symbol']} 정지 상태 유지 ({halted[coin['symbol']]}) — 다시 매매하려면 시작 버튼")
+                    for t in ('LONG', 'SHORT'):
+                        self.add_log(coin, t, f"🛑 정지 상태 유지 ({halted[coin['symbol']]}) — 다시 매매하려면 시작 버튼을 누르세요")
+                    continue
             
                 # 🔥🔥🔥 포지션이 있으면 실시간 ROI 계산해서 이어받기
                 if position:
@@ -4774,7 +4837,7 @@ class App:
                             if f'{side}_current_roi' in coin['labels']:
                                 try:
                                     s = side
-                                    self.root.after(0, lambda c=coin, s=s: (
+                                    self._after_ui(lambda c=coin, s=s: (
                                         c['labels'][f'{s}_current_roi'].config(text="현재: -", fg='#ffffff'),
                                         c['labels'][f'{s}_max_roi'].config(text="최고: -"),
                                         c['labels'][f'{s}_min_roi'].config(text="최저: -")
@@ -6541,6 +6604,9 @@ class App:
             def _start_thread():
                 
                 coin[f'{key}_active'] = True
+                if coin.pop('halted_reason', None):     # 정지됐던 코인을 사용자가 다시 시작
+                    coin.pop('halted_at', None)
+                    self._refresh_running_state()
                 
                 # 🔄 완전 초기화 (이전 데이터 제거!)
                 coin['last_close_time'] = None
@@ -7577,6 +7643,19 @@ class App:
             print(f"[⚠️ GUI 종료] {coin.get('symbol', 'Unknown')}: 업데이트 중단")
             pass
     
+    def _after_ui(self, fn):
+        """화면 칸 갱신을 화면 스레드에서 실행. 그 사이 다른 코인 탭을 눌러 칸이 없어졌으면 조용히 넘어간다
+        (예전엔 '전체 시작' 중 탭을 바꾸면 '화면 동작 중 오류'가 기록됐다)"""
+        def run():
+            try:
+                fn()
+            except tk.TclError:
+                pass
+        try:
+            self.root.after(0, run)
+        except Exception:
+            pass
+
     def _update_roi_display(self, coin):
         """🔥 바이낸스 실시간 ROI 업데이트 (봇 루프 캐시 사용 — API 호출 없음!)"""
         position = coin.get('_cached_position')
