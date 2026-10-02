@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""실제 바이낸스 차트로 '익절 후 바로 재진입' vs '다음 봉 재진입' 비교
+"""실제 바이낸스 차트로 ① '익절 후 바로 재진입' vs '다음 봉 재진입'  ② TP(익절 %) 조합 비교
 
-  python real_chart_check.py              ← 프로그램 1·2 코인 20개, 최근 2년
+  python real_chart_check.py              ← 프로그램 1·2 코인 20개, 최근 2년, ①② 둘 다
+  python real_chart_check.py --what tp    ← TP 비교만 (--what reentry 는 재진입 비교만)
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -38,6 +39,16 @@ CONFIGS = [
     ('지금: 5배·UT마감·다음봉', 5, 'ut_confirmed', 'next_bar'),
     ('3배·UT마감·다음봉', 3, 'ut_confirmed', 'next_bar'),
 ]
+
+# TP 비교 (지금 방식: 5배 · UT 봉마감 + EMA 실시간 · 다음 봉 재진입): (횡보 TP, 추세 TP, 이름)
+TP_CONFIGS = [
+    (1.2, 1.5, '1.2 / 1.5 (지금)'),
+    (1.2, 1.2, '1.2 / 1.2'),
+    (1.0, 1.2, '1.0 / 1.2'),
+    (1.5, 1.5, '1.5 / 1.5'),
+    (1.2, 2.0, '1.2 / 2.0'),
+]
+SLIP_FEE = 0.06      # 슬리피지까지 감안한 1회 비용 % (기본 수수료 0.04%)
 
 _lines = []
 
@@ -124,13 +135,80 @@ def load_15m(coin, days, offline=False):
 
 
 # ==================== 계산 ====================
-def params(lev, mode, reentry, amount):
+def params(lev, mode, reentry, amount, tp_s=1.2, tp_t=1.5, fee=0.04):
     p = dict(bt.DEFAULTS)
-    p.update(amount=float(amount), leverage=lev, fee_pct=0.04, ut_sens=10.0, ut_atr=5,
-             ema_fast=34, ema_slow=55, adx_period=10, adx_th=21, tp_trend=1.5, tp_sideways=1.2,
+    p.update(amount=float(amount), leverage=lev, fee_pct=fee, ut_sens=10.0, ut_atr=5,
+             ema_fast=34, ema_slow=55, adx_period=10, adx_th=21, tp_trend=tp_t, tp_sideways=tp_s,
              funding_on=True, funding_pct=0.01, funding_hours=8,
              signal_mode=mode, reentry=reentry)
     return p
+
+
+def combine(by_coin):
+    """코인별 거래 → 계좌 전체 요약 (순손익·최대낙폭·월별·반기별)"""
+    ts = [t.assign(코인=c) for c, t in by_coin.items() if len(t)]
+    if not ts:
+        return None
+    all_t = pd.concat(ts, ignore_index=True).sort_values('시각')
+    eq = np.r_[0.0, all_t['순손익'].cumsum().values]
+    monthly = all_t.groupby(all_t['시각'].dt.to_period('M'))['순손익'].sum()
+    half = all_t.groupby(all_t['시각'].dt.year.astype(str) + '-' +
+                         np.where(all_t['시각'].dt.month <= 6, '상', '하'))['순손익'].sum()
+    return dict(all=all_t, net=all_t['순손익'].sum(), mdd=(eq - np.maximum.accumulate(eq)).min(),
+                monthly=monthly, half=half)
+
+
+def tp_compare(data):
+    """② TP 조합 비교 — 지금 방식 그대로, 익절 % 만 바꿔서"""
+    out('━' * 92)
+    out('② TP(익절 %) 비교 — 5배 · UT 봉마감 + EMA 실시간 · 다음 봉 재진입 · 횡보(ADX<21)/추세(ADX≥21)')
+    res = {n: {} for *_, n in TP_CONFIGS}
+    slip = {n: {} for *_, n in TP_CONFIGS}
+    t0 = time.time()
+    for i, (c, df) in enumerate(data.items(), 1):
+        print(f"  TP 계산 {i}/{len(data)}: {c}", flush=True)
+        for ts, tt, n in TP_CONFIGS:
+            amt = AMOUNT.get(c, 50)
+            res[n][c] = bt.run_backtest_live(df, params(5, 'ut_confirmed', 'next_bar', amt, ts, tt), bar='1h')[0]
+            slip[n][c] = bt.run_backtest_live(df, params(5, 'ut_confirmed', 'next_bar', amt, ts, tt, SLIP_FEE),
+                                              bar='1h')[0]
+    print(f"  (계산 {time.time() - t0:.0f}초)")
+    names = [n for *_, n in TP_CONFIGS]
+    cur = names[0]
+    S = {n: combine(res[n]) for n in names}
+    SS = {n: combine(slip[n]) for n in names}
+    if any(S[n] is None for n in names):
+        out('  거래가 없어 비교할 수 없습니다'); return
+    out(f"{'TP 횡보/추세':18s} {'순손익':>9s} {'슬리피지감안':>11s} {'최대낙폭':>9s} {'최악의달':>9s} {'손실달':>6s} "
+        f"{'거래':>7s} {'익절비율':>7s} {'청산':>5s} {'지금보다 나은 코인':>14s}")
+    for n in names:
+        a = S[n]['all']
+        better = sum(1 for c in data if res[n][c]['순손익'].sum() > res[cur][c]['순손익'].sum()) if n != cur else None
+        out(f"{n:18s} {S[n]['net']:+9,.0f} {SS[n]['net']:+11,.0f} {S[n]['mdd']:+9,.0f} {S[n]['monthly'].min():+9,.0f} "
+            f"{(S[n]['monthly'] < 0).sum():>3d}/{len(S[n]['monthly']):<2d} {len(a):7,d} "
+            f"{(a['유형'] == 'TP익절').mean() * 100:6.0f}% {(a['유형'] == '강제청산').sum():5d} "
+            f"{'-' if better is None else f'{better}/{len(data)}':>14s}")
+    out('')
+    out('  반기별 순손익 (기간마다 1등이 바뀌는지 — 늘 이기는 값이 진짜 좋은 값)')
+    halves = S[cur]['half'].index
+    out(f"  {'기간':8s} " + ' '.join(f"{n.split(' (')[0]:>10s}" for n in names))
+    wins = {n: 0 for n in names}
+    for h in halves:
+        vals = [S[n]['half'].get(h, 0.0) for n in names]
+        wins[names[int(np.argmax(vals))]] += 1
+        out(f"  {h:8s} " + ' '.join(f"{v:+10,.0f}" for v in vals))
+    out(f"  {'1등 횟수':8s} " + ' '.join(f"{wins[n]:>10d}" for n in names))
+    # 자동 판단: 지금보다 '두 비용 조건 모두 5% 이상' + '반기 대부분' 이겨야 바꿀 만하다고 본다
+    out('')
+    best = max(names[1:], key=lambda n: S[n]['net'])
+    gain = (S[best]['net'] - S[cur]['net']) / max(1.0, abs(S[cur]['net'])) * 100
+    gain_s = (SS[best]['net'] - SS[cur]['net']) / max(1.0, abs(SS[cur]['net'])) * 100
+    beat = sum(1 for h in halves if S[best]['half'].get(h, 0) > S[cur]['half'].get(h, 0))
+    if gain > 5 and gain_s > 5 and beat >= max(1, round(len(halves) * 0.75)):
+        out(f"  👉 '{best}' 가 지금보다 {gain:+.0f}% (슬리피지 감안 {gain_s:+.0f}%), 반기 {beat}/{len(halves)}번 앞섬 → 바꿀 만함")
+    else:
+        out(f"  👉 가장 많이 번 다른 값 '{best}': 지금보다 {gain:+.0f}% (슬리피지 감안 {gain_s:+.0f}%), "
+            f"반기 {beat}/{len(halves)}번 앞섬 → 차이가 꾸준하지 않아 지금 값 유지 추천")
 
 
 def main():
@@ -138,11 +216,13 @@ def main():
     ap.add_argument('--days', type=int, default=730, help='기간 (일, 기본 730 = 2년)')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp'], default='all',
+                    help='all = 재진입+TP 둘 다 / reentry = 재진입 비교만 / tp = TP 비교만')
     a = ap.parse_args()
     coins = [c.upper().replace('USDT', '').replace('/', '') for c in a.coins]
 
     out(f"📊 실제 바이낸스 차트 비교 — 최근 {a.days}일, 코인 {len(coins)}개, 1시간봉 (15분 단위로 따라감)")
-    out(f"   진입금 BTC 60 / 나머지 50 USDT · TP 1.2%(횡보)/1.5%(추세) · 손절 없음 · 펀딩 0.01%/8h 가정")
+    out(f"   진입금 BTC 60 / 나머지 50 USDT · 손절 없음 · 펀딩 0.01%/8h 가정")
     out('')
 
     data = {}
@@ -163,6 +243,27 @@ def main():
         out('❌ 계산할 차트가 없습니다')
         return 1
 
+    if a.what in ('all', 'reentry'):
+        reentry_compare(data)
+    if a.what in ('all', 'tp'):
+        tp_compare(data)
+
+    out('')
+    out('※ 과거 결과이며 앞으로도 같다는 보장은 없습니다. 펀딩비는 0.01% 고정 가정입니다.')
+    out(f'※ 슬리피지감안 = 주문 1회 비용을 {SLIP_FEE}% 로 계산 (실제 체결이 조금씩 밀리는 것까지 반영)')
+    try:
+        with open(OUT_TXT, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(_lines) + '\n')
+        print(f"\n💾 결과 저장: {OUT_TXT}")
+    except Exception as e:
+        print(f"⚠️ 결과 파일 저장 실패: {e}")
+    return 0
+
+
+def reentry_compare(data):
+    """① 재진입 방식 비교"""
+    out('━' * 92)
+    out('① 익절 후 재진입 방식 비교 (TP 1.2% 횡보 / 1.5% 추세)')
     res = {name: {} for name, *_ in CONFIGS}       # name → coin → trades
     t0 = time.time()
     for i, (c, df) in enumerate(data.items(), 1):
@@ -223,16 +324,6 @@ def main():
         out('  월별 순손익 (바로 → 다음 봉)')
         for m in both:
             out(f"    {m}  {ma[m]:+8,.0f} → {mb[m]:+8,.0f}   {'▲' if mb[m] > ma[m] else '▼'}")
-
-    out('')
-    out('※ 과거 결과이며 앞으로도 같다는 보장은 없습니다. 펀딩비는 0.01% 고정 가정입니다.')
-    try:
-        with open(OUT_TXT, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(_lines) + '\n')
-        print(f"\n💾 결과 저장: {OUT_TXT}")
-    except Exception as e:
-        print(f"⚠️ 결과 파일 저장 실패: {e}")
-    return 0
 
 
 if __name__ == '__main__':
