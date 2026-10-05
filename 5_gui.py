@@ -1500,6 +1500,16 @@ class BinanceAPI:
         cache[sc] = (px, time.time())
         return px
 
+    def get_book(self, symbol):
+        """주문 서버의 최우선 호가 (매수1호가, 매도1호가). 실패 시 None (가중치 2)"""
+        r = self._request('GET', '/fapi/v1/ticker/bookTicker',
+                          params={'symbol': symbol.replace('/', '')}, signed=False, quiet=True)
+        try:
+            bid, ask = float(r['bidPrice']), float(r['askPrice'])
+        except (TypeError, KeyError, ValueError):
+            return None
+        return (bid, ask) if bid > 0 and ask > 0 else None
+
     def invalidate_position_cache(self):
         """포지션 캐시 무효화 — 진입/청산 직후 호출"""
         with self._position_cache_lock:
@@ -2325,6 +2335,7 @@ class TradingBot:
             self.log(f"✅ {pos_type} 익절! 거래소 TP 주문 체결 (#{count})", pos_type)
             self.log(f"   💰 실현 수익: ${pnl_usd:.2f}", pos_type)
             self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
+            self._warn_bad_tp_fill(pos_type, pnl_usd)
             print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
         else:
             icon = '🛑' if reason == 'manual' else '💀'
@@ -2493,6 +2504,37 @@ class TradingBot:
             self.log(msg, side.upper())
             print(f"[⏸️ 익절 보류] {self.config['symbol']} {side.upper()} {msg}")
         return False
+
+    def _warn_bad_tp_fill(self, pos_type, realized):
+        """익절로 닫혔는데 실현손익이 마이너스면 숨기지 않고 알린다 (체결가가 TP 가격보다 크게 불리)"""
+        if realized is None or realized >= 0:
+            return
+        self.log(f"   ⚠️ 익절 주문으로 닫혔지만 실제 체결가가 나빠서 손해입니다 (실현 ${realized:.2f})", pos_type)
+        self.log(f"      호가가 얇거나 실제 시장과 떨어져 있어 시장가가 미끄러진 것 — 테스트넷 일부 코인에서 생깁니다", pos_type)
+        print(f"[⚠️ 손해 익절] {self.config['symbol']} {pos_type} 실현 {realized:+.2f} — 체결가 미끄러짐")
+
+    # 호가가 이 이상 벌어져 있으면 진입 안 함 (시장가가 크게 미끄러져 익절해도 손해)
+    MAX_SPREAD_PCT = 0.3      # 매수1·매도1 호가 차이
+    MAX_CHART_GAP_PCT = 1.0   # 내가 체결될 호가 ↔ 차트(메인넷) 가격 차이
+
+    def _book_too_wide(self, pos_type, chart_price):
+        """진입 직전 호가 점검. 비정상이면 이유 문자열, 괜찮거나 조회 실패면 None.
+
+        테스트넷은 코인에 따라(예: NEAR) 호가가 실제 시장과 몇 % 떨어져 있고 얇아서,
+        시장가로 사면 비싸게, 팔면 싸게 체결돼 '익절'인데 손해가 났다. 메인넷의 큰 코인은 해당 없음.
+        """
+        book = self.api.get_book(self.config['symbol'])
+        if not book or not chart_price:
+            return None
+        bid, ask = book
+        spread = (ask - bid) / ((ask + bid) / 2) * 100
+        px = ask if pos_type == 'LONG' else bid
+        gap = (px - chart_price) / chart_price * 100
+        if spread > self.MAX_SPREAD_PCT:
+            return f"호가 차이 {spread:.2f}% (매수 {fmt_px(bid)} / 매도 {fmt_px(ask)})"
+        if abs(gap) > self.MAX_CHART_GAP_PCT:
+            return f"체결될 가격 {fmt_px(px)} 이 차트 가격 {fmt_px(chart_price)} 보다 {gap:+.2f}%"
+        return None
 
     def _pos_leverage(self):
         """방금까지 들고 있던 포지션의 실제 배율 (모르면 설정값)"""
@@ -3146,7 +3188,20 @@ class TradingBot:
                                 self.log(f"   💡 진입금을 늘리거나 레버리지를 높이세요", pos_type)
                                 self.config[entering_key] = False
                                 continue
-                            
+
+                            # 🛡️ 호가가 비정상이면 진입 보류 (시장가가 크게 미끄러짐)
+                            why = self._book_too_wide(pos_type, signals['price'])
+                            if why:
+                                last = self.config.get('_wide_book_logged', 0)
+                                if time.time() - last > 300:
+                                    self.config['_wide_book_logged'] = time.time()
+                                    self.log(f"⚠️ {pos_type} 진입 보류 — {why}", pos_type)
+                                    self.log(f"   시장가로 들어가면 크게 불리하게 체결돼 익절해도 손해입니다. "
+                                             f"호가가 정상이 되면 자동으로 진입 (같은 안내는 5분마다)", pos_type)
+                                    print(f"[⚠️ 진입 보류] {self.config['symbol']} {pos_type} — {why}")
+                                self.config[entering_key] = False
+                                continue
+
                             # One-Way Mode: positionSide 없이 주문
                             order = self.api.create_order(self.config['symbol'], side, qty)
                             if order:
@@ -3424,6 +3479,7 @@ class TradingBot:
                             self.log(f"✅ LONG 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'LONG')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
                             self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
+                            self._warn_bad_tp_fill('LONG', pnl_usd)
                             
                             print(f"[✅ 익절] {self.config['symbol']} LONG ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%)")
                             
@@ -3586,6 +3642,14 @@ class TradingBot:
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
                                     _, qty = self.api.round_qty(self.config['symbol'], raw_qty)
                                     
+                                    # 🛡️ 호가가 비정상이면 반대 진입은 보류 (호가가 정상이 되면 일반 진입으로 들어감)
+                                    why = self._book_too_wide('SHORT', signals['price'])
+                                    if why:
+                                        self.log(f"⚠️ 스위칭 SHORT 진입 보류 — {why} (호가가 정상이 되면 자동 진입)", 'SHORT')
+                                        print(f"[⚠️ 진입 보류] {self.config['symbol']} 스위칭 SHORT — {why}")
+                                        self.config["is_entering_short"] = False
+                                        continue
+
                                     # SHORT 주문
                                     order = self.api.create_order(self.config['symbol'], 'SELL', qty)
                                     
@@ -3789,6 +3853,7 @@ class TradingBot:
                             self.log(f"✅ SHORT 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'SHORT')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
                             self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
+                            self._warn_bad_tp_fill('SHORT', pnl_usd)
                             
                             print(f"[✅ 익절] {self.config['symbol']} SHORT ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%)")
                             
@@ -3953,6 +4018,14 @@ class TradingBot:
                                     raw_qty = self.config['amount'] * self.config['leverage'] / signals['price']
                                     _, qty = self.api.round_qty(self.config['symbol'], raw_qty)
                                     
+                                    # 🛡️ 호가가 비정상이면 반대 진입은 보류 (호가가 정상이 되면 일반 진입으로 들어감)
+                                    why = self._book_too_wide('LONG', signals['price'])
+                                    if why:
+                                        self.log(f"⚠️ 스위칭 LONG 진입 보류 — {why} (호가가 정상이 되면 자동 진입)", 'LONG')
+                                        print(f"[⚠️ 진입 보류] {self.config['symbol']} 스위칭 LONG — {why}")
+                                        self.config["is_entering_long"] = False
+                                        continue
+
                                     # LONG 주문
                                     order = self.api.create_order(self.config['symbol'], 'BUY', qty)
                                     
