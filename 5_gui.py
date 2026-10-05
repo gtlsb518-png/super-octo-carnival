@@ -1481,6 +1481,25 @@ class BinanceAPI:
         except Exception:
             pass
 
+    def get_trade_price(self, symbol):
+        """주문 서버의 '최종 체결가' (시장가로 닫으면 실제로 이 근처에서 체결). 1초 캐시, 실패 시 None
+
+        포지션 ROI 는 '표시가격(mark)' 기준인데, 테스트넷은 표시가격이 실제 시세를 따라가고
+        체결은 테스트넷 호가에서 나서 둘이 크게 벌어지는 코인이 있다 (예: NEAR).
+        """
+        sc = symbol.replace('/', '')
+        cache = self.__dict__.setdefault('_trade_px', {})
+        hit = cache.get(sc)
+        if hit and time.time() - hit[1] < 1.0:
+            return hit[0]
+        r = self._request('GET', '/fapi/v1/ticker/price', params={'symbol': sc}, signed=False, quiet=True)
+        try:
+            px = float(r['price'])
+        except (TypeError, KeyError, ValueError):
+            return None
+        cache[sc] = (px, time.time())
+        return px
+
     def invalidate_position_cache(self):
         """포지션 캐시 무효화 — 진입/청산 직후 호출"""
         with self._position_cache_lock:
@@ -2453,6 +2472,28 @@ class TradingBot:
     def stop(self):
         self.running = False
         
+    def _tp_ok_at_trade_price(self, side, entry, leverage, target_roi):
+        """표시가격(mark) 기준으로 목표 ROI 에 닿았을 때, 실제 체결가로도 닿았는지 한 번 더 확인.
+
+        테스트넷은 표시가격과 체결가가 크게 벌어지는 코인이 있어서(예: NEAR), 표시가격만 보고
+        시장가로 닫으면 '익절'인데 실제로는 손해로 체결됐다. 체결가로 아직이면 기다린다
+        (거래소에 건 TP 주문은 체결가 기준이라 그쪽이 제때 닫아 준다). 체결가 조회 실패면 예전처럼 진행.
+        """
+        px = self.api.get_trade_price(self.config['symbol'])
+        if not px or not entry:
+            return True
+        roi = ((px - entry) if side == 'long' else (entry - px)) / entry * 100 * leverage
+        if roi >= target_roi:
+            return True
+        key = (side, round(float(entry), 8))
+        if getattr(self, '_tp_gap_warned', None) != key:
+            self._tp_gap_warned = key
+            msg = (f"⏸️ 표시가격으로는 목표 도달인데 실제 체결가로는 ROI {roi:+.2f}% (목표 {target_roi:.2f}%) "
+                   f"→ 지금 닫으면 손해라 기다립니다")
+            self.log(msg, side.upper())
+            print(f"[⏸️ 익절 보류] {self.config['symbol']} {side.upper()} {msg}")
+        return False
+
     def _pos_leverage(self):
         """방금까지 들고 있던 포지션의 실제 배율 (모르면 설정값)"""
         return self.config.get('_pos_lev') or self.config['leverage']
@@ -3324,7 +3365,8 @@ class TradingBot:
                         
                         # ROI >= 목표면 즉시 익절 (🔥 '스위칭만' 모드면 TP 익절 안 함)
                         tp_enabled = self.config.get('exit_mode', 'tp') != 'switch'
-                        if tp_enabled and pnl_pct >= target_roi and not self.config.get("is_closing"):
+                        if (tp_enabled and pnl_pct >= target_roi and not self.config.get("is_closing")
+                                and self._tp_ok_at_trade_price('long', entry, leverage, target_roi)):
                             print(f"[🎯 익절] {self.config['symbol']} LONG: ROI {pnl_pct:.2f}% >= 목표 {target_roi:.2f}% (TP {user_tp}%)")
                             
                             self.config["is_closing"] = True
@@ -3687,7 +3729,8 @@ class TradingBot:
                         
                         # ROI >= 목표면 즉시 익절 (🔥 '스위칭만' 모드면 TP 익절 안 함)
                         tp_enabled = self.config.get('exit_mode', 'tp') != 'switch'
-                        if tp_enabled and pnl_pct >= target_roi and not self.config.get("is_closing"):
+                        if (tp_enabled and pnl_pct >= target_roi and not self.config.get("is_closing")
+                                and self._tp_ok_at_trade_price('short', entry, leverage, target_roi)):
                             print(f"[🎯 익절] {self.config['symbol']} SHORT: ROI {pnl_pct:.2f}% >= 목표 {target_roi:.2f}% (TP {user_tp}%)")
                             
                             self.config["is_closing"] = True
