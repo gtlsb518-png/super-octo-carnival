@@ -2197,6 +2197,14 @@ class TradingBot:
         return False
 
     def _handle_external_close(self):
+        self._close_consumed = False
+        try:
+            self._handle_external_close_body()
+        finally:
+            if self._close_consumed:   # 이 스레드가 기록을 맡았으면 끝났으니 재진입 허용 (오류가 나도 해제)
+                self.config['_recording_close'] = 0
+
+    def _handle_external_close_body(self):
         """🔥 포지션이 봇 청산 없이 사라짐.
 
         세 가지 경우가 있어 원인을 판별한다.
@@ -2215,6 +2223,8 @@ class TradingBot:
             if side not in ('long', 'short') or not self.config.get(f'entry_tp_{side}'):
                 return
             self.config['_cached_position'] = None  # 소비 (중복 기록 방지)
+            self.config['_recording_close'] = time.time()
+            self._close_consumed = True
 
         pos_type = side.upper()
         symbol = self.config['symbol']
@@ -2716,7 +2726,9 @@ class TradingBot:
                     self._kline_check_count = 0
                 self._kline_check_count += 1
                 
-                kline_interval = 6 if self.config.get('has_position') else 3
+                # 청산 직후 1분은 루프가 1초라 → 차트는 5번에 1번(5초)만 (캐시 5초와 같게, API 낭비 없게)
+                _jc = time.time() - (self.config.get('last_close_time') or 0) < 60
+                kline_interval = 6 if self.config.get('has_position') else (5 if _jc else 3)
                 
                 if self._kline_check_count >= kline_interval:
                     self._kline_check_count = 0
@@ -2782,14 +2794,33 @@ class TradingBot:
                         # 이래야 TP/SL 체크가 계속 됨 (익절 가능!)
                         current_position = self.config.get('_cached_position')
                     elif current_position is False or not current_position:
-                        if (self.config.get('_cached_position') and not self.config.get('is_closing')
-                                and self.config.get('tp_block_bar') != self._bar_no()):
-                            # 봇이 닫은 게 아닌데 포지션이 사라짐 → 원인 확인(몇 초) 전에 먼저 이번 봉 진입을 막는다
-                            #   (롱·숏 봇 스레드가 따로 돌아서, 그 사이 다른 쪽이 바로 재진입하는 것 방지)
-                            self._block_reentry_this_bar(announce=False)
-                        self.config['has_position'] = False  # 실제로 포지션 없음
-                        # 🔥 봇이 청산한 게 아니면 = 거래소 TP 주문 체결 → 기록!
-                        self._handle_external_close()
+                        # 🔁 '포지션 없음'이 나와도 바로 믿지 않고 최신 값으로 한 번 더 확인
+                        #    (다른 봇 스레드의 조회가 '진입 체결 직전' 상태를 읽어 와서, 막 들어간 포지션을
+                        #     없다고 판단 → 그 뒤 익절을 못 알아채 기록이 빠지던 문제)
+                        _re = None
+                        try:
+                            self.api.invalidate_position_cache()
+                            _re = self.api.get_position(self.config['symbol'])
+                        except Exception:
+                            _re = None
+                        if _re or _re is None:
+                            # 실제로는 포지션이 있음(_re) 또는 확인 실패(None) → 청산으로 보지 않고 다음 루프에서 다시
+                            current_position = _re if _re else self.config.get('_cached_position')
+                        else:
+                            if (self.config.get('_cached_position') and not self.config.get('is_closing')
+                                    and self.config.get('tp_block_bar') != self._bar_no()):
+                                # 봇이 닫은 게 아닌데 포지션이 사라짐 → 원인 확인(몇 초) 전에 먼저 이번 봉 진입을 막는다
+                                #   (롱·숏 봇 스레드가 따로 돌아서, 그 사이 다른 쪽이 바로 재진입하는 것 방지)
+                                self._block_reentry_this_bar(announce=False)
+                            _prev = self.config.get('_cached_position')
+                            if (isinstance(_prev, dict) and not self.config.get('is_closing')
+                                    and self.config.get(f"entry_tp_{_prev.get('side')}")):
+                                # 거래소에서 닫힘 → 기록 정리(손익·엑셀)가 끝날 때까지 새 진입 대기
+                                #   (롱·숏 봇 스레드가 따로 돌아서, 정리 도중 다른 쪽이 재진입하면 정리가 새 포지션 값을 지웠음)
+                                self.config['_recording_close'] = time.time()
+                            self.config['has_position'] = False  # 실제로 포지션 없음
+                            # 🔥 봇이 청산한 게 아니면 = 거래소 TP 주문 체결 → 기록!
+                            self._handle_external_close()
                 else:
                     # 포지션 없으면 60초마다 (5초 × 12회)
                     if not hasattr(self, '_position_check_count'):
@@ -2810,7 +2841,9 @@ class TradingBot:
                     if current_position.get('leverage'):
                         # 실제 포지션 배율 (설정을 3배→5배로 바꾼 직후 남아 있던 3배 포지션도 정확히 계산)
                         self.config['_pos_lev'] = int(current_position['leverage'])
-                elif current_position is False:
+                elif current_position is False and not self.config.get('has_position'):
+                    # 포지션이 사라졌어도 '청산 처리(기록)'가 끝나기 전에는 지우지 않는다
+                    #   (진입 직후 10초 '진입 중' 동안 익절되면, 그 경로에서 먼저 지워져 기록이 빠졌음)
                     self.config['_cached_position'] = None
 
                 # 🛡️ 거래소 익절 주문 감시: 포지션이 있는데 TP 주문이 없으면 다시 건다 (3분마다)
@@ -2848,6 +2881,10 @@ class TradingBot:
                             # 🔥 대기 중에는 신호 업데이트 안 함! (False 유지)
                             # 대기 완료 후 False→True 감지
                             continue
+
+                    # 📝 거래소에서 닫힌 포지션의 기록 정리 중이면 끝날 때까지 대기 (보통 1~2초, 최대 30초)
+                    if time.time() - (self.config.get('_recording_close') or 0) < 30:
+                        continue
 
                     # ⏳ 익절한 봉이면 신호 확인 자체를 다음 봉까지 쉰다 (콘솔에 5초마다 같은 줄이 쌓이지 않게)
                     if self._reentry_blocked():
@@ -3032,6 +3069,13 @@ class TradingBot:
                             continue
                         
                         try:
+                            # 🧹 포지션이 없는 게 확인됐으니 남은 대기 주문(이전 TP 등) 정리
+                            #    — 취소가 실패해 남은 옛 '전량 청산' TP 가 새 포지션을 바로 닫는 일 방지
+                            if double_check_position is False:
+                                try:
+                                    self.api.cancel_all_orders(self.config['symbol'])
+                                except Exception:
+                                    pass
                             # 🔥 격리 모드 설정 (고정)
                             self.api.set_margin_type(self.config['symbol'], 'ISOLATED')
                             
