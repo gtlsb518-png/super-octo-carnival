@@ -1642,6 +1642,9 @@ class BinanceAPI:
 
     def get_funding_between(self, symbol, start_ms, end_ms):
         """이 포지션을 들고 있는 동안 낸(−)/받은(+) 펀딩비 합계. 실패 시 None"""
+        # 펀딩은 정각(1·4·8시간마다)에만 정산 → 들고 있는 동안 정각을 안 지났으면 0 (조회 1번에 가중치 30이라 아낀다)
+        if int(start_ms) // 3_600_000 == int(end_ms) // 3_600_000:
+            return 0.0
         rows = self._request('GET', '/fapi/v1/income', params={
             'symbol': symbol.replace('/', ''), 'incomeType': 'FUNDING_FEE',
             'startTime': int(start_ms), 'endTime': int(end_ms) + 1000, 'limit': 1000},
@@ -1994,7 +1997,7 @@ class TradingBot:
 
         바이낸스 계좌 기록(income)을 읽으므로 추정이 아니라 실제 금액.
         합계는 '프로그램을 켠 뒤' 이 코인에서 정산된 펀딩비다.
-        10분에 한 번만 조회 (API 부하 최소화).
+        펀딩은 정각에만 정산되므로 정각이 지나고 1분 반~5분 반 뒤에 한 번만 조회 (조회 1번에 가중치 30).
         """
         # 로그를 어느 쪽(LONG/SHORT)에 찍을지 — 실제 보유 방향을 따른다
         #   (봇이 저장하는 포지션 정보는 {'side': 'long'/'short', ...} 형식)
@@ -2009,16 +2012,22 @@ class TradingBot:
                 except Exception:
                     pos_type = self.bot_type.upper()
         now = time.time()
-        last = self.config.get('_funding_log_time', 0)
-        if not force and (now - last) < 600:
-            return
-        self.config['_funding_log_time'] = now
-
         since = self.config.get('_funding_since')
         if since is None:
             # 프로그램을 켠(처음 조회한) 시점부터 집계 — 그 전 포지션의 펀딩비는 섞지 않는다
             since = int(now * 1000) - 60 * 1000
             self.config['_funding_since'] = since
+
+        # 기록이 올라올 시간(1분 반)을 두고, 아직 안 본 정각이 지났을 때만 조회
+        #   코인마다 0~4분씩 늦춰서 프로그램 여러 개의 코인이 정각에 한꺼번에 조회하지 않게
+        delay = 90 + sum(map(ord, self.config['symbol'])) % 240
+        hour = int((now - delay) // 3600)
+        seen = self.config.get('_funding_hour')
+        if not force and (seen is None or hour <= seen):
+            if seen is None:
+                self.config['_funding_hour'] = hour      # 켠 직후엔 새로 정산된 게 없으니 다음 정각부터
+            return
+        self.config['_funding_hour'] = hour
 
         total, cnt = self.api.get_funding_paid(self.config['symbol'], since)
         if total is None:
@@ -2764,7 +2773,7 @@ class TradingBot:
                                                    if SWITCH_MODE == 'close' else self._cached_signals)
                     self._cached_dynamic_tp = self.get_dynamic_tp(df_closed)
 
-                    # 💸 포지션 보유 중이면 10분마다 누적 펀딩비 보고
+                    # 💸 포지션 보유 중이면 정각(펀딩 정산)이 지난 뒤 누적 펀딩비 보고
                     #    (LONG 봇만 조회 — 코인당 1번이면 충분, API 부하 절감)
                     if self.config.get('has_position') and self.bot_type == 'long':
                         self.report_funding()
