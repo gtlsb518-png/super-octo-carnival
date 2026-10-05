@@ -1758,6 +1758,15 @@ if REENTRY_MODE not in REENTRY_MODES:
     print(f"⚠️ REENTRY='{REENTRY_MODE}' 은 없는 값 → 'next_bar'")
     REENTRY_MODE = 'next_bar'
 
+try:
+    SWITCH_MODE = str(getattr(_cfgmod, 'SWITCH_MODE', 'close')).strip().lower()
+except Exception:
+    SWITCH_MODE = 'close'
+if SWITCH_MODE not in ('close', 'live'):
+    print(f"⚠️ SWITCH_MODE='{SWITCH_MODE}' 은 없는 값 → 'close'")
+    SWITCH_MODE = 'close'
+SWITCH_TEXT = {'close': '봉 확정 후', 'live': '신호 즉시'}
+
 SIGNAL_MODE_TEXT = {'ut_close': 'UT 봉마감 + EMA 실시간', 'live': '즉시 (둘 다 실시간)',
                     'confirmed': '확정 (둘 다 봉마감)'}
 REENTRY_TEXT = {'next_bar': '익절 후 다음 봉', 'immediate': '익절 후 바로'}
@@ -2737,6 +2746,9 @@ class TradingBot:
                     # 캐시에 저장
                     self._cached_df = df_closed
                     self._cached_signals = calc_signals(df, self.config)
+                    # 🔄 스위칭은 봉이 확정된 신호로만 (SWITCH_MODE='close') — 봉 중간 EMA 크로스로 뒤집지 않게
+                    self._cached_switch_signals = (calc_signals(df, dict(self.config, signal_mode='confirmed'))
+                                                   if SWITCH_MODE == 'close' else self._cached_signals)
                     self._cached_dynamic_tp = self.get_dynamic_tp(df_closed)
 
                     # 💸 포지션 보유 중이면 10분마다 누적 펀딩비 보고
@@ -3342,22 +3354,21 @@ class TradingBot:
                             continue
                         
                         # 🔥 손절: AUTO(스위칭) - UT Bot 현재 상태 + EMA 크로스
-                        auto_sl = signals.get('ut_position_short', False) and signals['ema_short']
-                        
+                        sw = getattr(self, '_cached_switch_signals', None) or signals
+                        auto_sl = sw.get('ut_position_short', False) and sw['ema_short']
 
-                        # 🔍 디버깅: 신호 상태 출력 (신호 있을 때만)
-                        if signals.get('ut_position_short', False) or signals['ema_short']:
-                            if not self.config.get("is_closing"):
-                                print(f"[DEBUG] {self.config['symbol']} LONG 포지션 - 스위칭 신호 체크:")
-                                print(f"   UT Bot 상태: position_short={signals.get('ut_position_short', False)}")
-                                print(f"   EMA SHORT: {signals['ema_short']}")
-                                print(f"   → auto_sl (AND): {auto_sl}")
+                        # 🔍 디버깅: 반대 신호 상태가 바뀔 때만 출력 (예전엔 매초 같은 줄이 쌓였음)
+                        _st = (bool(sw.get('ut_position_short', False)), bool(sw['ema_short']))
+                        if any(_st) and _st != getattr(self, '_sw_dbg_state', None) and not self.config.get("is_closing"):
+                            self._sw_dbg_state = _st
+                            print(f"[스위칭 확인] {self.config['symbol']} LONG 보유 중 — 반대(SHORT) 신호 "
+                                  f"UT={_st[0]} EMA={_st[1]} ({SWITCH_TEXT[SWITCH_MODE]} 기준) → 둘 다 True 면 스위칭")
                         
                         if auto_sl and not self.config.get("is_closing"):
                             print(f"")
-                            print(f"[🔄 스위칭 실행!] {self.config['symbol']} LONG→SHORT")
-                            print(f"   ✅ UT Bot 상태: SHORT={signals.get('ut_position_short', False)}")
-                            print(f"   ✅ EMA SHORT: {signals['ema_short']}")
+                            print(f"[🔄 스위칭 실행!] {self.config['symbol']} LONG→SHORT ({SWITCH_TEXT[SWITCH_MODE]})")
+                            print(f"   ✅ UT Bot 상태: SHORT={sw.get('ut_position_short', False)}")
+                            print(f"   ✅ EMA SHORT: {sw['ema_short']}")
                             print(f"   ✅ AND 조건: True")
                             print(f"")
                             
@@ -3707,22 +3718,21 @@ class TradingBot:
                             continue
                         
                         # 🔥 손절: AUTO(스위칭) - UT Bot 현재 상태 + EMA 크로스
-                        auto_sl = signals.get('ut_position_long', False) and signals['ema_long']
-                        
+                        sw = getattr(self, '_cached_switch_signals', None) or signals
+                        auto_sl = sw.get('ut_position_long', False) and sw['ema_long']
 
-                        # 🔍 디버깅: 신호 상태 출력 (신호 있을 때만)
-                        if signals.get('ut_position_long', False) or signals['ema_long']:
-                            if not self.config.get("is_closing"):
-                                print(f"[DEBUG] {self.config['symbol']} SHORT 포지션 - 스위칭 신호 체크:")
-                                print(f"   UT Bot 상태: position_long={signals.get('ut_position_long', False)}")
-                                print(f"   EMA LONG: {signals['ema_long']}")
-                                print(f"   → auto_sl (AND): {auto_sl}")
+                        # 🔍 디버깅: 반대 신호 상태가 바뀔 때만 출력 (예전엔 매초 같은 줄이 쌓였음)
+                        _st = (bool(sw.get('ut_position_long', False)), bool(sw['ema_long']))
+                        if any(_st) and _st != getattr(self, '_sw_dbg_state', None) and not self.config.get("is_closing"):
+                            self._sw_dbg_state = _st
+                            print(f"[스위칭 확인] {self.config['symbol']} SHORT 보유 중 — 반대(LONG) 신호 "
+                                  f"UT={_st[0]} EMA={_st[1]} ({SWITCH_TEXT[SWITCH_MODE]} 기준) → 둘 다 True 면 스위칭")
                         
                         if auto_sl and not self.config.get("is_closing"):
                             print(f"")
-                            print(f"[🔄 스위칭 실행!] {self.config['symbol']} SHORT→LONG")
-                            print(f"   ✅ UT Bot 상태: LONG={signals.get('ut_position_long', False)}")
-                            print(f"   ✅ EMA LONG: {signals['ema_long']}")
+                            print(f"[🔄 스위칭 실행!] {self.config['symbol']} SHORT→LONG ({SWITCH_TEXT[SWITCH_MODE]})")
+                            print(f"   ✅ UT Bot 상태: LONG={sw.get('ut_position_long', False)}")
+                            print(f"   ✅ EMA LONG: {sw['ema_long']}")
                             print(f"   ✅ AND 조건: True")
                             print(f"")
                             
@@ -4231,7 +4241,8 @@ class App:
         mult = 4 if LEVERAGE <= 3 else 5 if LEVERAGE <= 5 else 8
         print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * mult:,.0f} USDT "
               f"(이 프로그램만, {LEVERAGE}배 기준 증거금×{mult})")
-        print(f"  🎯 전략: {LEVERAGE}배 | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}")
+        print(f"  🎯 전략: {LEVERAGE}배 | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
+              f" | 스위칭 {SWITCH_TEXT[SWITCH_MODE]}")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
         print("=" * 60)
@@ -6431,6 +6442,8 @@ class App:
                 bg='#2d2d2d', fg={'live': '#ffaa00', 'confirmed': '#aaaaaa'}.get(_sm, '#00ff88'),
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
         tk.Label(settings_line, text="재진입:다음봉" if REENTRY_MODE == 'next_bar' else "재진입:바로",
+                bg='#2d2d2d', fg='#aaaaaa', font=('Arial', 9)).pack(side='left', padx=3)
+        tk.Label(settings_line, text="스위칭:봉마감" if SWITCH_MODE == 'close' else "스위칭:즉시",
                 bg='#2d2d2d', fg='#aaaaaa', font=('Arial', 9)).pack(side='left', padx=3)
         
         tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 5)}", bg='#2d2d2d', fg='#aaaaaa',

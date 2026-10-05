@@ -45,7 +45,8 @@ SIGNAL_MODE = "ut_close"    # "ut_close"  : UT 는 봉 마감 기준, EMA34/55 �
                             # "confirmed" : 둘 다 봉 마감 기준
 REENTRY = "next_bar"        # "next_bar"  : 익절한 봉에서는 안 들어가고 다음 봉에서 신호 확인 후 진입  ← 추천·기본
                             # "immediate" : 익절 후 신호가 그대로면 바로 재진입 (예전 방식)
-# ※ 스위칭(반대 신호)은 어느 설정이든 바로 합니다.
+SWITCH_MODE = "close"       # "close" : 반대 신호가 봉 마감으로 확정됐을 때만 스위칭 (UT·EMA 둘 다 마감 기준)  ← 추천·기본
+                            # "live"  : 위 SIGNAL_MODE 신호대로 봉 중간에도 바로 스위칭 (예전 방식)
 
 # ==================== 💵 코인별 진입금 (USDT, 레버리지 곱하기 전 = 증거금) ====================
 DEFAULT_AMOUNT = 50                 # 아래에 없는 코인은 이 금액

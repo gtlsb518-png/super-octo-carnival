@@ -450,6 +450,8 @@ def run_backtest_live(sub, p, bar='1h'):
     cur_h, hi, lo = -1, 0.0, 0.0
     confirmed = p.get('signal_mode', 'live') == 'confirmed'   # 봉 확정 후에만 신호 반영
     ut_conf = p.get('signal_mode', 'live') == 'ut_confirmed'  # UT 만 봉 확정, EMA 는 실시간
+    sw_close = p.get('switch_mode', 'live') == 'close'          # 스위칭은 봉이 확정된 신호로만
+    sw_state = 0
     next_bar = p.get('reentry', 'immediate') == 'next_bar'     # 익절 후 다음 봉에서만 재진입
     # 연속 익절 브레이크: 바로 재진입하다가 익절이 chain_max 번 이어지면 멈추고 다음 봉에서 진입
     #   chain_scope='bar' → 같은 봉 안에서 센 횟수 / 'run' → 봉이 바뀌어도 끊기지 않은 연속 횟수
@@ -518,6 +520,7 @@ def run_backtest_live(sub, p, bar='1h'):
         elif c > ps:             st = c - nl
         else:                    st = c + nl
         up = 1 if (pc < ps and c > st) else -1 if (pc > ps and c < st) else upos[H - 1]
+        up_live = up
         if ut_conf:
             up = upos[H - 1]        # UT 는 마감된 봉 기준만 (EMA 는 진행 중인 봉 그대로)
         ef = ef_arr[H - 1] + af * (c - ef_arr[H - 1])
@@ -529,6 +532,8 @@ def run_backtest_live(sub, p, bar='1h'):
             if (new_state == 1 and c <= et) or (new_state == -1 and c >= et):
                 new_state = 0
         bar_end = (t + 1 >= n_sub) or (hidx[t + 1] != H)
+        if bar_end:     # 봉 마감 시점의 UT·EMA (= 확정 신호)
+            sw_state = 1 if (up_live == 1 and ef > es) else -1 if (up_live == -1 and ef < es) else 0
         if not confirmed or bar_end:
             state, raw_state = new_state, raw_new
             if (trend_close and pos is not None and state == 0 and
@@ -538,7 +543,8 @@ def run_backtest_live(sub, p, bar='1h'):
             p['_dbg'].append((H, t, state, up, ef > es))
 
         # 4) 스위칭 / 신규 진입
-        if pos is not None and state == (-1 if pos['side'] == 'LONG' else 1):
+        sw_sig = sw_state if sw_close else state
+        if pos is not None and sw_sig == (-1 if pos['side'] == 'LONG' else 1):
             new_side = 'SHORT' if pos['side'] == 'LONG' else 'LONG'
             close_pos(pos, c, t, '스위칭')
             pos = open_pos(new_side, c, H, t)
