@@ -33,7 +33,7 @@ tkinter가 없는 리눅스에서는 `sudo apt-get install python3-tk`로 설치
 | `5_gui.py` | **핵심**: GUI + API + 트레이딩 봇 로직 통합 |
 | `6~8_gui_*.py` | 호환용 스텁 (미사용) |
 | `9_main.py` | 실행 진입점 (라이브러리 자동 설치). 맨 위 `DEFAULT_PROGRAM` 이 1이면 코인 1~10, 2면 코인 11~20 |
-| `make_packages.py` | 배포 압축 2개 생성: `dist/프로그램1_코인1-10.zip`, `dist/프로그램2_코인11-20.zip` (두 개는 `DEFAULT_PROGRAM` 한 줄만 다름) |
+| `make_packages.py` | 본인용 압축 생성: `dist/바이낸스봇_전체_키포함.zip` (프로그램1·2 폴더, 키 포함 — 남에게 주지 말 것). 두 폴더는 `DEFAULT_PROGRAM` 한 줄만 다름 |
 
 ## 매매 로직 요약
 

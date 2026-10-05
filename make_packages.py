@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""배포용 압축파일 2개 만들기
+"""본인용 압축파일 만들기 (배포 안 함)
 
   python make_packages.py
 
-  dist/프로그램1_코인1-10.zip   → 프로그램1 폴더 (BTC ETH BNB SOL XRP ADA DOGE TRX SUI LINK)
-  dist/프로그램2_코인11-20.zip  → 프로그램2 폴더 (AVAX LTC BCH DOT XLM HBAR ETC NEAR AAVE ATOM)
+  dist/바이낸스봇_전체_키포함.zip  → 프로그램1·2 폴더 둘 다, 1_config.py 의 키 그대로
+      프로그램1_코인1-10   (BTC ETH BNB SOL XRP ADA DOGE TRX SUI LINK)
+      프로그램2_코인11-20  (AVAX LTC BCH DOT XLM HBAR ETC NEAR AAVE ATOM)
+
+  키를 뺀 프로그램별 압축이 필요할 때만: python make_packages.py --keyless
 
 두 프로그램의 파일은 전부 같고, 9_main.py 의 DEFAULT_PROGRAM 한 줄만 다르다.
 """
@@ -47,7 +50,7 @@ def build(num, name):
 
 
 def build_all_with_keys():
-    """본인용: 프로그램 1·2를 한 압축에, 1_config.py 의 키 그대로 (python make_packages.py --with-keys)"""
+    """본인용: 프로그램 1·2를 한 압축에, 1_config.py 의 키 그대로 (기본)"""
     os.makedirs(os.path.join(BASE, 'dist'), exist_ok=True)
     out = os.path.join(BASE, 'dist', '바이낸스봇_전체_키포함.zip')
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -59,7 +62,7 @@ def build_all_with_keys():
 
 if __name__ == '__main__':
     import sys
-    for num, name in PACKS.items():
-        build(num, name)
-    if '--with-keys' in sys.argv:
-        build_all_with_keys()
+    if '--keyless' in sys.argv:
+        for num, name in PACKS.items():
+            build(num, name)
+    build_all_with_keys()
