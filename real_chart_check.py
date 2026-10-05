@@ -35,10 +35,10 @@ OUT_TXT = os.path.join(BASE, '실제차트_비교결과.txt')
 # 비교할 설정: (이름, 레버리지, 신호, 재진입, 스위칭)
 CONFIGS = [
     ('예전: 3배·즉시신호·바로재진입', 3, 'live', 'immediate', 'live'),
-    ('5배·UT마감·바로재진입', 5, 'ut_confirmed', 'immediate', 'close'),
-    ('지금: 5배·UT마감·다음봉', 5, 'ut_confirmed', 'next_bar', 'close'),
-    ('5배·다음봉·스위칭즉시', 5, 'ut_confirmed', 'next_bar', 'live'),
-    ('3배·UT마감·다음봉', 3, 'ut_confirmed', 'next_bar', 'close'),
+    ('지금: 5배·UT마감·바로재진입', 5, 'ut_confirmed', 'immediate', 'close'),
+    ('5배·UT마감·다음봉', 5, 'ut_confirmed', 'next_bar', 'close'),
+    ('5배·바로재진입·스위칭즉시', 5, 'ut_confirmed', 'immediate', 'live'),
+    ('3배·UT마감·바로재진입', 3, 'ut_confirmed', 'immediate', 'close'),
 ]
 
 # TP 비교 (지금 방식: 5배 · UT 봉마감 + EMA 실시간 · 다음 봉 재진입): (횡보 TP, 추세 TP, 이름)
@@ -162,7 +162,7 @@ def combine(by_coin):
 def tp_compare(data):
     """② TP 조합 비교 — 지금 방식 그대로, 익절 % 만 바꿔서"""
     out('━' * 92)
-    out('② TP(익절 %) 비교 — 5배 · UT 봉마감 + EMA 실시간 · 다음 봉 재진입 · 횡보(ADX<21)/추세(ADX≥21)')
+    out('② TP(익절 %) 비교 — 5배 · UT 봉마감 + EMA 실시간 · 익절 후 바로 재진입 · 스위칭 봉마감 · 횡보(ADX<21)/추세(ADX≥21)')
     res = {n: {} for *_, n in TP_CONFIGS}
     slip = {n: {} for *_, n in TP_CONFIGS}
     t0 = time.time()
@@ -170,8 +170,8 @@ def tp_compare(data):
         print(f"  TP 계산 {i}/{len(data)}: {c}", flush=True)
         for ts, tt, n in TP_CONFIGS:
             amt = AMOUNT.get(c, 50)
-            res[n][c] = bt.run_backtest_live(df, params(5, 'ut_confirmed', 'next_bar', amt, ts, tt), bar='1h')[0]
-            slip[n][c] = bt.run_backtest_live(df, params(5, 'ut_confirmed', 'next_bar', amt, ts, tt, SLIP_FEE),
+            res[n][c] = bt.run_backtest_live(df, params(5, 'ut_confirmed', 'immediate', amt, ts, tt), bar='1h')[0]
+            slip[n][c] = bt.run_backtest_live(df, params(5, 'ut_confirmed', 'immediate', amt, ts, tt, SLIP_FEE),
                                               bar='1h')[0]
     print(f"  (계산 {time.time() - t0:.0f}초)")
     names = [n for *_, n in TP_CONFIGS]
@@ -264,7 +264,7 @@ def main():
 def reentry_compare(data):
     """① 재진입 방식 비교"""
     out('━' * 92)
-    out('① 재진입·스위칭 방식 비교 (TP 1.2% 횡보 / 1.5% 추세, 지금 = 스위칭은 봉 마감 확정 신호로만)')
+    out('① 재진입·스위칭 방식 비교 (TP 1.2% 횡보 / 1.5% 추세, 지금 = 익절 후 바로 재진입 + 스위칭은 봉 마감 확정 신호로)')
     res = {name: {} for name, *_ in CONFIGS}       # name → coin → trades
     t0 = time.time()
     for i, (c, df) in enumerate(data.items(), 1):
@@ -276,7 +276,7 @@ def reentry_compare(data):
 
     # ---------- 코인별 ----------
     names = [n for n, *_ in CONFIGS]
-    short = ['예전3배', '5배바로', '지금', '스위칭즉시', '3배다음봉']
+    short = ['예전3배', '지금', '다음봉', '스위칭즉시', '3배']
     out('━' * 92)
     out('코인별 순손익 (USDT, 수수료·펀딩 포함)   ※ 강제청산 횟수는 괄호')
     out(f"{'코인':6s} {'기간':>6s} " + ' '.join(f"{s:>14s}" for s in short))
@@ -310,7 +310,7 @@ def reentry_compare(data):
             f"{all_t['수수료'].sum():7,.0f} {all_t['펀딩비'].sum():6,.0f} {(all_t['유형'] == '강제청산').sum():5d}")
 
     # ---------- 핵심 비교: 같은 5배·UT마감에서 재진입만 다르게 ----------
-    a_n, b_n = '5배·UT마감·바로재진입', '지금: 5배·UT마감·다음봉'
+    a_n, b_n = '지금: 5배·UT마감·바로재진입', '5배·UT마감·다음봉'
     if a_n in summary and b_n in summary:
         out('━' * 92)
         out('핵심 비교 — 다른 건 다 같고 익절 후 재진입만 다름 (5배 · UT 봉마감 + EMA 실시간)')
@@ -325,15 +325,15 @@ def reentry_compare(data):
         out('  월별 순손익 (바로 → 다음 봉)')
         for m in both:
             out(f"    {m}  {ma[m]:+8,.0f} → {mb[m]:+8,.0f}   {'▲' if mb[m] > ma[m] else '▼'}")
-    c_n = '5배·다음봉·스위칭즉시'
-    if b_n in summary and c_n in summary:
+    c_n = '5배·바로재진입·스위칭즉시'
+    if a_n in summary and c_n in summary:
         out('━' * 92)
         out('스위칭 비교 — 봉 중간에 바로 스위칭 vs 봉 마감 확정 후 스위칭 (나머지는 같음)')
-        win = sum(1 for c in data if res[b_n][c]['순손익'].sum() > res[c_n][c]['순손익'].sum())
+        win = sum(1 for c in data if res[a_n][c]['순손익'].sum() > res[c_n][c]['순손익'].sum())
         n_sw = lambda n: int((summary[n]['all']['유형'] == '스위칭').sum())
         out(f"  봉 마감 스위칭이 더 번 코인: {win}/{len(data)}개")
-        out(f"  전체 순손익: 즉시 {summary[c_n]['net']:+,.0f} → 봉 마감 {summary[b_n]['net']:+,.0f}")
-        out(f"  스위칭 횟수: 즉시 {n_sw(c_n):,}번 → 봉 마감 {n_sw(b_n):,}번 | 최대 낙폭: {summary[c_n]['mdd']:+,.0f} → {summary[b_n]['mdd']:+,.0f}")
+        out(f"  전체 순손익: 즉시 {summary[c_n]['net']:+,.0f} → 봉 마감 {summary[a_n]['net']:+,.0f}")
+        out(f"  스위칭 횟수: 즉시 {n_sw(c_n):,}번 → 봉 마감 {n_sw(a_n):,}번 | 최대 낙폭: {summary[c_n]['mdd']:+,.0f} → {summary[a_n]['mdd']:+,.0f}")
 
 
 if __name__ == '__main__':

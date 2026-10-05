@@ -1732,8 +1732,8 @@ def coin_amount(symbol):
 #   SIGNAL_MODE  'ut_close'  = UT 는 봉 마감 기준, EMA34/55 는 실시간 (기본·추천)
 #                'live'      = 둘 다 실시간 (진행 중인 봉, 리페인팅 있음)
 #                'confirmed' = 둘 다 봉 마감 기준
-#   REENTRY      'next_bar'  = 익절한 봉에서는 다시 안 들어가고 다음 봉부터 (기본·추천)
-#                'immediate' = 익절 후 신호가 그대로면 바로 재진입
+#   REENTRY      'immediate' = 익절 후 신호가 그대로면 바로 재진입 (기본 — 테스트넷 운영 후 사용자 선택)
+#                'next_bar'  = 익절한 봉에서는 다시 안 들어가고 다음 봉부터
 SIGNAL_MODES = ('ut_close', 'live', 'confirmed')
 REENTRY_MODES = ('next_bar', 'immediate')
 try:
@@ -1751,12 +1751,12 @@ if SIGNAL_MODE not in SIGNAL_MODES:
     print(f"⚠️ SIGNAL_MODE='{SIGNAL_MODE}' 은 없는 값 → 'ut_close'")
     SIGNAL_MODE = 'ut_close'
 try:
-    REENTRY_MODE = str(getattr(_cfgmod, 'REENTRY', 'next_bar')).strip().lower()
+    REENTRY_MODE = str(getattr(_cfgmod, 'REENTRY', 'immediate')).strip().lower()
 except Exception:
-    REENTRY_MODE = 'next_bar'
+    REENTRY_MODE = 'immediate'
 if REENTRY_MODE not in REENTRY_MODES:
-    print(f"⚠️ REENTRY='{REENTRY_MODE}' 은 없는 값 → 'next_bar'")
-    REENTRY_MODE = 'next_bar'
+    print(f"⚠️ REENTRY='{REENTRY_MODE}' 은 없는 값 → 'immediate'")
+    REENTRY_MODE = 'immediate'
 
 try:
     SWITCH_MODE = str(getattr(_cfgmod, 'SWITCH_MODE', 'close')).strip().lower()
