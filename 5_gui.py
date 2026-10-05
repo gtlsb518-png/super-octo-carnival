@@ -2107,7 +2107,7 @@ class TradingBot:
         a_efee, a_cfee = entry_fee, close_fee
         actual = None
         try:
-            time.sleep(1)
+            time.sleep(0.3)   # 체결 기록이 올라올 짧은 여유 (못 찾으면 get_last_trade_info 가 1초 간격으로 다시 봄)
             bd = self.api.get_last_trade_info(self.config['symbol'])
             if bd and bd.get('realized_pnl', 0) != 0:
                 a_pnl = bd['realized_pnl']
@@ -2228,7 +2228,7 @@ class TradingBot:
         realized_ok = False
         info = None
         try:
-            time.sleep(1)
+            time.sleep(0.3)   # 체결 기록이 올라올 짧은 여유 (못 찾으면 다시 봄)
             info = self.api.get_last_trade_info(symbol)
             if info and info.get('realized_pnl', 0) != 0:
                 pnl_usd = info['realized_pnl']
@@ -2701,10 +2701,11 @@ class TradingBot:
                         print(f"[⚠️ 리셋] {self.config['symbol']}: is_closing 30초 stuck")
                         self.config['is_closing'] = False
                 
-                # 🔥🔥🔥 루프 주기: 포지션 있으면 1초, 없으면 5초
+                # 🔥🔥🔥 루프 주기: 포지션 있으면 1초, 없으면 5초 (청산 직후 1분은 1초 — 익절 후 재진입을 빨리)
                 #   (측정: 코인 10개 모두 보유 시 API 가중치 분당 약 640 = 한도 2,400의 27%)
                 if not first_check:
-                    loop_interval = 1 if self.config.get('has_position') else 5
+                    _just_closed = time.time() - (self.config.get('last_close_time') or 0) < 60
+                    loop_interval = 1 if (self.config.get('has_position') or _just_closed) else 5
                     time.sleep(loop_interval)
                 first_check = False
                 
@@ -2839,10 +2840,11 @@ class TradingBot:
                     side = None
                     pos_type = None
                     
-                    # 🚨 최근 청산 확인 (5초 강제 대기) - coin에서 공유
+                    # 🚨 최근 청산 확인 (2초 강제 대기) - coin에서 공유
+                    #   (중복 진입은 진입 직전 포지션 재확인이 따로 막는다. 예전 5초 → 익절 후 재진입이 느렸음)
                     if self.config.get('last_close_time'):
                         time_since_close = time.time() - self.config['last_close_time']
-                        if time_since_close < 5:
+                        if time_since_close < 2:
                             # 🔥 대기 중에는 신호 업데이트 안 함! (False 유지)
                             # 대기 완료 후 False→True 감지
                             continue
