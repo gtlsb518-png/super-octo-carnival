@@ -2210,7 +2210,10 @@ class TradingBot:
         if self.config.get('exit_mode', 'tp') == 'switch':
             self.log(f"   🔁 청산 방식: 스위칭만 → TP 주문 없음 (반대신호까지 보유)", pos_type)
             return False
+        if isinstance(tp_pct, (tuple, list)):      # (TP%, ADX, 장세) 묶음이 들어와도 TP% 만
+            tp_pct = tp_pct[0] if tp_pct else self.config.get('tp', 1.2)
         try:
+            tp_pct = float(tp_pct)
             if pos_type == 'LONG':
                 tp_price = entry_price * (1 + tp_pct / 100)
             else:
@@ -2483,6 +2486,26 @@ class TradingBot:
     def stop(self):
         self.running = False
         
+    def _tp_pct(self, side):
+        """이 포지션의 TP% 를 숫자로. (TP%, ADX, 장세) 묶음 등이 잘못 저장돼 있어도 TP% 만 꺼내고 고쳐 둔다"""
+        key = f'entry_tp_{side}'
+        v = self.config.get(key)
+        if isinstance(v, (tuple, list)):
+            v = v[0] if v else None
+        try:
+            v = float(v) if v else None
+        except (TypeError, ValueError):
+            v = None
+        if v is None:
+            try:
+                return float(self.config.get('tp', 0.3))
+            except (TypeError, ValueError):
+                return 0.3
+        if self.config.get(key) != v:
+            print(f"[🔧 TP 값 정리] {self.config['symbol']} {side.upper()}: {self.config.get(key)!r} → {v}")
+            self.config[key] = v
+        return v
+
     def _tp_ok_at_trade_price(self, side, entry, leverage, target_roi):
         """표시가격(mark) 기준으로 목표 ROI 에 닿았을 때, 실제 체결가로도 닿았는지 한 번 더 확인.
 
@@ -3415,7 +3438,7 @@ class TradingBot:
                     
                     if current_position['side'] == 'long':
                         # 🔥 진입 시 저장한 동적 TP 사용! (ADX 기반)
-                        user_tp = self.config.get('entry_tp_long') or self.config.get('tp', 0.3)
+                        user_tp = self._tp_pct('long')
                         target_roi = user_tp * leverage
                         
                         # ROI >= 목표면 즉시 익절 (🔥 '스위칭만' 모드면 TP 익절 안 함)
@@ -3788,7 +3811,7 @@ class TradingBot:
                     
                     else:  # short
                         # 🔥 진입 시 저장한 동적 TP 사용! (ADX 기반)
-                        user_tp = self.config.get('entry_tp_short') or self.config.get('tp', 0.3)
+                        user_tp = self._tp_pct('short')
                         target_roi = user_tp * leverage
                         
                         # ROI >= 목표면 즉시 익절 (🔥 '스위칭만' 모드면 TP 익절 안 함)
@@ -4166,15 +4189,23 @@ class TradingBot:
                 # 익절/손절 후 prev_signals가 False로 초기화되므로 재진입 가능
             
             except Exception as e:
-                # 에러는 양쪽 로그에 모두 표시
+                # 같은 오류가 매초 쌓이지 않게: 화면 로그는 1분에 한 번, 콘솔엔 어디서 났는지(줄 번호)까지 10분에 한 번
                 error_msg = f"❌ 오류: {str(e)}"
-                try:
-                    if self.config.get('long_active'):
-                        self.log(error_msg, 'LONG')
-                    if self.config.get('short_active'):
-                        self.log(error_msg, 'SHORT')
-                except:
-                    print(error_msg)
+                now = time.time()
+                seen = self.__dict__.setdefault('_err_seen', {})
+                last_log, last_tb = seen.get(error_msg, (0, 0))
+                if now - last_tb > 600:
+                    import traceback
+                    print(f"[❌ 봇 오류] {self.config['symbol']} {self.bot_type.upper()}\n{traceback.format_exc()}")
+                    last_tb = now
+                if now - last_log > 60:
+                    try:
+                        self.log(error_msg + " (같은 오류는 1분에 한 번만 표시)", self.bot_type.upper())
+                    except Exception:
+                        print(error_msg)
+                    last_log = now
+                seen[error_msg] = (last_log, last_tb)
+                time.sleep(1)
 
 # ==================== GUI ====================
 STATS_FILE = f"bot_stats{_FILE_SUFFIX}.json"  # 🔥 통계 저장 파일 (프로그램별)
