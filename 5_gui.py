@@ -2326,8 +2326,18 @@ class TradingBot:
 
         # 로그
         if reason == 'tp':
+            # ROI = 실현 수익 ÷ 실제 증거금 (바이낸스 기록 기준, 수수료 빼기 전) — 목표 ROI 와 같은 기준
+            tp_pct = self._tp_pct(side)
+            lev = self._pos_leverage()
+            act_roi = (_a or {}).get('roi', roi_pct)
             self.log(f"✅ {pos_type} 익절! 거래소 TP 주문 체결 (#{count})", pos_type)
-            self.log(f"   💰 실현 수익: ${pnl_usd:.2f}", pos_type)
+            self.log(f"   💰 실현 수익: ${pnl_usd:.2f} | ROI {act_roi:+.2f}% (목표 {tp_pct * lev:.2f}%)", pos_type)
+            e_px, x_px = (_a or {}).get('entry_px'), (_a or {}).get('exit_px')
+            if e_px and x_px:
+                tgt = e_px * (1 + tp_pct / 100) if side == 'long' else e_px * (1 - tp_pct / 100)
+                slip = ((x_px - tgt) if side == 'long' else (tgt - x_px)) / e_px * 100
+                self.log(f"   📍 진입 ${fmt_px(e_px)} → 청산 ${fmt_px(x_px)} (목표가 ${fmt_px(tgt)}"
+                         + (f", 목표보다 {abs(slip):.2f}% 불리하게 체결)" if slip < -0.01 else ")"), pos_type)
             self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", pos_type)
             self._warn_bad_tp_fill(pos_type, pnl_usd)
             print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
@@ -3458,7 +3468,7 @@ class TradingBot:
                             
                             # 로그
                             self.log(f"✅ LONG 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'LONG')
-                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | ROI {pnl_pct:+.2f}%", 'LONG')
                             self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             self._warn_bad_tp_fill('LONG', pnl_usd)
                             
@@ -3565,7 +3575,7 @@ class TradingBot:
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"{'🛑 LONG 손절 (반대 신호 2개)' if self.config.get('one_shot') else '🔄 LONG→SHORT 스위칭!'} 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'LONG')
-                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | ROI {pnl_pct:+.2f}%", 'LONG')
                             self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
                             # 콘솔 출력
@@ -3840,7 +3850,7 @@ class TradingBot:
                             
                             # 로그
                             self.log(f"✅ SHORT 익절! ROI +{pnl_pct:.2f}% (목표 {target_roi:.2f}%) (#{count})", 'SHORT')
-                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | ROI {pnl_pct:+.2f}%", 'SHORT')
                             self.log(f"   💸 수수료: ${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             self._warn_bad_tp_fill('SHORT', pnl_usd)
                             
@@ -3949,7 +3959,7 @@ class TradingBot:
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"{'🛑 SHORT 손절 (반대 신호 2개)' if self.config.get('one_shot') else '🔄 SHORT→LONG 스위칭!'} 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'SHORT')
-                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
+                            self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | ROI {pnl_pct:+.2f}%", 'SHORT')
                             self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
                             # 콘솔 출력
