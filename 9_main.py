@@ -25,6 +25,10 @@ import faulthandler
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 📂 어디서 실행하든(바로가기·VS Code·다른 폴더) 엑셀·통계·설정 파일은 항상 이 프로그램 폴더에 저장
+os.chdir(BASE_DIR)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 # 🔢 프로그램 번호 — 1 = 코인 1~10번, 2 = 코인 11~20번
 #    프로그램2 폴더의 이 파일은 2로 되어 있습니다. 나머지 파일은 1번과 완전히 같습니다.

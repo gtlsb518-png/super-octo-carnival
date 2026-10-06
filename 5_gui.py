@@ -4214,7 +4214,7 @@ class App:
         
         print("=" * 60)
         print("📊 통계: 파일에서 불러오기 시도...")
-        print(f"📝 거래 기록: {TRADE_HISTORY_FILE}에 저장됨")
+        print(f"📝 거래 기록(엑셀): {os.path.abspath(TRADE_HISTORY_FILE)}")
         print("=" * 60)
         
         self.create_ui()
@@ -5390,9 +5390,9 @@ class App:
                     
                     if sheets_added:
                         wb.save(TRADE_HISTORY_FILE)
-                        print(f"📝 기존 파일에 시트 추가됨: {TRADE_HISTORY_FILE}")
+                        print(f"📝 기존 파일에 시트 추가됨: {os.path.abspath(TRADE_HISTORY_FILE)}")
                     else:
-                        print(f"📝 기존 거래 기록 파일 사용: {TRADE_HISTORY_FILE}")
+                        print(f"📝 기존 거래 기록 파일 사용: {os.path.abspath(TRADE_HISTORY_FILE)}")
                     wb.close()
                 except Exception as e:
                     print(f"⚠️ 기존 파일 열기 실패, 새로 생성: {e}")
@@ -5432,7 +5432,7 @@ class App:
             
             wb.save(TRADE_HISTORY_FILE)
             wb.close()
-            print(f"✅ 거래 기록 파일 생성 (코인별 시트 10개): {TRADE_HISTORY_FILE}")
+            print(f"✅ 거래 기록 파일 생성 (코인별 시트 {len(coin_sheets)}개): {os.path.abspath(TRADE_HISTORY_FILE)}")
             
         except Exception as e:
             print(f"❌ 엑셀 파일 초기화 실패: {e}")
