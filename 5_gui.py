@@ -39,6 +39,7 @@ except ValueError:
 _FILE_SUFFIX = '' if PROGRAM_NUMBER == 1 else f'_{PROGRAM_NUMBER}'
 TRADE_HISTORY_FILE = f'trade_history{_FILE_SUFFIX}.xlsx'
 BOT_RUNNING_FILE = f'bot_running{_FILE_SUFFIX}.json'
+ONE_SHOT_FILE = f'one_shot{_FILE_SUFFIX}.json'   # 🎯 1회 매매 버튼 켜 둔 코인 (껐다 켜도 유지)
 
 # 번호 붙은 모듈 import
 import importlib
@@ -2357,6 +2358,9 @@ class TradingBot:
             # (안 풀면 사용자가 바로 시작 버튼을 눌러도 다음 봉까지 안 들어갔음)
             self.config['tp_block_bar'] = None
             self.halt_coin(label, pos_type)
+        elif self.config.get('one_shot'):
+            # 🎯 1회 매매: 거래소 TP 로 익절 1번 → 이 코인 정지 (재진입 안 함)
+            self.halt_coin('1회 매매: 익절 완료', pos_type, detected=False)
 
         # 신호/ROI 초기화 (재진입 대비)
         self.config['prev_signals'] = {
@@ -2372,7 +2376,7 @@ class TradingBot:
         self.config['roi'][f'{side}_max'] = 0
         self.config['roi'][f'{side}_min'] = 0
 
-    def halt_coin(self, why, pos_type):
+    def halt_coin(self, why, pos_type, detected=True):
         """🛑 이 코인만 매매 정지 (재진입 차단).
 
         - long_active / short_active 를 끄면 신호가 떠도 진입하지 않는다.
@@ -2399,7 +2403,7 @@ class TradingBot:
 
         sym = self.config['symbol']
         for t in ('LONG', 'SHORT'):
-            self.log(f"🛑 {sym} 봇 정지 — {why} 감지", t)
+            self.log(f"🛑 {sym} 봇 정지 — {why}{' 감지' if detected else ''}", t)
             self.log(f"   이 코인만 멈췄습니다. 다른 코인·프로그램은 그대로 돌아갑니다.", t)
             self.log(f"   ▶️ 다시 매매하려면 시작(또는 강제시작) 버튼을 누르세요.", t)
         print("=" * 60)
@@ -3480,6 +3484,8 @@ class TradingBot:
                             self.config['roi']['long_min'] = 0
                             
                             print(f"[{self.config['symbol']}] LONG 익절 완료 - 재진입 대기")
+                            if self.config.get('one_shot'):     # 🎯 1회 매매: 익절 1번이면 이 코인 정지
+                                self.halt_coin('1회 매매: 익절 완료', 'LONG', detected=False)
                             self.config["is_closing"] = False
                             continue
                         
@@ -3549,7 +3555,8 @@ class TradingBot:
                             profit_sign = '+' if net_profit >= 0 else ''
                             
                             # 🔥 엑셀 저장!
-                            _a = self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '스위칭')
+                            _a = self.save_trade_excel('LONG', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit,
+                                                 '손절(1회매매)' if self.config.get('one_shot') else '스위칭')
                             if _a:   # 바이낸스 실제 체결 기준 (수량 단위·실제 수수료율·펀딩 반영)
                                 pnl_usd, total_fee, net_profit, pnl_pct = _a['pnl'], _a['fee'], _a['net'], _a['roi']
                                 close_price = _a.get('exit_px') or close_price
@@ -3557,7 +3564,7 @@ class TradingBot:
                             fund_txt = self._fund_text(_a)
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
-                            self.log(f"🔄 LONG→SHORT 스위칭! 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'LONG')
+                            self.log(f"{'🛑 LONG 손절 (반대 신호 2개)' if self.config.get('one_shot') else '🔄 LONG→SHORT 스위칭!'} 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'LONG')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'LONG')
                             self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
@@ -3568,6 +3575,19 @@ class TradingBot:
                             # 통계 업데이트
                             self.stats_callback()
                             
+                            # 🎯 1회 매매: 반대로 들어가지 않고 손절로 끝 → 이 코인 정지
+                            if self.config.get('one_shot'):
+                                self.config['roi']['long_entry'] = None
+                                self.config['roi']['long_current'] = 0
+                                self.config['restart_entry_long'] = None
+                                self.config['target_usdt_long'] = 0
+                                self.config['entry_tp_long'] = None
+                                self.config['entry_fee_long'] = 0
+                                self.halt_coin('1회 매매: 손절 완료 (반대 신호 2개, SHORT 진입 안 함)', 'LONG', detected=False)
+                                self.config["warned_position_exists"] = False
+                                self.config["is_closing"] = False
+                                continue
+
                             # 🔥 즉시 SHORT 진입 (스위칭)
                             self.log(f"🔄 즉시 SHORT 진입 준비...", 'SHORT')
                             print(f"[{self.config['symbol']}] LONG→SHORT 스위칭: 즉시 SHORT 진입!")
@@ -3846,6 +3866,8 @@ class TradingBot:
                             self.config['roi']['short_min'] = 0
                             
                             print(f"[{self.config['symbol']}] SHORT 익절 완료 - 재진입 대기")
+                            if self.config.get('one_shot'):     # 🎯 1회 매매: 익절 1번이면 이 코인 정지
+                                self.halt_coin('1회 매매: 익절 완료', 'SHORT', detected=False)
                             self.config["is_closing"] = False
                             continue
                         
@@ -3917,7 +3939,8 @@ class TradingBot:
                             profit_sign = '+' if net_profit >= 0 else ''
                             
                             # 🔥 엑셀 저장!
-                            _a = self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit, '스위칭')
+                            _a = self.save_trade_excel('SHORT', pnl_pct, pnl_usd, entry_fee, close_fee, total_fee, net_profit,
+                                                 '손절(1회매매)' if self.config.get('one_shot') else '스위칭')
                             if _a:   # 바이낸스 실제 체결 기준 (수량 단위·실제 수수료율·펀딩 반영)
                                 pnl_usd, total_fee, net_profit, pnl_pct = _a['pnl'], _a['fee'], _a['net'], _a['roi']
                                 close_price = _a.get('exit_px') or close_price
@@ -3925,7 +3948,7 @@ class TradingBot:
                             fund_txt = self._fund_text(_a)
                             
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
-                            self.log(f"🔄 SHORT→LONG 스위칭! 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'SHORT')
+                            self.log(f"{'🛑 SHORT 손절 (반대 신호 2개)' if self.config.get('one_shot') else '🔄 SHORT→LONG 스위칭!'} 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'SHORT')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f}", 'SHORT')
                             self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
@@ -3936,6 +3959,19 @@ class TradingBot:
                             # 통계 업데이트
                             self.stats_callback()
                             
+                            # 🎯 1회 매매: 반대로 들어가지 않고 손절로 끝 → 이 코인 정지
+                            if self.config.get('one_shot'):
+                                self.config['roi']['short_entry'] = None
+                                self.config['roi']['short_current'] = 0
+                                self.config['restart_entry_short'] = None
+                                self.config['target_usdt_short'] = 0
+                                self.config['entry_tp_short'] = None
+                                self.config['entry_fee_short'] = 0
+                                self.halt_coin('1회 매매: 손절 완료 (반대 신호 2개, LONG 진입 안 함)', 'SHORT', detected=False)
+                                self.config["warned_position_exists"] = False
+                                self.config["is_closing"] = False
+                                continue
+
                             # 🔥 즉시 LONG 진입 (스위칭)
                             self.log(f"🔄 즉시 LONG 진입 준비...", 'LONG')
                             print(f"[{self.config['symbol']}] SHORT→LONG 스위칭: 즉시 LONG 진입!")
@@ -4183,6 +4219,7 @@ class App:
         
         self.create_ui()
         self.add_default_coins()  # 기본 10개 코인 추가!
+        self._load_one_shot()     # 🎯 1회 매매 켜 둔 코인 복원
         threading.Thread(target=self.check_coin_units, daemon=True).start()  # 📏 소수점 점검
 
         # 🔌 웹소켓 (1_config.py 의 WEBSOCKET_MODE: off / shadow / on)
@@ -4258,6 +4295,77 @@ class App:
         print("🔄 자동 재연결 시작...")
         threading.Thread(target=self._reconnect_all_thread, daemon=True).start()
     
+    # ==================== 🎯 1회 매매 ====================
+    def _load_one_shot(self):
+        try:
+            with open(ONE_SHOT_FILE, 'r', encoding='utf-8') as f:
+                on = dict(json.load(f))
+        except Exception:
+            on = {}
+        for c in self.coins:
+            c['one_shot'] = bool(on.get(c['symbol']))
+        n = sum(1 for c in self.coins if c.get('one_shot'))
+        if n:
+            print(f"🎯 1회 매매 켜진 코인 {n}개: {', '.join(c['symbol'].split('/')[0] for c in self.coins if c.get('one_shot'))}"
+                  f" — 익절 또는 손절 1번 뒤 그 코인 정지")
+        self._paint_one_shot_all()
+
+    def _save_one_shot(self):
+        try:
+            with open(ONE_SHOT_FILE, 'w', encoding='utf-8') as f:
+                json.dump({c['symbol']: True for c in self.coins if c.get('one_shot')}, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️ 1회 매매 설정 저장 실패: {e}")
+
+    def _paint_one_shot(self, coin):
+        b = coin.get('one_shot_btn')
+        if b is None:
+            return
+        try:
+            on = bool(coin.get('one_shot'))
+            b.config(text=f"🎯 1회매매: {'ON' if on else 'OFF'}",
+                     bg='#cc6600' if on else '#3d3d3d', fg='#ffffff')
+        except tk.TclError:
+            pass
+
+    def _paint_one_shot_all(self):
+        b = getattr(self, 'one_shot_all_btn', None)
+        if b is None:
+            return
+        n, total = sum(1 for c in self.coins if c.get('one_shot')), len(self.coins)
+        try:
+            if n == 0:
+                b.config(text="🎯 1회매매 전체: OFF", bg='#555555')
+            elif n == total:
+                b.config(text="🎯 1회매매 전체: ON", bg='#cc6600')
+            else:
+                b.config(text=f"🎯 1회매매: {n}/{total} ON", bg='#996633')
+        except tk.TclError:
+            pass
+
+    def _one_shot_changed(self, coins):
+        self._save_one_shot()
+        for c in coins:
+            self._paint_one_shot(c)
+            on = bool(c.get('one_shot'))
+            msg = ("🎯 1회 매매 ON — 익절 1번 또는 반대 신호 2개(손절) 1번 뒤 이 코인 정지 (반대로 들어가지 않음)"
+                   if on else "🎯 1회 매매 OFF — 예전처럼 익절 후 재진입·반대 신호면 스위칭")
+            for side in ('LONG', 'SHORT'):
+                self.add_log(c, side, msg)
+        self._paint_one_shot_all()
+
+    def toggle_one_shot(self, coin):
+        coin['one_shot'] = not coin.get('one_shot')
+        print(f"🎯 {coin['symbol']} 1회 매매 {'ON' if coin['one_shot'] else 'OFF'}")
+        self._one_shot_changed([coin])
+
+    def toggle_one_shot_all(self):
+        turn_on = not all(c.get('one_shot') for c in self.coins)
+        for c in self.coins:
+            c['one_shot'] = turn_on
+        print(f"🎯 1회 매매 전체 {'ON' if turn_on else 'OFF'} ({len(self.coins)}개 코인)")
+        self._one_shot_changed(list(self.coins))
+
     def _halted_coins(self):
         """수동청산·강제청산으로 멈춘(롱·숏 둘 다 꺼진) 코인 → {심볼: 이유}"""
         return {c['symbol']: c['halted_reason'] for c in self.coins
@@ -4441,6 +4549,12 @@ class App:
         tk.Button(self.tab_frame, text="⏹️ 전체 롱숏 종료", command=self.stop_all,
                  bg='#cc0000', fg='#ffffff', font=('Arial', 11, 'bold'),
                  width=14, pady=5).pack(side='left', padx=5)
+
+        # 🎯 1회 매매 전체 켜기/끄기 (코인별 버튼은 각 코인 화면에)
+        self.one_shot_all_btn = tk.Button(self.tab_frame, text="🎯 1회매매 전체: OFF", command=self.toggle_one_shot_all,
+                                          bg='#555555', fg='#ffffff', font=('Arial', 11, 'bold'),
+                                          width=16, pady=5)
+        self.one_shot_all_btn.pack(side='left', padx=5)
         
         # 메인 컨텐츠
         self.main_frame = tk.Frame(self.root, bg='#1e1e1e')
@@ -6614,6 +6728,12 @@ class App:
         
         tk.Button(settings_line, text="⚙️", command=lambda: self.edit_settings(coin), bg='#3d3d3d', fg='#ffffff',
                  font=('Arial', 9), padx=5, pady=0).pack(side='left', padx=5)
+
+        # 🎯 1회 매매: 켜면 익절 1번 또는 손절(반대 신호 2개) 1번 뒤 이 코인 정지 — 반대로 들어가지 않음
+        coin['one_shot_btn'] = tk.Button(settings_line, command=lambda: self.toggle_one_shot(coin),
+                                         font=('Arial', 9, 'bold'), padx=5, pady=0)
+        coin['one_shot_btn'].pack(side='left', padx=5)
+        self._paint_one_shot(coin)
         
         # 코인별 통계 - 컴팩트
         stats_frame = tk.LabelFrame(self.main_frame, text="📊 통계", bg='#2d2d2d', fg='#ffffff',
