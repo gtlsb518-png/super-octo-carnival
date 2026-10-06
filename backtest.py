@@ -404,7 +404,8 @@ def run_backtest_live(sub, p, bar='1h'):
 
     fee_rate = p['fee_pct'] / 100.0
     amount, lev = p['amount'], p['leverage']
-    liq_move = 100.0 / lev
+    # 강제청산: 증거금을 다 잃기 조금 전(유지증거금 mmr_pct %)에 일어난다. 0 이면 예전처럼 100/배율 %
+    liq_move = 100.0 / lev - float(p.get('mmr_pct', 0.0) or 0.0)
     sl_pct = float(p.get('sl_pct', 0.0) or 0.0)
     fund_rate = (p.get('funding_pct', 0.01) / 100.0) if p.get('funding_on', True) else 0.0
     fund_sec = max(1, int(p.get('funding_hours', 8))) * 3600

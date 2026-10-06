@@ -3,6 +3,7 @@
 
   python real_chart_check.py              ← 프로그램 1·2 코인 20개, 최근 2년, ①② 둘 다
   python real_chart_check.py --what tp    ← TP 비교만 (--what reentry 는 재진입 비교만)
+  python real_chart_check.py --what risk --days 1460   ← 1시간봉 최대 하락 + 3·5·7·10배 강제청산 비교 (4년)
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -212,13 +213,106 @@ def tp_compare(data):
             f"반기 {beat}/{len(halves)}번 앞섬 → 차이가 꾸준하지 않아 지금 값 유지 추천")
 
 
+RISK_LEVS = [3, 5, 7, 10]
+MMR = 1.0        # 유지증거금 % (알트 소액 기준 대략) — 강제청산은 '100/배율 − 이 값' % 반대로 가면
+
+
+def _liq_line(lev):
+    return 100.0 / lev - MMR
+
+
+def risk_compare(data):
+    """③ 1시간봉 최대 하락·상승 + 봇이 들고 있는 동안 가장 크게 반대로 간 폭 → 3·5·7·10배 비교"""
+    out('━' * 92)
+    out('③ 위험 점검 — 1시간봉 최대 하락/상승과, 봇 포지션이 버텨야 했던 최대 역행 → 배율별 강제청산')
+    out(f"   강제청산선(격리, 유지증거금 {MMR:.0f}% 가정): " +
+        ' · '.join(f"{L}배 −{_liq_line(L):.1f}%" for L in RISK_LEVS))
+    out('')
+    out(f"{'코인':6s} {'1시간 최대하락':>16s} {'1시간 최대상승':>16s} {'24시간 최대하락':>18s} "
+        f"{'보유 중 최대역행':>14s} {'상위1%':>7s}  " + ' '.join(f"{L}배청산".rjust(6) for L in RISK_LEVS))
+    worst = {'h1': (0, '', ''), 'mae': (0, '', '')}
+    mae_all = []
+    t0 = time.time()
+    for i, (c, df) in enumerate(data.items(), 1):
+        print(f"  위험 계산 {i}/{len(data)}: {c}", flush=True)
+        h = df.resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
+        dn = (h['low'] / h['open'] - 1) * 100
+        up = (h['high'] / h['open'] - 1) * 100
+        low24 = h['low'][::-1].rolling(24, min_periods=1).min()[::-1]
+        dn24 = (low24 / h['open'] - 1) * 100
+        # 1배로 돌리면 강제청산이 없어서, 거래마다 '가격이 반대로 가장 많이 간 폭(%)' 이 그대로 나온다
+        amt = AMOUNT.get(c, 50)
+        p1 = params(1, 'ut_confirmed', 'immediate', amt)
+        tr = bt.run_backtest_live(df, p1, bar='1h')[0]
+        mae = (-tr['최저ROI%']).clip(lower=0) if len(tr) else pd.Series(dtype=float)
+        mae_all.extend(mae.tolist())
+        cnt = [int((mae >= _liq_line(L)).sum()) for L in RISK_LEVS]
+        mx = float(mae.max()) if len(mae) else 0.0
+        p99 = float(mae.quantile(0.99)) if len(mae) else 0.0
+        if dn.min() < worst['h1'][0]:
+            worst['h1'] = (dn.min(), c, dn.idxmin().strftime('%Y-%m-%d %H시'))
+        if len(mae) and mx > worst['mae'][0]:
+            worst['mae'] = (mx, c, tr.loc[mae.idxmax(), '시각'].strftime('%Y-%m-%d'))
+        out(f"{c:6s} {dn.min():+7.1f}% ({dn.idxmin():%y-%m-%d}) {up.max():+7.1f}% ({up.idxmax():%y-%m-%d}) "
+            f"{dn24.min():+7.1f}% ({dn24.idxmin():%y-%m-%d}) {-mx:+13.1f}% {-p99:+6.1f}%  "
+            + ' '.join(f"{n:>6d}" for n in cnt))
+    out('')
+    m = pd.Series(mae_all) if mae_all else pd.Series([0.0])
+    out(f"  가장 큰 1시간 하락: {worst['h1'][1]} {worst['h1'][0]:+.1f}% ({worst['h1'][2]})")
+    out(f"  봇이 들고 있던 포지션이 가장 크게 반대로 간 폭: {worst['mae'][1]} −{worst['mae'][0]:.1f}% ({worst['mae'][2]} 진입)")
+    out(f"  전체 {len(m):,}거래 중 반대로 간 폭: 절반은 −{m.median():.1f}% 이내, 99% 는 −{m.quantile(0.99):.1f}% 이내")
+    out('')
+
+    out(f"  배율별 결과 (진입금 BTC 60 / 나머지 50 그대로, 강제청산되면 그 거래는 증거금 전부 손실)")
+    out(f"  {'배율':6s} {'순손익':>10s} {'최대낙폭':>10s} {'수익÷낙폭':>9s} {'강제청산':>8s} {'손실달':>7s} {'최악의달':>10s}")
+    S = {}
+    for L in RISK_LEVS:
+        by = {}
+        for c, df in data.items():
+            p = params(L, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50))
+            p['mmr_pct'] = MMR
+            by[c] = bt.run_backtest_live(df, p, bar='1h')[0]
+        S[L] = combine(by)
+        if S[L] is None:
+            out('  거래가 없어 비교할 수 없습니다'); return
+        a, r = S[L]['all'], S[L]['net'] / max(1.0, abs(S[L]['mdd']))
+        out(f"  {str(L) + '배':6s} {S[L]['net']:+10,.0f} {S[L]['mdd']:+10,.0f} {r:9.2f} "
+            f"{int((a['유형'] == '강제청산').sum()):8d} {(S[L]['monthly'] < 0).sum():>3d}/{len(S[L]['monthly']):<3d} "
+            f"{S[L]['monthly'].min():+10,.0f}")
+    print(f"  (계산 {time.time() - t0:.0f}초)")
+    out('')
+    # 판단: 3배 vs 5배
+    a3, a5 = S[3], S[5]
+    liq3 = int((a3['all']['유형'] == '강제청산').sum())
+    liq5 = int((a5['all']['유형'] == '강제청산').sum())
+    r3 = a3['net'] / max(1.0, abs(a3['mdd']))
+    r5 = a5['net'] / max(1.0, abs(a5['mdd']))
+    out(f"  👉 3배 vs 5배: 순손익 {a3['net']:+,.0f} vs {a5['net']:+,.0f} · 최대낙폭 {a3['mdd']:+,.0f} vs {a5['mdd']:+,.0f}"
+        f" · 강제청산 {liq3} vs {liq5}번")
+    if a5['net'] <= 0 and a3['net'] <= 0:
+        out("     둘 다 손해 → 배율이 낮을수록 덜 잃습니다. 배율보다 전략(TP·신호)부터 손봐야 합니다.")
+    elif r3 >= r5:
+        out(f"     3배가 낙폭 대비 수익이 같거나 낫고({r3:.2f} vs {r5:.2f}) 강제청산도 {'적습니다' if liq3 < liq5 else '같습니다'} → 3배 추천")
+    else:
+        msg = f"     5배가 낙폭 대비 수익이 더 좋습니다({r5:.2f} vs {r3:.2f})"
+        if liq5 > liq3:
+            msg += (f". 대신 강제청산이 {liq5 - liq3}번 더 났습니다 — 실제 봇은 청산되면 그 코인이 멈추고 "
+                    f"그날 손실이 한꺼번에 몰립니다")
+            out(msg)
+            out("     → 큰 폭락 한 번에 크게 잃는 게 싫으면 3배, 감수할 수 있으면 5배")
+        else:
+            out(msg + " → 5배 유지 추천")
+    out("     ※ 실제 봇은 강제청산되면 그 코인이 멈춥니다 (여기서는 계속 매매한다고 계산)")
+
+
 def main():
     ap = argparse.ArgumentParser(description='실제 차트로 재진입 방식 비교')
     ap.add_argument('--days', type=int, default=730, help='기간 (일, 기본 730 = 2년)')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
-    ap.add_argument('--what', choices=['all', 'reentry', 'tp'], default='all',
-                    help='all = 재진입+TP 둘 다 / reentry = 재진입 비교만 / tp = TP 비교만')
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk'], default='all',
+                    help='all = 재진입+TP+위험 / reentry = 재진입 비교만 / tp = TP 비교만 / '
+                         'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교')
     a = ap.parse_args()
     coins = [c.upper().replace('USDT', '').replace('/', '') for c in a.coins]
 
@@ -248,6 +342,8 @@ def main():
         reentry_compare(data)
     if a.what in ('all', 'tp'):
         tp_compare(data)
+    if a.what in ('all', 'risk'):
+        risk_compare(data)
 
     out('')
     out('※ 과거 결과이며 앞으로도 같다는 보장은 없습니다. 펀딩비는 0.01% 고정 가정입니다.')
