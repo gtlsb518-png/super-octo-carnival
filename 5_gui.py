@@ -5385,7 +5385,8 @@ class App:
                     self.sync_stats_from_binance(only)
                 except Exception as e:
                     print(f"[📊 통계 동기화 오류] {e}")
-                woke = self._stats_wake.wait(self.STATS_SYNC_EVERY)
+                # 첫 계산이 아직 안 끝났으면(조회 실패) 20초 뒤 다시, 끝났으면 2분마다
+                woke = self._stats_wake.wait(self.STATS_SYNC_EVERY if self._stats_ok else 20)
                 self._stats_wake.clear()
                 only = None
                 if woke:
@@ -5604,6 +5605,7 @@ class App:
         ok_all = True
 
         targets = [c for c in list(self.coins) if only is None or c['symbol'] in only]
+        failed = []
         for coin in targets:
             sym = coin['symbol'].replace('/', '')
             st = S['syms'].get(sym)
@@ -5613,6 +5615,7 @@ class App:
             fills = self._fetch_new_fills(sym, st, now)
             if fills is None:
                 ok_all = False
+                failed.append(sym)
                 continue
             if fills:
                 self._apply_fills(st, fills, self._fill_fee_usdt)
@@ -5625,6 +5628,7 @@ class App:
                 S['fund_at'] = time.time()
         if rows is None:
             ok_all = False
+            failed.append('펀딩비 기록')
         else:
             for r in rows:
                 tid = r.get('tranId')
@@ -5634,8 +5638,19 @@ class App:
                 S['fund'][r.get('symbol', '')] = S['fund'].get(r.get('symbol', ''), 0.0) + float(r['income'])
                 S['fund_from'] = max(S['fund_from'], int(r['time']))
 
+        if failed:
+            err = (self.api.last_order_error() or {}) if hasattr(self.api, 'last_order_error') else {}
+            print(f"[📊 통계] 바이낸스 기록 조회 실패: {', '.join(failed)}"
+                  + (f" — {err.get('msg')} (코드 {err.get('code')})" if err.get('msg') else '')
+                  + " → 잠시 뒤 다시 시도")
         if not ok_all and first_time:
-            return   # 첫 계산이 덜 끝났으면 화면을 바꾸지 않는다 (반쪽 숫자 방지)
+            # 첫 계산이 덜 끝났으면 화면을 바꾸지 않는다 (반쪽 숫자 방지).
+            # 단, 같은 코인이 계속 실패해 화면이 0 에 머무르지 않게 3번째부터는 받은 것만이라도 표시
+            self._stats_first_fails = getattr(self, '_stats_first_fails', 0) + 1
+            if self._stats_first_fails < 3:
+                return
+            print(f"[📊 통계] 일부 기록을 계속 못 받아서({', '.join(failed)}) 받은 것만 먼저 표시합니다 "
+                  f"— 못 받은 코인은 받아지는 대로 채워집니다")
 
         for coin in (list(self.coins) if (first_time or rows) else targets):   # 새 펀딩이 있으면 전체
             sym = coin['symbol'].replace('/', '')
