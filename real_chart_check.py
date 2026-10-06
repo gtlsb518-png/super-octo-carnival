@@ -27,7 +27,7 @@ sys.path.insert(0, BASE)
 import backtest as bt  # noqa: E402
 
 COINS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'TRX', 'SUI', 'LINK',
-         'AVAX', 'LTC', 'BCH', 'DOT', 'XLM', 'HBAR', 'ETC', 'NEAR', 'AAVE', 'ATOM']
+         'AVAX', 'LTC', 'BCH', 'DOT', 'XLM', 'HBAR', 'ETC', 'FIL', 'AAVE', 'ATOM']
 AMOUNT = {'BTC': 60}            # 나머지 50 (1_config.py 기본값과 같게)
 DATA_DIR = os.path.join(BASE, 'real_data')
 OUT_TXT = os.path.join(BASE, '실제차트_비교결과.txt')
