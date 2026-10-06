@@ -3711,10 +3711,10 @@ class TradingBot:
                                         self.config['has_position'] = True
                                         
 
-                                        self.log(f"✅ SHORT 진입! ${signals['price']:.2f} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'SHORT')
+                                        self.log(f"✅ SHORT 진입! ${fmt_px(signals['price'])} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'SHORT')
                                         if self.config.get('exit_mode', 'tp') != 'switch':
                                             self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'SHORT')
-                                        self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'SHORT')
+                                        self.log(f"   💸 진입 수수료: ${entry_fee:.3f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'SHORT')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'SHORT')
                                         # 🔍 즉시진입 모드면 리페인팅 추적 시작
                                         self.mark_live_entry('SHORT', df_closed, signals['price'])
@@ -4087,10 +4087,10 @@ class TradingBot:
                                         self.config['has_position'] = True
                                         
 
-                                        self.log(f"✅ LONG 진입! ${signals['price']:.2f} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'LONG')
+                                        self.log(f"✅ LONG 진입! ${fmt_px(signals['price'])} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", 'LONG')
                                         if self.config.get('exit_mode', 'tp') != 'switch':
                                             self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", 'LONG')
-                                        self.log(f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'LONG')
+                                        self.log(f"   💸 진입 수수료: ${entry_fee:.3f} ({FEE_RATE*100:.2f}%) (청산 시 합산)", 'LONG')
                                         self.log(f"   🛡️ SL: AUTO (스위칭)", 'LONG')
                                         # 🔍 즉시진입 모드면 리페인팅 추적 시작
                                         self.mark_live_entry('LONG', df_closed, signals['price'])
@@ -7427,11 +7427,11 @@ class App:
                         except Exception as e:
                             print(f"[{coin['symbol']}] 강제 진입 TP 주문 오류: {e}")
 
-                        self.add_log(coin, side, f"🔥 강제 진입! ${current_price:.2f} | {qty}개 | {coin['timeframe']} | {coin['leverage']}x")
+                        self.add_log(coin, side, f"🔥 강제 진입! ${fmt_px(current_price)} | {qty}개 | {coin['timeframe']} | {coin['leverage']}x")
                         if market_type != '기본':
                             self.add_log(coin, side, f"   📊 ADX: {adx_value:.1f} ({market_type}) → TP {dynamic_tp}%")
                         self.add_log(coin, side, f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_roi:.2f}% → 💰 ${target_usdt:.2f}")
-                        self.add_log(coin, side, f"   💸 진입 수수료: ${entry_fee:.2f} ({FEE_RATE*100:.2f}%) (청산 시 합산)")
+                        self.add_log(coin, side, f"   💸 진입 수수료: ${entry_fee:.3f} ({FEE_RATE*100:.2f}%) (청산 시 합산)")
                         self.add_log(coin, side, f"   🛡️ SL: AUTO (스위칭)")
                         
                         # 신호 초기화 (자동 청산 가능하게)
