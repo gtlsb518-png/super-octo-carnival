@@ -2540,6 +2540,20 @@ class TradingBot:
     MAX_SPREAD_PCT = 0.3      # 매수1·매도1 호가 차이
     MAX_CHART_GAP_PCT = 1.0   # 내가 체결될 호가 ↔ 차트(메인넷) 가격 차이
 
+    def _fresh_chart_price(self):
+        """지금 이 순간의 차트(메인넷) 가격. 웹소켓이 있으면 그 값, 없으면 봉 2개만 새로 조회. 실패 시 None"""
+        sym, tf = self.config['symbol'], self.config.get('timeframe', '1h')
+        try:
+            ws = getattr(self.api, 'ws', None)
+            df = ws.klines.get(sym, tf, 1) if (ws is not None and self.api.ws_mode == 'on') else None
+            if df is None:
+                df = self.api._rest_klines(sym, tf, 2, fresh=True)
+            if df is not None and len(df):
+                return float(df['close'].iloc[-1])
+        except Exception:
+            pass
+        return None
+
     def _book_too_wide(self, pos_type, chart_price):
         """진입 직전 호가 점검. 비정상이면 이유 문자열, 괜찮거나 조회 실패면 None.
 
@@ -2555,6 +2569,12 @@ class TradingBot:
         gap = (px - chart_price) / chart_price * 100
         if spread > self.MAX_SPREAD_PCT:
             return f"호가 차이 {spread:.2f}% (매수 {fmt_px(bid)} / 매도 {fmt_px(ask)})"
+        if abs(gap) > self.MAX_CHART_GAP_PCT:
+            # 신호 계산 때의 차트 가격은 몇 초 전 값 → 급등락 중이면 그 차이일 수 있으니 지금 차트 가격으로 다시 본다
+            fresh = self._fresh_chart_price()
+            if fresh:
+                chart_price = fresh
+                gap = (px - chart_price) / chart_price * 100
         if abs(gap) > self.MAX_CHART_GAP_PCT:
             return f"체결될 가격 {fmt_px(px)} 이 차트 가격 {fmt_px(chart_price)} 보다 {gap:+.2f}%"
         return None
