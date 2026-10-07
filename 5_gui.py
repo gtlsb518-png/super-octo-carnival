@@ -958,6 +958,26 @@ class BinanceAPI:
             print(f"[청산 원인 조회 실패] {symbol}: {e}")
             return None
 
+    def last_liq_fill(self, symbol, lookback_ms=24 * 3600 * 1000):
+        """최근 lookback 안에서 '마지막으로 체결된 주문'이 강제청산(ADL 포함)이었으면 ('long'/'short', 시각ms), 아니면 None.
+        프로그램이 꺼져 있는 사이 강제청산됐는지 켤 때 확인하는 용도."""
+        try:
+            sc = symbol.replace('/', '')
+            since = int(time.time() * 1000) - int(lookback_ms)
+            orders = self._request('GET', '/fapi/v1/allOrders', params={'symbol': sc, 'startTime': since, 'limit': 50},
+                                   signed=True, quiet=True)
+            filled = [o for o in (orders or []) if o.get('status') == 'FILLED'
+                      and float(o.get('executedQty', 0) or 0) > 0]
+            if not filled:
+                return None
+            o = max(filled, key=lambda x: int(x.get('updateTime', 0)))
+            cid = str(o.get('clientOrderId', ''))
+            if cid.startswith('autoclose-') or cid.startswith('adl_autoclose'):
+                return ('long' if o.get('side') == 'SELL' else 'short'), int(o.get('updateTime', 0))
+        except Exception as e:
+            print(f"[강제청산 기록 확인 실패] {symbol}: {e}")
+        return None
+
     def last_tp_fill_ms(self, symbol, lookback_ms=2 * 3600 * 1000):
         """최근 lookback 안에서 '마지막으로 체결된 주문'이 익절(TP)이었으면 그 시각(ms), 아니면 None.
 
@@ -2367,7 +2387,11 @@ class TradingBot:
             # 원인 확인 전에 걸어둔 '이번 봉 진입 금지'는 익절용이라 푼다
             # (안 풀면 사용자가 바로 시작 버튼을 눌러도 다음 봉까지 안 들어갔음)
             self.config['tp_block_bar'] = None
-            self.halt_coin(label, pos_type)
+            if reason == 'liq' and not self.config.get('one_shot'):
+                # 💀 강제청산: 멈추지 않는다. 청산된 방향의 지금 신호에서는 다시 안 들어가고, 다음 신호부터 진입
+                self._set_liq_block(side)
+            else:
+                self.halt_coin(label, pos_type)
         elif self.config.get('one_shot'):
             # 🎯 1회 매매: 거래소 TP 로 익절 1번 → 이 코인 정지 (재진입 안 함)
             self.halt_coin('1회 매매: 익절 완료', pos_type, detected=False)
@@ -2599,6 +2623,75 @@ class TradingBot:
             self.log(f"⏳ 이번 봉에 이미 익절했습니다 → 다음 봉에서 신호 확인 후 진입", self.bot_type.upper())
             print(f"[⏳ 다음 봉 대기] {self.config['symbol']}: 이번 봉에 익절 기록 있음 (재시작 전/꺼진 사이)")
 
+    # ==================== 💀 강제청산 후 다음 신호 대기 ====================
+    def _set_liq_block(self, side, announce=True):
+        """강제청산된 방향(side)은 지금 이어지는 신호에서 다시 안 들어간다. 신호가 끝나면(봉 마감 기준) 풀린다.
+        반대 신호는 바로 진입 가능."""
+        self.config['liq_block'] = side
+        self.config['_liq_block_logged'] = False
+        try:
+            if getattr(self, 'app', None):
+                self.app._refresh_running_state()
+        except Exception:
+            pass
+        if announce:
+            S = side.upper()
+            for t in ('LONG', 'SHORT'):
+                self.log(f"⏸️ 강제청산 후 멈추지 않고 다음 신호를 기다립니다 — 지금 {S} 신호에서는 다시 안 들어가고, "
+                         f"{S} 신호가 끝난 뒤 새 신호(또는 반대 신호)가 뜨면 진입", t)
+        print(f"[💀→⏸️ 다음 신호 대기] {self.config['symbol']} {side.upper()} 강제청산 — 같은 신호 재진입 막음")
+
+    def _liq_block_refresh(self):
+        """매 루프 (포지션 있어도) — 강제청산된 쪽 봇만, 자기 신호로 '그 신호가 끝났는지' 본다.
+        롱·숏 봇은 신호를 따로 새로 받으므로 다른 봇이 풀면 아직 옛 신호를 든 봇이 같은 방향으로 바로 들어갈 수 있다."""
+        blk = self.config.get('liq_block')
+        if blk != self.bot_type:
+            return
+        sw = getattr(self, '_cached_switch_signals', None) or getattr(self, '_cached_signals', None)
+        if not sw:
+            return
+        still = (sw.get('ut_position_long', False) and sw.get('ema_long')) if blk == 'long' \
+            else (sw.get('ut_position_short', False) and sw.get('ema_short'))
+        if still:
+            return
+        self.config['liq_block'] = None
+        try:
+            if getattr(self, 'app', None):
+                self.app._refresh_running_state()
+        except Exception:
+            pass
+        self.log(f"🔓 강제청산된 {blk.upper()} 신호가 끝났습니다 → 다음 신호부터 다시 진입", blk.upper())
+        print(f"[🔓 대기 해제] {self.config['symbol']} {blk.upper()} 신호 끝 → 다음 신호부터 진입")
+
+    def _liq_block_check(self, signals=None):
+        """진입 직전. 이 봇이 강제청산된 방향이고 그 신호가 아직 이어지면 True (진입 안 함). 반대 방향은 항상 False."""
+        if self.config.get('liq_block') != self.bot_type:
+            return False
+        if not self.config.get('_liq_block_logged'):
+            self.config['_liq_block_logged'] = True
+            print(f"[⏸️ 대기] {self.config['symbol']} {self.bot_type.upper()}: 강제청산된 신호가 아직 이어지는 중 → 진입 안 함")
+        return True
+
+    def _restore_liq_block(self):
+        """켤 때 포지션이 없으면: 강제청산 후 대기 중이었는지(저장 파일) / 꺼진 사이 강제청산됐는지(바이낸스 기록) 확인"""
+        if self.config.get('one_shot'):
+            return
+        if time.time() - self.config.get('_liq_restore_at', 0) < 60:   # 롱·숏 봇이 둘 다 부르므로 한 번만
+            return
+        self.config['_liq_restore_at'] = time.time()
+        side = None
+        try:
+            side = self.app._saved_liq_block().get(self.config['symbol']) if getattr(self, 'app', None) else None
+        except Exception:
+            side = None
+        if side not in ('long', 'short'):
+            r = self.api.last_liq_fill(self.config['symbol'])
+            side = r[0] if r else None
+            if side:
+                self.log(f"💀 꺼져 있는 사이 {side.upper()} 강제청산 기록이 있습니다", side.upper())
+        if side in ('long', 'short'):
+            self._set_liq_block(side, announce=True)
+
     def _reentry_blocked(self):
         b = self.config.get('tp_block_bar')
         return b is not None and self._bar_no() <= b
@@ -2714,6 +2807,7 @@ class TradingBot:
                 elif ep is False:
                     print(f"[🔄 재연결] {self.config['symbol']} 포지션 없음")
                     self._restore_tp_block()
+                    self._restore_liq_block()
                 else:
                     print(f"[🔄 재연결] {self.config['symbol']} 포지션 확인 안 됨 (API 응답 없음)")
             except Exception as e:
@@ -2736,6 +2830,7 @@ class TradingBot:
                     print(f"[✅ 포지션 없음] {self.config['symbol']} 깨끗한 상태로 시작!")
                     print(f"")
                     self._restore_tp_block()
+                    self._restore_liq_block()
                     # 🔥 이전 세션의 잔여 TP 주문 정리 (포지션이 확실히 없을 때만)
                     try:
                         self.api.cancel_all_orders(self.config['symbol'])
@@ -2876,6 +2971,7 @@ class TradingBot:
                 if not hasattr(self, '_cached_signals') or self._cached_signals is None:
                     continue
                 signals = self._cached_signals
+                self._liq_block_refresh()      # 💀 강제청산 후 대기 — 그 신호가 끝났으면 풂 (청산된 쪽 봇만, 자기 신호로)
                 dynamic_tp, adx_value, market_type = self._cached_dynamic_tp if hasattr(self, '_cached_dynamic_tp') else (self.config.get('tp', 1.5), 25, '추세장')
                 
                 # 🔥🔥🔥 포지션 확인
@@ -2991,6 +3087,10 @@ class TradingBot:
 
                     # 이 봇(롱/숏)이 꺼져 있으면 진입 확인을 건너뛴다 (정지된 코인이 5초마다 콘솔에 신호를 찍던 것 방지)
                     if not self.config.get(f'{self.bot_type}_active'):
+                        continue
+
+                    # 💀 강제청산된 방향의 신호가 아직 이어지면 이 봇은 진입 안 함 (반대 방향은 그대로 진입)
+                    if self._liq_block_check(signals):
                         continue
 
                     # 🔍 디버깅 - 신호 상태 (5초마다)
@@ -4393,6 +4493,13 @@ class App:
         except Exception:
             return {}
 
+    def _saved_liq_block(self):
+        try:
+            with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
+                return dict(json.load(f).get('liq_block') or {})
+        except Exception:
+            return {}
+
     def _saved_halted(self):
         try:
             with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
@@ -4404,7 +4511,8 @@ class App:
         """봇 실행 상태 저장 — 프로그램 재시작 시 자동 재연결용"""
         try:
             state = {'running': True, 'timestamp': time.time(), 'halted': self._halted_coins(),
-                     'tp_block': {c['symbol']: c['tp_block_bar'] for c in self.coins if c.get('tp_block_bar')}}
+                     'tp_block': {c['symbol']: c['tp_block_bar'] for c in self.coins if c.get('tp_block_bar')},
+                     'liq_block': {c['symbol']: c['liq_block'] for c in self.coins if c.get('liq_block')}}
             with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
