@@ -1811,7 +1811,7 @@ if SWITCH_MODE not in ('close', 'live'):
     SWITCH_MODE = 'close'
 SWITCH_TEXT = {'close': '봉 확정 후', 'live': '신호 즉시'}
 
-# 🕒 매매 봉 (1_config.py 의 TIMEFRAME). 신호·스위칭·ADX 모두 이 봉 기준
+# 🕒 매매 봉 (1_config.py 의 TIMEFRAME). 신호·스위칭은 이 봉 기준 (ADX 는 ADX_TIMEFRAME)
 TIMEFRAMES = ('5m', '15m', '30m', '1h', '2h', '4h')
 try:
     TIMEFRAME = str(getattr(_cfgmod, 'TIMEFRAME', '15m')).strip().lower()
@@ -1821,6 +1821,14 @@ if TIMEFRAME not in TIMEFRAMES:
     print(f"⚠️ TIMEFRAME='{TIMEFRAME}' 은 없는 값 ({'/'.join(TIMEFRAMES)}) → '15m'")
     TIMEFRAME = '15m'
 TF_TEXT = {'5m': '5분봉', '15m': '15분봉', '30m': '30분봉', '1h': '1시간봉', '2h': '2시간봉', '4h': '4시간봉'}
+# 📐 ADX 봉 (TP 1.5%/1.2% 고르기용) — 기본 1시간봉 (15분봉 ADX 는 자주 흔들림)
+try:
+    ADX_TIMEFRAME = str(getattr(_cfgmod, 'ADX_TIMEFRAME', '1h')).strip().lower()
+except Exception:
+    ADX_TIMEFRAME = '1h'
+if ADX_TIMEFRAME not in TIMEFRAMES:
+    print(f"⚠️ ADX_TIMEFRAME='{ADX_TIMEFRAME}' 은 없는 값 ({'/'.join(TIMEFRAMES)}) → '1h'")
+    ADX_TIMEFRAME = '1h'
 
 SIGNAL_MODE_TEXT = {'ut_close': 'UT 봉마감 + EMA 실시간', 'live': '즉시 (둘 다 실시간)',
                     'confirmed': '확정 (둘 다 봉마감)'}
@@ -4355,7 +4363,9 @@ class App:
 
         # 🔌 웹소켓 (1_config.py 의 WEBSOCKET_MODE: off / shadow / on)
         try:
-            self.api.start_websockets(lambda: [(c['symbol'], c.get('timeframe', '1h')) for c in list(self.coins)])
+            # 매매 봉 + ADX 봉(다르면) 둘 다 구독 → ADX 1시간봉도 조회(REST) 없이
+            self.api.start_websockets(lambda: [(c['symbol'], iv) for c in list(self.coins)
+                                               for iv in {c.get('timeframe', '1h'), c.get('adx_interval') or c.get('timeframe', '1h')}])
         except Exception as e:
             print(f"⚠️ 웹소켓 시작 실패 → 조회 방식만 사용: {e}")
         
@@ -4721,7 +4731,7 @@ class App:
                 #    / 'live'=둘 다 진행중 봉 / 'confirmed'=둘 다 완성봉
                 'signal_mode': SIGNAL_MODE,
                 'adx_period': 10,  # ADX 기간
-                'adx_interval': TIMEFRAME,  # 🔥 ADX 계산 봉 (TP 결정용) — 매매 봉과 같게 (조회 한 번으로 끝)
+                'adx_interval': ADX_TIMEFRAME,  # 📐 ADX 계산 봉 (TP 결정용) — 1_config.py 의 ADX_TIMEFRAME (기본 1시간봉)
                 # 🔥 거래량 필터 비활성화
                 'volume_filter_enabled': False,  # 거래량 필터 비활성화
                 'volume_multiplier': 1.0,  # 사용 안 함
@@ -4736,7 +4746,7 @@ class App:
         mult = 4 if LEVERAGE <= 3 else 5 if LEVERAGE <= 5 else 8
         print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * mult:,.0f} USDT "
               f"(이 프로그램만, {LEVERAGE}배 기준 증거금×{mult})")
-        print(f"  🎯 전략: {TF_TEXT[TIMEFRAME]} · {LEVERAGE}배 | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
+        print(f"  🎯 전략: {TF_TEXT[TIMEFRAME]} · {LEVERAGE}배 · ADX {TF_TEXT[ADX_TIMEFRAME]} | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
               f" | 스위칭 {SWITCH_TEXT[SWITCH_MODE]}")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
@@ -6740,7 +6750,7 @@ class App:
                    'ut_sens': 10, 'ut_atr': 5, 'ema_fast': 34, 'ema_slow': 55,
                    'long_active': False, 'short_active': False,
                    'tp_trend': tp_trend_var.get(), 'tp_sideways': tp_sideways_var.get(),
-                   'adx_period': adx_period_var.get()}
+                   'adx_period': adx_period_var.get(), 'adx_interval': ADX_TIMEFRAME}
             self.add_coin(coin)
             dialog.destroy()
         
