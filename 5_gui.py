@@ -4349,6 +4349,10 @@ class App:
 
         # 📊 통계를 바이낸스 기록으로 계속 맞춤 (다른 컴퓨터·재시작해도 같은 숫자)
         self.start_stats_sync()
+
+        # 📱 텔레그램 (1_config.py 의 TELEGRAM_BOT_TOKENS 에 이 프로그램 번호의 토큰이 있을 때만)
+        self.telegram = None
+        threading.Thread(target=self._start_telegram, daemon=True).start()
         
         self.update_balance()
         
@@ -5259,215 +5263,219 @@ class App:
             
             # 🔥 스레드로 실행 (UI 프리즈 방지!)
             def _stop_all_thread():
-                closed_count = 0
-                stopped_count = 0
-                
-                # 🔥 1단계: 먼저 모든 봇 정지! (진입 차단)
-                print("=" * 60)
-                print("🛑 모든 봇 정지 중...")
-                print("=" * 60)
-                
-                for coin in self.coins:
-                    if coin['long_active']:
-                        coin['long_active'] = False
-                        stopped_count += 1
-                    if coin['short_active']:
-                        coin['short_active'] = False
-                        stopped_count += 1
-                    
-                    # 봇 중지
-                    if id(coin) in self.bots:
-                        if 'long' in self.bots[id(coin)]:
-                            self.bots[id(coin)]['long'].stop()
-                        if 'short' in self.bots[id(coin)]:
-                            self.bots[id(coin)]['short'].stop()
-                    
-                    # 플래그 초기화
-                    coin['last_close_time'] = None
-                    coin['is_entering_long'] = False; coin['is_entering_short'] = False
-                    coin['is_closing'] = True  # 청산 중!
-                    coin['warned_position_exists'] = False
-                    coin['prev_signals'] = {
-                        'ut_long': None, 'ut_short': None,
-                        'ema_long': None, 'ema_short': None,
-                        'long_signal': None, 'short_signal': None
-                    }
-                    
-                    # 🔥 ROI 완전 초기화
-                    coin['roi']['long_entry'] = None
-                    coin['roi']['short_entry'] = None
-                    coin['roi']['long_current'] = 0
-                    coin['roi']['short_current'] = 0
-                    coin['roi']['long_max'] = 0
-                    coin['roi']['short_max'] = 0
-                    coin['roi']['long_min'] = 0
-                    coin['roi']['short_min'] = 0
-                    coin['restart_entry_long'] = None
-                    coin['restart_entry_short'] = None
-                    coin['entry_tp'] = None
-                    coin['tp_reached'] = False
-                    coin['target_usdt'] = 0  # 목표 USDT 초기화!                    
-                    # ROI UI 초기화 (메인 스레드에서!)
-                    if 'labels' in coin:
-                        for side in ['long', 'short']:
-                            if f'{side}_current_roi' in coin['labels']:
-                                try:
-                                    s = side
-                                    self._after_ui(lambda c=coin, s=s: (
-                                        c['labels'][f'{s}_current_roi'].config(text="현재: -", fg='#ffffff'),
-                                        c['labels'][f'{s}_max_roi'].config(text="최고: -"),
-                                        c['labels'][f'{s}_min_roi'].config(text="최저: -")
-                                    ))
-                                except:
-                                    pass
-                
-                print(f"✅ {stopped_count}개 봇 정지 완료!")
-                print("=" * 60)
-                
-                # 🔥 1초 대기 (봇 완전 정지)
-                time.sleep(1)
-                
-                # 🔥 2단계: 바이낸스 모든 포지션 청산
-                print("=" * 60)
-                print("🔥 이 프로그램 코인의 바이낸스 포지션 청산 시작... (다른 프로그램 코인은 그대로)")
-                mine = {c['symbol'].replace('/', '') for c in self.coins}
-                print("=" * 60)
-                
-                try:
-                    # 바이낸스에서 모든 포지션 조회
-                    all_positions = self.api._request('GET', '/fapi/v2/positionRisk', signed=True)
-                    
-                    if all_positions:
-                        for pos in all_positions:
-                            pos_amt = float(pos['positionAmt'])
-                            
-                            # 이 프로그램 코인의 포지션만 청산 (같은 계정의 다른 프로그램 포지션까지 닫던 문제)
-                            if pos_amt != 0 and pos['symbol'] not in mine:
-                                print(f"   ⏭️ {pos['symbol']} — 이 프로그램 코인이 아니라 그대로 둡니다")
-                                continue
-                            if pos_amt != 0:
-                                symbol = pos['symbol']  # BTCUSDT
-                                symbol_display = symbol[:-4] + '/' + symbol[-4:]  # BTC/USDT
-                                side = 'LONG' if pos_amt > 0 else 'SHORT'
-                                pnl = float(pos['unRealizedProfit'])
-                                
-                                print(f"📍 발견: {symbol_display} {side} (수익: ${pnl:.2f})")
+                msg = self.stop_all_run()
+                self.root.after(0, lambda: CustomMessageBox.showinfo("전체 종료", msg))
 
-                                # 🔥 잔여 TP 주문 먼저 취소
-                                try:
-                                    self.api.cancel_all_orders(symbol_display)
-                                except Exception:
-                                    pass
-
-                                # 🔥 청산 재시도 (최대 3번)
-                                close_success = False
-                                for attempt in range(3):
-                                    try:
-                                        # 청산 (symbol은 BTCUSDT 형식 그대로)
-                                        close_side = 'SELL' if pos_amt > 0 else 'BUY'
-                                        self.api.create_order(symbol_display, close_side, abs(pos_amt), reduce_only=True)
-                                        
-                                        close_success = True
-                                        closed_count += 1
-                                        print(f"✅ {symbol_display} {side} 청산 완료! (${pnl:+.2f})")
-                                        break
-                                        
-                                    except Exception as e:
-                                        print(f"❌ {symbol_display} {side} 청산 시도 {attempt+1}/3 실패: {e}")
-                                        if attempt < 2:
-                                            time.sleep(1)
-                                
-                                if close_success:
-                                    
-                                    # GUI에 있는 코인이면 로그 추가
-                                    for coin in self.coins:
-                                        if coin['symbol'] == symbol_display:
-                                            profit_sign = '+' if pnl >= 0 else ''
-                                            self.add_log(coin, side, f"⏹️ 전체 종료 청산!")
-                                            self.add_log(coin, side, f"   수익금: {profit_sign}${pnl:.2f}")
-                                            
-                                            # 통계 업데이트
-                                            if side == 'LONG':
-                                                coin['stats']['long_count'] += 1
-                                                if pnl > 0:
-                                                    coin['stats']['long_win'] += 1
-                                                else:
-                                                    coin['stats']['long_loss'] += 1
-                                                coin['stats']['long_profit'] += pnl
-                                                coin['stats']['total_pnl'] += pnl
-                                            else:
-                                                coin['stats']['short_count'] += 1
-                                                if pnl > 0:
-                                                    coin['stats']['short_win'] += 1
-                                                else:
-                                                    coin['stats']['short_loss'] += 1
-                                                coin['stats']['short_profit'] += pnl
-                                                coin['stats']['total_pnl'] += pnl
-                                            
-                                            self.update_stats(coin)
-                                            break
-                                else:
-                                    print(f"❌ {symbol_display} {side} 청산 실패! (3회 시도)")
-                                    
-                                # 청산 간 짧은 대기
-                                time.sleep(0.5)
-                        
-                        if closed_count == 0:
-                            print("📭 청산할 포지션이 없습니다.")
-                        else:
-                            print(f"✅ 총 {closed_count}개 포지션 청산 완료!")
-                    else:
-                        print("⚠️ 포지션 조회 실패")
-                        
-                except Exception as e:
-                    print(f"❌ 전체 포지션 조회 오류: {e}")
-                
-                print("=" * 60)
-                
-                # 🔥 3단계: 재확인 (혹시 남은 포지션 체크)
-                print("=" * 60)
-                print("🔍 남은 포지션 재확인 중...")
-                print("=" * 60)
-                
-                try:
-                    time.sleep(2)  # 2초 대기 후 재확인
-                    remaining_positions = self.api._request('GET', '/fapi/v2/positionRisk', signed=True)
-                    
-                    if remaining_positions:
-                        remaining_count = 0
-                        for pos in remaining_positions:
-                            if float(pos['positionAmt']) != 0 and pos['symbol'] in mine:
-                                remaining_count += 1
-                                symbol = pos['symbol']
-                                print(f"⚠️ 남은 포지션: {symbol} (수량: {pos['positionAmt']})")
-                        
-                        if remaining_count > 0:
-                            print(f"⚠️ {remaining_count}개 포지션이 남아있습니다!")
-                            print("웹에서 수동으로 청산해주세요.")
-                        else:
-                            print("✅ 모든 포지션 청산 확인!")
-                    else:
-                        print("✅ 모든 포지션 청산 확인!")
-                        
-                except Exception as e:
-                    print(f"❌ 재확인 오류: {e}")
-                
-                print("=" * 60)
-                
-                # 🔥 실행 상태 삭제 (다음 시작 시 새로 시작)
-                self._clear_running_state()
-                
-                # 🔥 완료 메시지 (UI 스레드에서 실행)
-                self.root.after(0, lambda: CustomMessageBox.showinfo("전체 종료", 
-                    f"✅ 전체 종료 완료!\n\n"
-                    f"청산: {closed_count}개\n"
-                    f"정지: {stopped_count}개 봇\n\n"
-                    f"📊 통계: 메모리 초기화됨\n"
-                    f"📝 거래 기록: trade_history.xlsx"))
-            
             # 🔥 스레드 시작 (daemon=True로 백그라운드 실행)
             threading.Thread(target=_stop_all_thread, daemon=True).start()
     
+    def stop_all_run(self):
+        """전체 롱숏 종료 본체 (확인 창 없이) — 이 프로그램 코인만 정지 + 청산. 결과 문구를 돌려준다.
+        화면 버튼(확인 후)과 텔레그램 버튼(두 번 확인 후)이 같이 쓴다. 네트워크를 쓰므로 화면 스레드 밖에서 부를 것."""
+        closed_count = 0
+        stopped_count = 0
+        
+        # 🔥 1단계: 먼저 모든 봇 정지! (진입 차단)
+        print("=" * 60)
+        print("🛑 모든 봇 정지 중...")
+        print("=" * 60)
+        
+        for coin in self.coins:
+            if coin['long_active']:
+                coin['long_active'] = False
+                stopped_count += 1
+            if coin['short_active']:
+                coin['short_active'] = False
+                stopped_count += 1
+            
+            # 봇 중지
+            if id(coin) in self.bots:
+                if 'long' in self.bots[id(coin)]:
+                    self.bots[id(coin)]['long'].stop()
+                if 'short' in self.bots[id(coin)]:
+                    self.bots[id(coin)]['short'].stop()
+            
+            # 플래그 초기화
+            coin['last_close_time'] = None
+            coin['is_entering_long'] = False; coin['is_entering_short'] = False
+            coin['is_closing'] = True  # 청산 중!
+            coin['warned_position_exists'] = False
+            coin['prev_signals'] = {
+                'ut_long': None, 'ut_short': None,
+                'ema_long': None, 'ema_short': None,
+                'long_signal': None, 'short_signal': None
+            }
+            
+            # 🔥 ROI 완전 초기화
+            coin['roi']['long_entry'] = None
+            coin['roi']['short_entry'] = None
+            coin['roi']['long_current'] = 0
+            coin['roi']['short_current'] = 0
+            coin['roi']['long_max'] = 0
+            coin['roi']['short_max'] = 0
+            coin['roi']['long_min'] = 0
+            coin['roi']['short_min'] = 0
+            coin['restart_entry_long'] = None
+            coin['restart_entry_short'] = None
+            coin['entry_tp'] = None
+            coin['tp_reached'] = False
+            coin['target_usdt'] = 0  # 목표 USDT 초기화!                    
+            # ROI UI 초기화 (메인 스레드에서!)
+            if 'labels' in coin:
+                for side in ['long', 'short']:
+                    if f'{side}_current_roi' in coin['labels']:
+                        try:
+                            s = side
+                            self._after_ui(lambda c=coin, s=s: (
+                                c['labels'][f'{s}_current_roi'].config(text="현재: -", fg='#ffffff'),
+                                c['labels'][f'{s}_max_roi'].config(text="최고: -"),
+                                c['labels'][f'{s}_min_roi'].config(text="최저: -")
+                            ))
+                        except:
+                            pass
+        
+        print(f"✅ {stopped_count}개 봇 정지 완료!")
+        print("=" * 60)
+        
+        # 🔥 1초 대기 (봇 완전 정지)
+        time.sleep(1)
+        
+        # 🔥 2단계: 바이낸스 모든 포지션 청산
+        print("=" * 60)
+        print("🔥 이 프로그램 코인의 바이낸스 포지션 청산 시작... (다른 프로그램 코인은 그대로)")
+        mine = {c['symbol'].replace('/', '') for c in self.coins}
+        print("=" * 60)
+        
+        try:
+            # 바이낸스에서 모든 포지션 조회
+            all_positions = self.api._request('GET', '/fapi/v2/positionRisk', signed=True)
+            
+            if all_positions:
+                for pos in all_positions:
+                    pos_amt = float(pos['positionAmt'])
+                    
+                    # 이 프로그램 코인의 포지션만 청산 (같은 계정의 다른 프로그램 포지션까지 닫던 문제)
+                    if pos_amt != 0 and pos['symbol'] not in mine:
+                        print(f"   ⏭️ {pos['symbol']} — 이 프로그램 코인이 아니라 그대로 둡니다")
+                        continue
+                    if pos_amt != 0:
+                        symbol = pos['symbol']  # BTCUSDT
+                        symbol_display = symbol[:-4] + '/' + symbol[-4:]  # BTC/USDT
+                        side = 'LONG' if pos_amt > 0 else 'SHORT'
+                        pnl = float(pos['unRealizedProfit'])
+                        
+                        print(f"📍 발견: {symbol_display} {side} (수익: ${pnl:.2f})")
+
+                        # 🔥 잔여 TP 주문 먼저 취소
+                        try:
+                            self.api.cancel_all_orders(symbol_display)
+                        except Exception:
+                            pass
+
+                        # 🔥 청산 재시도 (최대 3번)
+                        close_success = False
+                        for attempt in range(3):
+                            try:
+                                # 청산 (symbol은 BTCUSDT 형식 그대로)
+                                close_side = 'SELL' if pos_amt > 0 else 'BUY'
+                                self.api.create_order(symbol_display, close_side, abs(pos_amt), reduce_only=True)
+                                
+                                close_success = True
+                                closed_count += 1
+                                print(f"✅ {symbol_display} {side} 청산 완료! (${pnl:+.2f})")
+                                break
+                                
+                            except Exception as e:
+                                print(f"❌ {symbol_display} {side} 청산 시도 {attempt+1}/3 실패: {e}")
+                                if attempt < 2:
+                                    time.sleep(1)
+                        
+                        if close_success:
+                            
+                            # GUI에 있는 코인이면 로그 추가
+                            for coin in self.coins:
+                                if coin['symbol'] == symbol_display:
+                                    profit_sign = '+' if pnl >= 0 else ''
+                                    self.add_log(coin, side, f"⏹️ 전체 종료 청산!")
+                                    self.add_log(coin, side, f"   수익금: {profit_sign}${pnl:.2f}")
+                                    
+                                    # 통계 업데이트
+                                    if side == 'LONG':
+                                        coin['stats']['long_count'] += 1
+                                        if pnl > 0:
+                                            coin['stats']['long_win'] += 1
+                                        else:
+                                            coin['stats']['long_loss'] += 1
+                                        coin['stats']['long_profit'] += pnl
+                                        coin['stats']['total_pnl'] += pnl
+                                    else:
+                                        coin['stats']['short_count'] += 1
+                                        if pnl > 0:
+                                            coin['stats']['short_win'] += 1
+                                        else:
+                                            coin['stats']['short_loss'] += 1
+                                        coin['stats']['short_profit'] += pnl
+                                        coin['stats']['total_pnl'] += pnl
+                                    
+                                    self.update_stats(coin)
+                                    break
+                        else:
+                            print(f"❌ {symbol_display} {side} 청산 실패! (3회 시도)")
+                            
+                        # 청산 간 짧은 대기
+                        time.sleep(0.5)
+                
+                if closed_count == 0:
+                    print("📭 청산할 포지션이 없습니다.")
+                else:
+                    print(f"✅ 총 {closed_count}개 포지션 청산 완료!")
+            else:
+                print("⚠️ 포지션 조회 실패")
+                
+        except Exception as e:
+            print(f"❌ 전체 포지션 조회 오류: {e}")
+        
+        print("=" * 60)
+        
+        # 🔥 3단계: 재확인 (혹시 남은 포지션 체크)
+        print("=" * 60)
+        print("🔍 남은 포지션 재확인 중...")
+        print("=" * 60)
+        
+        try:
+            time.sleep(2)  # 2초 대기 후 재확인
+            remaining_positions = self.api._request('GET', '/fapi/v2/positionRisk', signed=True)
+            
+            if remaining_positions:
+                remaining_count = 0
+                for pos in remaining_positions:
+                    if float(pos['positionAmt']) != 0 and pos['symbol'] in mine:
+                        remaining_count += 1
+                        symbol = pos['symbol']
+                        print(f"⚠️ 남은 포지션: {symbol} (수량: {pos['positionAmt']})")
+                
+                if remaining_count > 0:
+                    print(f"⚠️ {remaining_count}개 포지션이 남아있습니다!")
+                    print("웹에서 수동으로 청산해주세요.")
+                else:
+                    print("✅ 모든 포지션 청산 확인!")
+            else:
+                print("✅ 모든 포지션 청산 확인!")
+                
+        except Exception as e:
+            print(f"❌ 재확인 오류: {e}")
+        
+        print("=" * 60)
+        
+        # 🔥 실행 상태 삭제 (다음 시작 시 새로 시작)
+        self._clear_running_state()
+        
+        return (f"✅ 전체 종료 완료!\n\n"
+                f"청산: {closed_count}개\n"
+                f"정지: {stopped_count}개 봇\n\n"
+                f"📊 통계: 메모리 초기화됨\n"
+                f"📝 거래 기록: {TRADE_HISTORY_FILE}")
+
     def init_trade_history_excel(self):
         """엑셀 거래 기록 파일 초기화 - 코인별 시트 10개"""
         if not OPENPYXL_AVAILABLE:
@@ -6219,6 +6227,26 @@ class App:
         except Exception as e:
             print(f"❌ CSV 백업도 실패: {e}")
     
+    def _start_telegram(self):
+        try:
+            cfg = importlib.import_module('1_config')
+            tokens = dict(getattr(cfg, 'TELEGRAM_BOT_TOKENS', {}) or {})
+            chat_id = str(getattr(cfg, 'TELEGRAM_CHAT_ID', '') or '').strip() or None
+        except Exception as e:
+            print(f"⚠️ [텔레그램] 설정 읽기 실패: {e}")
+            return
+        token = str(tokens.get(PROGRAM_NUMBER) or tokens.get(str(PROGRAM_NUMBER)) or '').strip()
+        if not token:
+            return
+        try:
+            tg_mod = importlib.import_module('telegram_bot')
+        except Exception as e:
+            print(f"⚠️ [텔레그램] telegram_bot.py 를 불러오지 못했습니다: {e}")
+            return
+        bot = tg_mod.TelegramBot(self, token, PROGRAM_NUMBER, folder=os.getcwd(), chat_id=chat_id)
+        if bot.start():
+            self.telegram = bot
+
     def on_closing(self):
         """X 버튼 클릭 시 종료 처리"""
         self._closing_by_user = True   # 9_main.py가 '정상 종료'로 알아보게
@@ -6231,6 +6259,13 @@ class App:
         
         # 🔥 통계 저장!
         self.save_stats()
+
+        # 📱 텔레그램에 종료 알림
+        try:
+            if getattr(self, 'telegram', None):
+                self.telegram.stop()
+        except Exception:
+            pass
         
         # 모든 봇 정지
         for coin in self.coins:
@@ -7051,6 +7086,320 @@ class App:
                  font=('Arial', 12, 'bold'), padx=30, pady=10).pack(pady=20)
 
     
+    # ==================== 🎛️ 코인 롱/숏 조작 (화면 버튼·텔레그램 버튼 공용, 창 안 띄움) ====================
+    def coin_start_side(self, coin, side):
+        """▶️ 시작 — 봇을 새로 만들어 시작하고, 안내 문구를 돌려준다 (네트워크를 쓰므로 화면 스레드 밖에서 부를 것)"""
+        key = side.lower()
+        
+        coin[f'{key}_active'] = True
+        if coin.pop('halted_reason', None):     # 정지됐던 코인을 사용자가 다시 시작
+            coin.pop('halted_at', None)
+            self._refresh_running_state()
+        
+        # 🔄 완전 초기화 (이전 데이터 제거!)
+        coin['last_close_time'] = None
+        coin['is_entering_long'] = False; coin['is_entering_short'] = False
+        coin['is_closing'] = False
+        coin['warned_position_exists'] = False
+        coin['prev_signals'] = {
+            'ut_long': None,
+            'ut_short': None,
+            'ema_long': None,
+            'ema_short': None,
+            'long_signal': None,
+            'short_signal': None
+        }
+        
+        # 🔥 완전히 새로 시작! (이전 포지션 정보 무시!)
+        position = self.api.get_position(coin['symbol'])
+        
+        if key == 'long':
+            coin['roi']['long_entry'] = None
+            coin['roi']['long_current'] = 0
+            coin['roi']['long_max'] = 0
+            coin['roi']['long_min'] = 0
+            coin['restart_entry_long'] = None  # 무조건 None!
+            coin['chart_entry_long'] = None  # 🔥🔥🔥 차트 진입가도 초기화!
+            coin['target_usdt_long'] = 0
+            coin['entry_tp_long'] = None
+            coin['tp_reached_long'] = False
+            coin['entry_fee_long'] = 0  # 🔥 수수료도 초기화!
+            
+            # 🔥 UI 즉시 업데이트 (화면에 - 표시!)
+            def _clear(c=coin):
+                try:
+                    if 'labels' in c and 'long_current_roi' in c['labels']:
+                        c['labels']['long_current_roi'].config(text="현재: -", fg='#ffffff')
+                        c['labels']['long_max_roi'].config(text="최고: -")
+                        c['labels']['long_min_roi'].config(text="최저: -")
+                except Exception as e:
+                    print(f"⚠️ UI 업데이트 실패: {e}")
+            self._after_ui(_clear)
+            
+            if position and position['side'] == 'long':
+                print(f"[{coin['symbol']}] LONG 시작 - 포지션 있음 (진입가 무시, ROI 0%부터)")
+            else:
+                print(f"[{coin['symbol']}] LONG 시작 - ROI 0%부터")
+                
+        else:  # short
+            coin['roi']['short_entry'] = None
+            coin['roi']['short_current'] = 0
+            coin['roi']['short_max'] = 0
+            coin['roi']['short_min'] = 0
+            coin['restart_entry_short'] = None  # 무조건 None!
+            coin['chart_entry_short'] = None  # 🔥🔥🔥 차트 진입가도 초기화!
+            coin['target_usdt_short'] = 0
+            coin['entry_tp_short'] = None
+            coin['tp_reached_short'] = False
+            coin['entry_fee_short'] = 0  # 🔥 수수료도 초기화!
+            
+            # 🔥 UI 즉시 업데이트 (화면에 - 표시!)
+            def _clear(c=coin):
+                try:
+                    if 'labels' in c and 'short_current_roi' in c['labels']:
+                        c['labels']['short_current_roi'].config(text="현재: -", fg='#ffffff')
+                        c['labels']['short_max_roi'].config(text="최고: -")
+                        c['labels']['short_min_roi'].config(text="최저: -")
+                except Exception as e:
+                    print(f"⚠️ UI 업데이트 실패: {e}")
+            self._after_ui(_clear)
+            
+            if position and position['side'] == 'short':
+                print(f"[{coin['symbol']}] SHORT 시작 - 포지션 있음 (진입가 무시, ROI 0%부터)")
+            else:
+                print(f"[{coin['symbol']}] SHORT 시작 - ROI 0%부터")
+        
+        if id(coin) not in self.bots:
+            self.bots[id(coin)] = {}
+        
+        # 🔥🔥🔥 기존 봇 완전 정지하고 삭제! (중요!)
+        if key in self.bots[id(coin)]:
+            print(f"[{coin['symbol']}] {key.upper()} 기존 봇 정지 중...")
+            self.bots[id(coin)][key].stop()
+            time.sleep(0.5)  # 완전히 정지될 때까지 대기
+            del self.bots[id(coin)][key]
+            print(f"[{coin['symbol']}] {key.upper()} 기존 봇 삭제 완료")
+        
+        # 🔥 항상 완전히 새 봇 생성! (excel_callback 추가)
+        print(f"[{coin['symbol']}] {key.upper()} 새 봇 생성 중...")
+        self.bots[id(coin)][key] = TradingBot(
+            self.api, coin,
+            lambda msg, pos_type, c=coin: self.add_log(c, pos_type, msg),
+            lambda: self.update_stats(coin),
+            self.save_trade_to_excel,  # 🔥 엑셀 콜백!
+            bot_type=key,
+            app=self  # 🔥 App 참조 전달
+        )
+        self.bots[id(coin)][key].start()
+        print(f"[{coin['symbol']}] {key.upper()} 새 봇 시작 완료!")
+        
+        # 즉시 신호 확인 알림
+        df = self.api.get_klines(coin['symbol'], coin['timeframe'])
+        if df is not None and len(df) >= 60:
+            signals = calc_signals(df, coin)
+
+            if side == 'LONG':
+                ut_on = signals.get('ut_position_long', False)
+                if ut_on and signals['ema_long']:
+                    msg = f"✅ {side} 봇 시작!\n\n현재 진입 조건 충족 상태입니다.\n곧 자동으로 진입됩니다."
+                else:
+                    ut_status = "✅" if ut_on else "❌"
+                    ema_status = "✅" if signals['ema_long'] else "❌"
+                    msg = f"✅ {side} 봇 시작!\n\nUT Bot: {ut_status}\nEMA 골든크로스: {ema_status}\n\n조건 충족 시 자동 진입됩니다."
+            else:  # SHORT
+                ut_on = signals.get('ut_position_short', False)
+                if ut_on and signals['ema_short']:
+                    msg = f"✅ {side} 봇 시작!\n\n현재 진입 조건 충족 상태입니다.\n곧 자동으로 진입됩니다."
+                else:
+                    ut_status = "✅" if ut_on else "❌"
+                    ema_status = "✅" if signals['ema_short'] else "❌"
+                    msg = f"✅ {side} 봇 시작!\n\nUT Bot: {ut_status}\nEMA 데드크로스: {ema_status}\n\n조건 충족 시 자동 진입됩니다."
+            
+            return msg
+        else:
+            return f"{side} 봇을 시작합니다!"
+    
+
+    def coin_pause_side(self, coin, side):
+        """⏸️ 정지 — 진입만 멈춤 (포지션은 그대로)"""
+        key = side.lower()
+        coin[f'{key}_active'] = False
+        if id(coin) in self.bots and key in self.bots[id(coin)]:
+            self.bots[id(coin)][key].stop()
+        
+        # 🔄 플래그 초기화 (재시작 가능하게!)
+        coin['last_close_time'] = None
+        coin['is_entering_long'] = False; coin['is_entering_short'] = False
+        coin['is_closing'] = False
+        coin['warned_position_exists'] = False
+        coin['prev_signals'] = {
+            'ut_long': None,
+            'ut_short': None,
+            'ema_long': None,
+            'ema_short': None,
+            'long_signal': None,
+            'short_signal': None
+        }
+        
+        return f"{side} 봇을 정지합니다!\n\n📊 통계는 유지됨\n💡 재시작하면 0%부터 시작!"
+
+    def coin_force_stop_side(self, coin, side):
+        """🛑 강제청산 — 포지션 청산 + 이 방향 진입 금지 (화면 라벨은 화면 스레드에서 바꾼다)"""
+        key = side.lower()
+        # 수동 청산 전 포지션 정보 가져오기
+        position = self.api.get_position(coin['symbol'])
+        if position:
+            pnl_usd = position['pnl']
+            entry_price = position['entry_price']
+            
+            # 🔥 현재가 조회
+            df = self.api.get_klines(coin['symbol'], coin['timeframe'], limit=1)
+            current_price = float(df['close'].iloc[-1]) if df is not None and len(df) > 0 else entry_price
+            
+            # 🔥 ROI 계산
+            if position['side'] == 'long':
+                roi_pct = ((current_price - entry_price) / entry_price) * 100 * coin['leverage']
+            else:
+                roi_pct = ((entry_price - current_price) / entry_price) * 100 * coin['leverage']
+            
+            # 🔥 수수료 계산
+            position_size = coin['amount'] * coin['leverage']
+            entry_fee = coin.get(f'entry_fee_{key}', position_size * FEE_RATE)
+            close_fee = position_size * FEE_RATE
+            total_fee = entry_fee + close_fee
+            net_profit = pnl_usd - total_fee
+            
+            # 통계 업데이트 (순수익 기준!)
+            refund_entry_charge(coin, key)  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
+            if side == 'LONG':
+                coin['stats']['long_count'] += 1
+                if net_profit > 0:
+                    coin['stats']['long_win'] += 1
+                else:
+                    coin['stats']['long_loss'] += 1
+                coin['stats']['long_profit'] += net_profit
+                coin['stats']['total_pnl'] += net_profit
+                coin['stats']['long_fee'] = coin['stats'].get('long_fee', 0) + total_fee
+                coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
+            else:  # SHORT
+                coin['stats']['short_count'] += 1
+                if net_profit > 0:
+                    coin['stats']['short_win'] += 1
+                else:
+                    coin['stats']['short_loss'] += 1
+                coin['stats']['short_profit'] += net_profit
+                coin['stats']['total_pnl'] += net_profit
+                coin['stats']['short_fee'] = coin['stats'].get('short_fee', 0) + total_fee
+                coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
+            
+            # 청산
+            self.api.close_position(coin['symbol'])
+            
+            # 🔥 엑셀 저장
+            self.save_trade_to_excel(
+                coin=coin,
+                position_type=side,
+                entry_amount=coin['amount'],
+                leverage=coin['leverage'],
+                tp_pct=coin.get(f'entry_tp_{key}', 0),
+                sl_pct=0,
+                roi_pct=roi_pct,
+                profit_usdt=pnl_usd if pnl_usd > 0 else 0,
+                loss_usdt=abs(pnl_usd) if pnl_usd < 0 else 0,
+                entry_fee=entry_fee,
+                close_fee=close_fee,
+                total_fee=total_fee,
+                net_profit=net_profit,
+                trade_type='강제청산'
+            )
+            
+            # 로그 (먼저 추정값, 몇 초 뒤 바이낸스 실제 값)
+            profit_sign = '+' if net_profit >= 0 else '-'
+            self.add_log(coin, side, f"🛑 강제 청산!")
+            self.add_log(coin, side, f"   (추정) 수익: ${pnl_usd:.2f} | 수수료: -${total_fee:.3f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
+
+            def _actual_log(c=coin, sd=side):
+                try:
+                    time.sleep(1)
+                    bd = self.api.get_last_trade_info(c['symbol'])
+                    if not bd or not bd.get('realized_pnl'):
+                        return
+                    fund = None
+                    if bd.get('open_time') and bd.get('close_time'):
+                        fund = self.api.get_funding_between(c['symbol'], bd['open_time'], bd['close_time'])
+                    net = bd['realized_pnl'] - bd['commission'] + (fund or 0)
+                    self.add_log(c, sd, f"   📊 바이낸스 실제: 실현 ${bd['realized_pnl']:+.2f} | 수수료 -${bd['commission']:.3f}"
+                                       + (f" | 펀딩 {'+' if fund > 0 else '-'}${abs(fund):.3f}" if fund else "")
+                                       + f" | 순수익 {'+' if net >= 0 else '-'}${abs(net):.2f}")
+                except Exception as e:
+                    print(f"[강제청산 실제값 조회 실패] {e}")
+            threading.Thread(target=_actual_log, daemon=True).start()
+            
+            # 통계 업데이트
+            self.update_stats(coin)
+        else:
+            # 포지션 없으면 그냥 청산 시도
+            self.api.close_position(coin['symbol'])
+            self.add_log(coin, side, f"🛑 강제 청산 (포지션 없음)")
+        
+        # 🔥 진입 금지 (active = False)
+        coin[f'{key}_active'] = False
+        
+        # 🔥 봇 정지
+        if id(coin) in self.bots and key in self.bots[id(coin)]:
+            self.bots[id(coin)][key].stop()
+        
+        # 🔥 청산 플래그 설정 (포지션이 사라질 때까지)
+        coin['is_closing'] = True
+        
+        # 🔥 ROI 초기화 ("-"로 표시)
+        def _clear_roi_labels(c=coin, k=key):
+            try:
+                if 'labels' in c and f'{k}_current_roi' in c['labels']:
+                    c['labels'][f'{k}_current_roi'].config(text="현재: -", fg='#ffffff')
+                    c['labels'][f'{k}_max_roi'].config(text="최고: -")
+                    c['labels'][f'{k}_min_roi'].config(text="최저: -")
+            except tk.TclError:
+                pass
+        self._after_ui(_clear_roi_labels)
+        
+        # 🔥 ROI 데이터 초기화 (다음 진입을 위해)
+        if key == 'long':
+            coin['roi']['long_entry'] = None
+            coin['roi']['long_current'] = 0
+            coin['roi']['long_max'] = 0
+            coin['roi']['long_min'] = 0
+            coin['restart_entry_long'] = None
+            coin['target_usdt_long'] = 0
+            coin['entry_tp_long'] = None
+            coin['tp_reached_long'] = False
+            coin['entry_fee_long'] = 0
+        else:  # short
+            coin['roi']['short_entry'] = None
+            coin['roi']['short_current'] = 0
+            coin['roi']['short_max'] = 0
+            coin['roi']['short_min'] = 0
+            coin['restart_entry_short'] = None
+            coin['target_usdt_short'] = 0
+            coin['entry_tp_short'] = None
+            coin['tp_reached_short'] = False
+            coin['entry_fee_short'] = 0
+        
+        # 플래그 초기화
+        coin['last_close_time'] = None
+        coin['is_entering_long'] = False; coin['is_entering_short'] = False
+        coin['warned_position_exists'] = False
+        coin['prev_signals'] = {
+            'ut_long': None,
+            'ut_short': None,
+            'ema_long': None,
+            'ema_short': None,
+            'long_signal': None,
+            'short_signal': None
+        }
+        
+        return f"{side} 포지션 청산 완료!\n\n진입이 금지되었습니다.\n📝 거래 기록 저장됨\n\n재시작하려면 '▶️ 시작' 버튼을 눌러주세요."
+
     def create_panel(self, parent, coin, side):
         color = '#1a3d1a' if side == 'LONG' else '#3d1a1a'
         fg_color = '#00ff00' if side == 'LONG' else '#ff0000'
@@ -7105,306 +7454,18 @@ class App:
         
         def start():
             def _start_thread():
-                
-                coin[f'{key}_active'] = True
-                if coin.pop('halted_reason', None):     # 정지됐던 코인을 사용자가 다시 시작
-                    coin.pop('halted_at', None)
-                    self._refresh_running_state()
-                
-                # 🔄 완전 초기화 (이전 데이터 제거!)
-                coin['last_close_time'] = None
-                coin['is_entering_long'] = False; coin['is_entering_short'] = False
-                coin['is_closing'] = False
-                coin['warned_position_exists'] = False
-                coin['prev_signals'] = {
-                    'ut_long': None,
-                    'ut_short': None,
-                    'ema_long': None,
-                    'ema_short': None,
-                    'long_signal': None,
-                    'short_signal': None
-                }
-                
-                # 🔥 완전히 새로 시작! (이전 포지션 정보 무시!)
-                position = self.api.get_position(coin['symbol'])
-                
-                if key == 'long':
-                    coin['roi']['long_entry'] = None
-                    coin['roi']['long_current'] = 0
-                    coin['roi']['long_max'] = 0
-                    coin['roi']['long_min'] = 0
-                    coin['restart_entry_long'] = None  # 무조건 None!
-                    coin['chart_entry_long'] = None  # 🔥🔥🔥 차트 진입가도 초기화!
-                    coin['target_usdt_long'] = 0
-                    coin['entry_tp_long'] = None
-                    coin['tp_reached_long'] = False
-                    coin['entry_fee_long'] = 0  # 🔥 수수료도 초기화!
-                    
-                    # 🔥 UI 즉시 업데이트 (화면에 - 표시!)
-                    try:
-                        if 'labels' in coin and 'long_current_roi' in coin['labels']:
-                            coin['labels']['long_current_roi'].config(text="현재: -", fg='#ffffff')
-                            coin['labels']['long_max_roi'].config(text="최고: -")
-                            coin['labels']['long_min_roi'].config(text="최저: -")
-                    except Exception as e:
-                        print(f"⚠️ UI 업데이트 실패: {e}")
-                    
-                    if position and position['side'] == 'long':
-                        print(f"[{coin['symbol']}] LONG 시작 - 포지션 있음 (진입가 무시, ROI 0%부터)")
-                    else:
-                        print(f"[{coin['symbol']}] LONG 시작 - ROI 0%부터")
-                        
-                else:  # short
-                    coin['roi']['short_entry'] = None
-                    coin['roi']['short_current'] = 0
-                    coin['roi']['short_max'] = 0
-                    coin['roi']['short_min'] = 0
-                    coin['restart_entry_short'] = None  # 무조건 None!
-                    coin['chart_entry_short'] = None  # 🔥🔥🔥 차트 진입가도 초기화!
-                    coin['target_usdt_short'] = 0
-                    coin['entry_tp_short'] = None
-                    coin['tp_reached_short'] = False
-                    coin['entry_fee_short'] = 0  # 🔥 수수료도 초기화!
-                    
-                    # 🔥 UI 즉시 업데이트 (화면에 - 표시!)
-                    try:
-                        if 'labels' in coin and 'short_current_roi' in coin['labels']:
-                            coin['labels']['short_current_roi'].config(text="현재: -", fg='#ffffff')
-                            coin['labels']['short_max_roi'].config(text="최고: -")
-                            coin['labels']['short_min_roi'].config(text="최저: -")
-                    except Exception as e:
-                        print(f"⚠️ UI 업데이트 실패: {e}")
-                    
-                    if position and position['side'] == 'short':
-                        print(f"[{coin['symbol']}] SHORT 시작 - 포지션 있음 (진입가 무시, ROI 0%부터)")
-                    else:
-                        print(f"[{coin['symbol']}] SHORT 시작 - ROI 0%부터")
-                
-                if id(coin) not in self.bots:
-                    self.bots[id(coin)] = {}
-                
-                # 🔥🔥🔥 기존 봇 완전 정지하고 삭제! (중요!)
-                if key in self.bots[id(coin)]:
-                    print(f"[{coin['symbol']}] {key.upper()} 기존 봇 정지 중...")
-                    self.bots[id(coin)][key].stop()
-                    time.sleep(0.5)  # 완전히 정지될 때까지 대기
-                    del self.bots[id(coin)][key]
-                    print(f"[{coin['symbol']}] {key.upper()} 기존 봇 삭제 완료")
-                
-                # 🔥 항상 완전히 새 봇 생성! (excel_callback 추가)
-                print(f"[{coin['symbol']}] {key.upper()} 새 봇 생성 중...")
-                self.bots[id(coin)][key] = TradingBot(
-                    self.api, coin,
-                    lambda msg, pos_type, c=coin: self.add_log(c, pos_type, msg),
-                    lambda: self.update_stats(coin),
-                    self.save_trade_to_excel,  # 🔥 엑셀 콜백!
-                    bot_type=key,
-                    app=self  # 🔥 App 참조 전달
-                )
-                self.bots[id(coin)][key].start()
-                print(f"[{coin['symbol']}] {key.upper()} 새 봇 시작 완료!")
-                
-                # 즉시 신호 확인 알림
-                df = self.api.get_klines(coin['symbol'], coin['timeframe'])
-                if df is not None and len(df) >= 60:
-                    signals = calc_signals(df, coin)
-
-                    if side == 'LONG':
-                        ut_on = signals.get('ut_position_long', False)
-                        if ut_on and signals['ema_long']:
-                            msg = f"✅ {side} 봇 시작!\n\n현재 진입 조건 충족 상태입니다.\n곧 자동으로 진입됩니다."
-                        else:
-                            ut_status = "✅" if ut_on else "❌"
-                            ema_status = "✅" if signals['ema_long'] else "❌"
-                            msg = f"✅ {side} 봇 시작!\n\nUT Bot: {ut_status}\nEMA 골든크로스: {ema_status}\n\n조건 충족 시 자동 진입됩니다."
-                    else:  # SHORT
-                        ut_on = signals.get('ut_position_short', False)
-                        if ut_on and signals['ema_short']:
-                            msg = f"✅ {side} 봇 시작!\n\n현재 진입 조건 충족 상태입니다.\n곧 자동으로 진입됩니다."
-                        else:
-                            ut_status = "✅" if ut_on else "❌"
-                            ema_status = "✅" if signals['ema_short'] else "❌"
-                            msg = f"✅ {side} 봇 시작!\n\nUT Bot: {ut_status}\nEMA 데드크로스: {ema_status}\n\n조건 충족 시 자동 진입됩니다."
-                    
-                    self.root.after(0, lambda: CustomMessageBox.showinfo("봇 시작", msg))
-                else:
-                    self.root.after(0, lambda: CustomMessageBox.showinfo("시작", f"{side} 봇을 시작합니다!"))
-            
+                msg = self.coin_start_side(coin, side)
+                self.root.after(0, lambda: CustomMessageBox.showinfo("봇 시작", msg))
             # 스레드로 실행 (UI 프리즈 방지)
             threading.Thread(target=_start_thread, daemon=True).start()
-        
+
         def pause():
-            coin[f'{key}_active'] = False
-            if id(coin) in self.bots and key in self.bots[id(coin)]:
-                self.bots[id(coin)][key].stop()
-            
-            # 🔄 플래그 초기화 (재시작 가능하게!)
-            coin['last_close_time'] = None
-            coin['is_entering_long'] = False; coin['is_entering_short'] = False
-            coin['is_closing'] = False
-            coin['warned_position_exists'] = False
-            coin['prev_signals'] = {
-                'ut_long': None,
-                'ut_short': None,
-                'ema_long': None,
-                'ema_short': None,
-                'long_signal': None,
-                'short_signal': None
-            }
-            
-            CustomMessageBox.showinfo("정지", f"{side} 봇을 정지합니다!\n\n📊 통계는 유지됨\n💡 재시작하면 0%부터 시작!")
-        
+            CustomMessageBox.showinfo("정지", self.coin_pause_side(coin, side))
+
         def force_stop():
             if CustomMessageBox.askyesno("강제 청산", f"{side} 포지션을 청산하고 진입을 금지하시겠습니까?\n\n※ 봇 정지 + 포지션 청산\n※ 재시작하려면 '▶️ 시작' 버튼을 눌러주세요."):
-                # 수동 청산 전 포지션 정보 가져오기
-                position = self.api.get_position(coin['symbol'])
-                if position:
-                    pnl_usd = position['pnl']
-                    entry_price = position['entry_price']
-                    
-                    # 🔥 현재가 조회
-                    df = self.api.get_klines(coin['symbol'], coin['timeframe'], limit=1)
-                    current_price = float(df['close'].iloc[-1]) if df is not None and len(df) > 0 else entry_price
-                    
-                    # 🔥 ROI 계산
-                    if position['side'] == 'long':
-                        roi_pct = ((current_price - entry_price) / entry_price) * 100 * coin['leverage']
-                    else:
-                        roi_pct = ((entry_price - current_price) / entry_price) * 100 * coin['leverage']
-                    
-                    # 🔥 수수료 계산
-                    position_size = coin['amount'] * coin['leverage']
-                    entry_fee = coin.get(f'entry_fee_{key}', position_size * FEE_RATE)
-                    close_fee = position_size * FEE_RATE
-                    total_fee = entry_fee + close_fee
-                    net_profit = pnl_usd - total_fee
-                    
-                    # 통계 업데이트 (순수익 기준!)
-                    refund_entry_charge(coin, key)  # 진입 때 미리 뺀 수수료는 되돌리고 합계로 한 번만
-                    if side == 'LONG':
-                        coin['stats']['long_count'] += 1
-                        if net_profit > 0:
-                            coin['stats']['long_win'] += 1
-                        else:
-                            coin['stats']['long_loss'] += 1
-                        coin['stats']['long_profit'] += net_profit
-                        coin['stats']['total_pnl'] += net_profit
-                        coin['stats']['long_fee'] = coin['stats'].get('long_fee', 0) + total_fee
-                        coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
-                    else:  # SHORT
-                        coin['stats']['short_count'] += 1
-                        if net_profit > 0:
-                            coin['stats']['short_win'] += 1
-                        else:
-                            coin['stats']['short_loss'] += 1
-                        coin['stats']['short_profit'] += net_profit
-                        coin['stats']['total_pnl'] += net_profit
-                        coin['stats']['short_fee'] = coin['stats'].get('short_fee', 0) + total_fee
-                        coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
-                    
-                    # 청산
-                    self.api.close_position(coin['symbol'])
-                    
-                    # 🔥 엑셀 저장
-                    self.save_trade_to_excel(
-                        coin=coin,
-                        position_type=side,
-                        entry_amount=coin['amount'],
-                        leverage=coin['leverage'],
-                        tp_pct=coin.get(f'entry_tp_{key}', 0),
-                        sl_pct=0,
-                        roi_pct=roi_pct,
-                        profit_usdt=pnl_usd if pnl_usd > 0 else 0,
-                        loss_usdt=abs(pnl_usd) if pnl_usd < 0 else 0,
-                        entry_fee=entry_fee,
-                        close_fee=close_fee,
-                        total_fee=total_fee,
-                        net_profit=net_profit,
-                        trade_type='강제청산'
-                    )
-                    
-                    # 로그 (먼저 추정값, 몇 초 뒤 바이낸스 실제 값)
-                    profit_sign = '+' if net_profit >= 0 else '-'
-                    self.add_log(coin, side, f"🛑 강제 청산!")
-                    self.add_log(coin, side, f"   (추정) 수익: ${pnl_usd:.2f} | 수수료: -${total_fee:.3f} | 순수익: {profit_sign}${abs(net_profit):.2f}")
+                CustomMessageBox.showinfo("강제 청산", self.coin_force_stop_side(coin, side))
 
-                    def _actual_log(c=coin, sd=side):
-                        try:
-                            time.sleep(1)
-                            bd = self.api.get_last_trade_info(c['symbol'])
-                            if not bd or not bd.get('realized_pnl'):
-                                return
-                            fund = None
-                            if bd.get('open_time') and bd.get('close_time'):
-                                fund = self.api.get_funding_between(c['symbol'], bd['open_time'], bd['close_time'])
-                            net = bd['realized_pnl'] - bd['commission'] + (fund or 0)
-                            self.add_log(c, sd, f"   📊 바이낸스 실제: 실현 ${bd['realized_pnl']:+.2f} | 수수료 -${bd['commission']:.3f}"
-                                               + (f" | 펀딩 {'+' if fund > 0 else '-'}${abs(fund):.3f}" if fund else "")
-                                               + f" | 순수익 {'+' if net >= 0 else '-'}${abs(net):.2f}")
-                        except Exception as e:
-                            print(f"[강제청산 실제값 조회 실패] {e}")
-                    threading.Thread(target=_actual_log, daemon=True).start()
-                    
-                    # 통계 업데이트
-                    self.update_stats(coin)
-                else:
-                    # 포지션 없으면 그냥 청산 시도
-                    self.api.close_position(coin['symbol'])
-                    self.add_log(coin, side, f"🛑 강제 청산 (포지션 없음)")
-                
-                # 🔥 진입 금지 (active = False)
-                coin[f'{key}_active'] = False
-                
-                # 🔥 봇 정지
-                if id(coin) in self.bots and key in self.bots[id(coin)]:
-                    self.bots[id(coin)][key].stop()
-                
-                # 🔥 청산 플래그 설정 (포지션이 사라질 때까지)
-                coin['is_closing'] = True
-                
-                # 🔥 ROI 초기화 ("-"로 표시)
-                if 'labels' in coin and f'{key}_current_roi' in coin['labels']:
-                    coin['labels'][f'{key}_current_roi'].config(text="현재: -", fg='#ffffff')
-                    coin['labels'][f'{key}_max_roi'].config(text="최고: -")
-                    coin['labels'][f'{key}_min_roi'].config(text="최저: -")
-                
-                # 🔥 ROI 데이터 초기화 (다음 진입을 위해)
-                if key == 'long':
-                    coin['roi']['long_entry'] = None
-                    coin['roi']['long_current'] = 0
-                    coin['roi']['long_max'] = 0
-                    coin['roi']['long_min'] = 0
-                    coin['restart_entry_long'] = None
-                    coin['target_usdt_long'] = 0
-                    coin['entry_tp_long'] = None
-                    coin['tp_reached_long'] = False
-                    coin['entry_fee_long'] = 0
-                else:  # short
-                    coin['roi']['short_entry'] = None
-                    coin['roi']['short_current'] = 0
-                    coin['roi']['short_max'] = 0
-                    coin['roi']['short_min'] = 0
-                    coin['restart_entry_short'] = None
-                    coin['target_usdt_short'] = 0
-                    coin['entry_tp_short'] = None
-                    coin['tp_reached_short'] = False
-                    coin['entry_fee_short'] = 0
-                
-                # 플래그 초기화
-                coin['last_close_time'] = None
-                coin['is_entering_long'] = False; coin['is_entering_short'] = False
-                coin['warned_position_exists'] = False
-                coin['prev_signals'] = {
-                    'ut_long': None,
-                    'ut_short': None,
-                    'ema_long': None,
-                    'ema_short': None,
-                    'long_signal': None,
-                    'short_signal': None
-                }
-                
-                CustomMessageBox.showinfo("강제 청산", f"{side} 포지션 청산 완료!\n\n진입이 금지되었습니다.\n📝 거래 기록 저장됨\n\n재시작하려면 '▶️ 시작' 버튼을 눌러주세요.")
-        
         def force_entry():
             if CustomMessageBox.askyesno("강제 진입", 
                 f"{side} 포지션을 강제로 진입하시겠습니까?\n\n※ 기존 포지션이 있으면 청산 후 진입합니다.\n※ 신호 무시하고 즉시 진입합니다.\n※ 통계에 포함됩니다."):
@@ -7779,6 +7840,12 @@ class App:
     def add_log(self, coin, side, message):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_line = f"[{timestamp}] {message}"
+        tg = getattr(self, 'telegram', None)
+        if tg is not None:
+            try:
+                tg.on_log(coin, side, message)     # 📱 진입·익절·스위칭·청산·오류 줄은 텔레그램 알림
+            except Exception:
+                pass
         
         key = side.lower()
         
