@@ -2327,6 +2327,10 @@ class TradingBot:
             # 봇 TP는 +1.5%에서만 체결되므로 손실이면 TP일 수 없다.
             # 실현 손익을 우선 쓰고, 그것도 없으면 마지막 미실현 손익으로 본다.
             reason = 'tp' if pnl_usd > 0 else 'manual'
+            if pnl_usd > 0 and self.config.get('exit_mode', 'tp') == 'switch' and not self.config.get(f'tp_algo_{side}'):
+                reason = 'manual'    # 🔁 스위칭만 + 걸린 TP 주문 없음 → 익절일 수 없다
+            elif pnl_usd < 0 and self.config['amount'] > 0 and -pnl_usd >= 0.8 * self.config['amount']:
+                reason = 'liq'       # 증거금을 거의 다 잃음 = 강제청산 (수동청산으로 보고 코인을 멈추지 않게)
             src = '실현손익' if realized_ok else '미실현손익(추정)'
             print(f"[청산 원인 추정] {symbol}: 주문조회 실패 → {src} {pnl_usd:+.2f} 기준 '{reason}'")
 
@@ -2729,8 +2733,18 @@ class TradingBot:
         return 180 * min(5, 1 + getattr(self, '_tp_watch_fails', 0))
 
     def _ensure_exchange_tp(self, pos):
-        """포지션이 있는데 거래소 TP 주문이 없으면 다시 건다 (프로그램이 꺼져도 익절되게)"""
+        """포지션이 있는데 거래소 TP 주문이 없으면 다시 건다 (프로그램이 꺼져도 익절되게).
+        🔁 '스위칭만'이면 반대로 — 남아 있는 TP 주문이 있으면 취소한다
+        (청산 방식을 바꾼 순간 취소가 실패했거나, 막 들어간 포지션의 TP 가 바꾼 뒤에 걸린 경우)"""
         if self.config.get('exit_mode', 'tp') == 'switch':
+            if self.api.has_open_tp(self.config['symbol']) is True:
+                try:
+                    self.api.cancel_all_orders(self.config['symbol'])
+                    self.config[f"tp_algo_{pos['side']}"] = False
+                    self.log(f"🧹 청산 방식이 스위칭만인데 거래소 TP 주문이 남아 있어 취소했습니다 (반대 신호까지 보유)",
+                             pos['side'].upper())
+                except Exception as e:
+                    print(f"[🧹 TP 취소 실패] {self.config['symbol']}: {e}")
             return
         side = pos['side']
         existing = self.api.has_open_tp(self.config['symbol'])
@@ -4639,6 +4653,13 @@ class App:
         except Exception:
             return {}
 
+    def _saved_paused(self):
+        try:
+            with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
+                return dict(json.load(f).get('paused') or {})
+        except Exception:
+            return {}
+
     def _saved_halted(self):
         try:
             with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
@@ -4651,7 +4672,9 @@ class App:
         try:
             state = {'running': True, 'timestamp': time.time(), 'halted': self._halted_coins(),
                      'tp_block': {c['symbol']: c['tp_block_bar'] for c in self.coins if c.get('tp_block_bar')},
-                     'liq_block': {c['symbol']: c['liq_block'] for c in self.coins if c.get('liq_block')}}
+                     'liq_block': {c['symbol']: c['liq_block'] for c in self.coins if c.get('liq_block')},
+                     'paused': {c['symbol']: [k for k in ('long', 'short') if c.get(f'{k}_paused')]
+                                for c in self.coins if c.get('long_paused') or c.get('short_paused')}}
             with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
@@ -4937,6 +4960,7 @@ class App:
                     print(f"  🔍 [DEBUG] 기존 LONG 봇 없음 (새로 시작)")
             
                 coin['long_active'] = True
+                coin.pop('long_paused', None)     # 전체 시작 = ⏸️ 정지도 해제
                 # 🛑 수동/강제청산으로 정지됐던 상태 해제
                 if coin.pop('halted_reason', None):
                     coin.pop('halted_at', None)
@@ -5036,6 +5060,7 @@ class App:
                     print(f"  🔍 [DEBUG] 기존 SHORT 봇 없음 (새로 시작)")
             
                 coin['short_active'] = True
+                coin.pop('short_paused', None)
             
                 # 🔥 완전히 새 봇 생성!
                 self.bots[id(coin)]['short'] = TradingBot(
@@ -5163,6 +5188,10 @@ class App:
             count = 0
             reconnected_positions = []
             halted = self._saved_halted()
+            _paused = self._saved_paused()
+            for c in self.coins:      # ⏸️ 정지해 둔 방향 (껐다 켜도 유지)
+                for k in _paused.get(c['symbol'], []):
+                    c[f'{k}_paused'] = True
             for c in self.coins:      # 이번 실행 중에 멈춘 코인도 포함
                 if c.get('halted_reason') and not c.get('long_active') and not c.get('short_active'):
                     halted.setdefault(c['symbol'], c['halted_reason'])
@@ -5255,6 +5284,9 @@ class App:
                 # 🔥 LONG 봇 시작
                 if not coin['long_active']:
                     coin['long_active'] = True
+                    if coin.get('long_paused'):    # ⏸️ 정지해 둔 방향 — 봇은 띄워 포지션은 관리, 새 진입은 안 함
+                        coin['long_active'] = False
+                        self.add_log(coin, 'LONG', "⏸️ 정지 상태 유지 — 새 진입 안 함 (들고 있는 포지션은 관리). 다시 하려면 ▶️ 시작")
                 
                     # 신호 초기화
                     if position and position['side'] == 'long':
@@ -5315,6 +5347,9 @@ class App:
                 # 🔥 SHORT 봇 시작
                 if not coin['short_active']:
                     coin['short_active'] = True
+                    if coin.get('short_paused'):    # ⏸️ 정지해 둔 방향 — 봇은 띄워 포지션은 관리, 새 진입은 안 함
+                        coin['short_active'] = False
+                        self.add_log(coin, 'SHORT', "⏸️ 정지 상태 유지 — 새 진입 안 함 (들고 있는 포지션은 관리). 다시 하려면 ▶️ 시작")
                 
                     # 신호 초기화
                     if position and position['side'] == 'short':
@@ -7240,6 +7275,8 @@ class App:
         if coin.get('liq_block') == key:        # 직접 ▶️ 시작 = 지금 신호로 바로 들어가도 됨 (청산 후 다음 신호 대기 해제)
             coin['liq_block'] = None
             self._refresh_running_state()
+        if coin.pop(f'{key}_paused', None):     # ⏸️ 정지 해제
+            self._refresh_running_state()
         
         # 🔄 완전 초기화 (이전 데이터 제거!)
         coin['last_close_time'] = None
@@ -7366,12 +7403,13 @@ class App:
     
 
     def coin_pause_side(self, coin, side):
-        """⏸️ 정지 — 진입만 멈춤 (포지션은 그대로)"""
+        """⏸️ 정지 — 새 진입만 멈춤. 봇 스레드는 살려 둬서, 들고 있는 포지션은 계속 관리한다
+        (반대 신호 스위칭 청산 · TP 익절). 예전엔 스레드까지 멈춰서 '스위칭만' 모드에선 포지션을 닫을 봇이 없었다."""
         key = side.lower()
         coin[f'{key}_active'] = False
-        if id(coin) in self.bots and key in self.bots[id(coin)]:
-            self.bots[id(coin)][key].stop()
-        
+        coin[f'{key}_paused'] = True     # 껐다 켜도(자동 재연결) 정지 유지
+        self._refresh_running_state()
+
         # 🔄 플래그 초기화 (재시작 가능하게!)
         coin['last_close_time'] = None
         coin['is_entering_long'] = False; coin['is_entering_short'] = False
@@ -7386,7 +7424,10 @@ class App:
             'short_signal': None
         }
         
-        return f"{side} 봇을 정지합니다!\n\n📊 통계는 유지됨\n💡 재시작하면 0%부터 시작!"
+        self.add_log(coin, side, f"⏸️ {side} 정지 — 새 진입 안 함 (들고 있는 포지션은 반대 신호/TP 로 계속 청산 관리)")
+        return (f"{side} 새 진입을 멈춥니다!\n\n"
+                f"들고 있는 {side} 포지션이 있으면 그대로 관리합니다\n(반대 신호 스위칭 청산 · TP 익절).\n\n"
+                f"📊 통계는 유지됨\n💡 다시 하려면 '▶️ 시작'")
 
     def coin_force_stop_side(self, coin, side):
         """🛑 강제청산 — 포지션만 청산. 봇은 멈추지 않고, 이 방향은 지금 신호가 끝난 뒤 다음 신호(UT+EMA)에서 진입.
@@ -7836,24 +7877,32 @@ class App:
                         coin[f'_fee_charged_{side.lower()}'] = entry_fee  # 청산 때 중복 차감 방지용
                         
                         # 🔥🔥🔥 거래소 TP 주문 등록 (설정가 도달 시 거래소가 즉시 청산!)
-                        try:
-                            tp_base = filled_price or current_price
-                            if side == 'LONG':
-                                tp_price = tp_base * (1 + dynamic_tp / 100)
-                            else:
-                                tp_price = tp_base * (1 - dynamic_tp / 100)
-                            tp_result = self.api.create_tp_order(coin['symbol'], side.lower(), tp_price)
-                            if tp_result:
-                                self.add_log(coin, side, f"   📌 거래소 TP 주문 등록: ${self.api.round_price(coin['symbol'], tp_price)}")
-                            else:
-                                self.add_log(coin, side, f"   ⚠️ TP 주문 등록 실패 → 봇 폴링으로 익절 처리")
-                        except Exception as e:
-                            print(f"[{coin['symbol']}] 강제 진입 TP 주문 오류: {e}")
+                        #   🔁 '스위칭만' 이면 걸지 않는다 (반대 신호까지 보유)
+                        switch_only = coin.get('exit_mode', 'tp') == 'switch'
+                        coin[f'tp_algo_{side.lower()}'] = False
+                        if switch_only:
+                            self.add_log(coin, side, f"   🔁 청산 방식: 스위칭만 → TP 주문 없음 (반대신호까지 보유)")
+                        else:
+                            try:
+                                tp_base = filled_price or current_price
+                                if side == 'LONG':
+                                    tp_price = tp_base * (1 + dynamic_tp / 100)
+                                else:
+                                    tp_price = tp_base * (1 - dynamic_tp / 100)
+                                tp_result = self.api.create_tp_order(coin['symbol'], side.lower(), tp_price)
+                                if tp_result:
+                                    coin[f'tp_algo_{side.lower()}'] = True
+                                    self.add_log(coin, side, f"   📌 거래소 TP 주문 등록: ${self.api.round_price(coin['symbol'], tp_price)}")
+                                else:
+                                    self.add_log(coin, side, f"   ⚠️ TP 주문 등록 실패 → 봇 폴링으로 익절 처리")
+                            except Exception as e:
+                                print(f"[{coin['symbol']}] 강제 진입 TP 주문 오류: {e}")
 
                         self.add_log(coin, side, f"🔥 강제 진입! ${fmt_px(current_price)} | {qty}개 | {coin['timeframe']} | {coin['leverage']}x")
                         if market_type != '기본':
                             self.add_log(coin, side, f"   📊 ADX: {adx_value:.1f} ({market_type}) → TP {dynamic_tp}%")
-                        self.add_log(coin, side, f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_roi:.2f}% → 💰 ${target_usdt:.2f}")
+                        if not switch_only:
+                            self.add_log(coin, side, f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_roi:.2f}% → 💰 ${target_usdt:.2f}")
                         self.add_log(coin, side, f"   💸 진입 수수료: ${entry_fee:.3f} ({FEE_RATE*100:.2f}%) (청산 시 합산)")
                         self.add_log(coin, side, f"   🛡️ SL: AUTO (스위칭)")
                         
@@ -8167,7 +8216,8 @@ class App:
                         coin['market_type_label'].config(text=f"({market_type})", fg=market_color)
                         
                         # 🔥 TP 라벨 업데이트 (동적 TP 값 표시)
-                        coin['dynamic_tp_label'].config(text=f"TP: {current_tp}%")
+                        coin['dynamic_tp_label'].config(text="TP: 없음 (스위칭만)" if coin.get('exit_mode', 'tp') == 'switch'
+                                                        else f"TP: {current_tp}%")
                         
                         # 막대바 그리기
                         canvas = coin['adx_canvas']

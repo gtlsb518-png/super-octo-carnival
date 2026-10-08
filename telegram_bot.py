@@ -301,7 +301,7 @@ class TelegramBot:
                 elif cmd == 'pause':
                     for s in ('LONG', 'SHORT'):
                         self.app.coin_pause_side(coin, s)
-                    note = '⏸️ 롱·숏 정지 (포지션은 그대로)'
+                    note = '⏸️ 롱·숏 새 진입 멈춤 — 들고 있는 포지션은 계속 관리 (반대 신호 스위칭·TP). 껐다 켜도 유지'
                 else:   # closeyes
                     pos = self.app.api.get_position(coin['symbol'])
                     if not pos:
@@ -484,7 +484,9 @@ class TelegramBot:
             tp = c.get(f'entry_tp_{k}')
             if isinstance(tp, (tuple, list)):
                 tp = tp[0] if tp else None
-            if tp:
+            if c.get('exit_mode', 'tp') == 'switch':
+                L.append("   🔁 스위칭만 — 목표 TP 없음, 반대 신호 2개(봉 마감)까지 보유")
+            elif tp:
                 tp = float(tp)
                 tgt = p['entry_price'] * (1 + tp / 100) if k == 'long' else p['entry_price'] * (1 - tp / 100)
                 L.append(f"   목표 TP ${_px(tgt)} (가격 {tp}% · ROI {tp * float(p.get('leverage') or c.get('leverage') or 1):.2f}%)"
