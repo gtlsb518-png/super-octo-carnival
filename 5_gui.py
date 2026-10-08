@@ -2636,9 +2636,10 @@ class TradingBot:
             print(f"[⏳ 다음 봉 대기] {self.config['symbol']}: 이번 봉에 익절 기록 있음 (재시작 전/꺼진 사이)")
 
     # ==================== 💀 강제청산 후 다음 신호 대기 ====================
-    def _set_liq_block(self, side, announce=True):
-        """강제청산된 방향(side)은 지금 이어지는 신호에서 다시 안 들어간다. 신호가 끝나면(봉 마감 기준) 풀린다.
-        반대 신호는 바로 진입 가능."""
+    def _set_liq_block(self, side, announce=True, why='liq'):
+        """강제청산된(또는 🛑 버튼으로 직접 청산한) 방향(side)은 지금 이어지는 신호에서 다시 안 들어간다.
+        신호가 끝나면(봉 마감 기준) 풀린다. 반대 신호는 바로 진입 가능.
+        why: 'liq' 바이낸스 강제청산 / 'manual' 🛑 강제청산 버튼 / 'restore' 껐다 켜서 이어받음"""
         self.config['liq_block'] = side
         self.config['_liq_block_logged'] = False
         try:
@@ -2648,10 +2649,15 @@ class TradingBot:
             pass
         if announce:
             S = side.upper()
+            head = {'liq': '⏸️ 강제청산 후 멈추지 않고 다음 신호를 기다립니다',
+                    'manual': '⏸️ 직접 청산 — 봇은 멈추지 않고 다음 신호를 기다립니다',
+                    'restore': '⏸️ 청산 후 다음 신호 대기를 이어갑니다'}.get(why, '⏸️ 청산 후 다음 신호를 기다립니다')
             for t in ('LONG', 'SHORT'):
-                self.log(f"⏸️ 강제청산 후 멈추지 않고 다음 신호를 기다립니다 — 지금 {S} 신호에서는 다시 안 들어가고, "
+                self.log(f"{head} — 지금 {S} 신호에서는 다시 안 들어가고, "
                          f"{S} 신호가 끝난 뒤 새 신호(또는 반대 신호)가 뜨면 진입", t)
-        print(f"[💀→⏸️ 다음 신호 대기] {self.config['symbol']} {side.upper()} 강제청산 — 같은 신호 재진입 막음")
+            if why == 'manual':
+                self.log(f"   진입을 완전히 막으려면 ⏸️ 정지 버튼을 누르세요", S)
+        print(f"[⏸️ 다음 신호 대기] {self.config['symbol']} {side.upper()} ({why}) — 같은 신호 재진입 막음")
 
     def _liq_block_refresh(self):
         """매 루프 (포지션 있어도) — 강제청산된 쪽 봇만, 자기 신호로 '그 신호가 끝났는지' 본다.
@@ -2672,7 +2678,7 @@ class TradingBot:
                 self.app._refresh_running_state()
         except Exception:
             pass
-        self.log(f"🔓 강제청산된 {blk.upper()} 신호가 끝났습니다 → 다음 신호부터 다시 진입", blk.upper())
+        self.log(f"🔓 청산된 {blk.upper()} 신호가 끝났습니다 → 다음 신호부터 다시 진입", blk.upper())
         print(f"[🔓 대기 해제] {self.config['symbol']} {blk.upper()} 신호 끝 → 다음 신호부터 진입")
 
     def _liq_block_check(self, signals=None):
@@ -2692,17 +2698,19 @@ class TradingBot:
             return
         self.config['_liq_restore_at'] = time.time()
         side = None
+        why = 'restore'
         try:
             side = self.app._saved_liq_block().get(self.config['symbol']) if getattr(self, 'app', None) else None
         except Exception:
             side = None
         if side not in ('long', 'short'):
+            why = 'liq'
             r = self.api.last_liq_fill(self.config['symbol'])
             side = r[0] if r else None
             if side:
                 self.log(f"💀 꺼져 있는 사이 {side.upper()} 강제청산 기록이 있습니다", side.upper())
         if side in ('long', 'short'):
-            self._set_liq_block(side, announce=True)
+            self._set_liq_block(side, announce=True, why=why)
 
     def _reentry_blocked(self):
         b = self.config.get('tp_block_bar')
@@ -7219,6 +7227,9 @@ class App:
         if coin.pop('halted_reason', None):     # 정지됐던 코인을 사용자가 다시 시작
             coin.pop('halted_at', None)
             self._refresh_running_state()
+        if coin.get('liq_block') == key:        # 직접 ▶️ 시작 = 지금 신호로 바로 들어가도 됨 (청산 후 다음 신호 대기 해제)
+            coin['liq_block'] = None
+            self._refresh_running_state()
         
         # 🔄 완전 초기화 (이전 데이터 제거!)
         coin['last_close_time'] = None
@@ -7368,10 +7379,21 @@ class App:
         return f"{side} 봇을 정지합니다!\n\n📊 통계는 유지됨\n💡 재시작하면 0%부터 시작!"
 
     def coin_force_stop_side(self, coin, side):
-        """🛑 강제청산 — 포지션 청산 + 이 방향 진입 금지 (화면 라벨은 화면 스레드에서 바꾼다)"""
+        """🛑 강제청산 — 포지션만 청산. 봇은 멈추지 않고, 이 방향은 지금 신호가 끝난 뒤 다음 신호(UT+EMA)에서 진입.
+        반대 신호는 바로 진입. 진입을 완전히 막는 건 ⏸️ 정지 버튼. (화면 라벨은 화면 스레드에서 바꾼다)"""
         key = side.lower()
-        # 수동 청산 전 포지션 정보 가져오기
+        # 청산하는 동안 '청산 중' 표시 — 돌고 있는 봇이 '밖에서 닫힘(수동청산)'으로 오인해 코인을 멈추지 않게
+        coin['is_closing'] = True
+        coin['is_closing_start'] = t_close = time.time()
         position = self.api.get_position(coin['symbol'])
+        if position and position.get('side') != key:
+            coin['is_closing'] = False
+            other = position['side'].upper()
+            return f"{side} 포지션이 없습니다.\n\n지금은 {other} 포지션을 들고 있습니다.\n{other} 쪽 🛑강제청산 버튼을 눌러주세요."
+        if not position:
+            coin['is_closing'] = False
+            self.add_log(coin, side, f"🛑 강제 청산 — {side} 포지션 없음 (봇은 그대로)")
+            return f"{side} 포지션이 없습니다.\n\n봇은 그대로 돌아갑니다.\n진입을 막으려면 '⏸️ 정지' 버튼을 눌러주세요."
         if position:
             pnl_usd = position['pnl']
             entry_price = position['entry_price']
@@ -7417,8 +7439,15 @@ class App:
                 coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
             
             # 청산
-            self.api.close_position(coin['symbol'])
-            
+            if not self.api.close_position(coin['symbol']):
+                coin['is_closing'] = False
+                self.add_log(coin, side, f"❌ 강제 청산 실패 — 다시 누르거나 바이낸스에서 직접 청산하세요")
+                return f"{side} 청산에 실패했습니다.\n\n다시 누르거나 바이낸스에서 직접 청산해 주세요."
+            coin['has_position'] = False
+            coin['_cached_position'] = None
+            coin[f'entry_tp_{key}'] = None   # 다른 봇 스레드가 이 청산을 '밖에서 닫힘'으로 다시 기록하지 않게
+            coin[f'tp_algo_{key}'] = False
+
             # 🔥 엑셀 저장
             self.save_trade_to_excel(
                 coin=coin,
@@ -7461,20 +7490,19 @@ class App:
             
             # 통계 업데이트
             self.update_stats(coin)
-        else:
-            # 포지션 없으면 그냥 청산 시도
-            self.api.close_position(coin['symbol'])
-            self.add_log(coin, side, f"🛑 강제 청산 (포지션 없음)")
-        
-        # 🔥 진입 금지 (active = False)
-        coin[f'{key}_active'] = False
-        
-        # 🔥 봇 정지
-        if id(coin) in self.bots and key in self.bots[id(coin)]:
-            self.bots[id(coin)][key].stop()
-        
-        # 🔥 청산 플래그 설정 (포지션이 사라질 때까지)
-        coin['is_closing'] = True
+
+        # ▶️ 봇은 멈추지 않는다 — 이 방향은 지금 신호가 끝난 뒤 다음 신호에서 진입 (진짜 멈추려면 ⏸️ 정지)
+        bot = self.bots.get(id(coin), {}).get(key)
+        waiting = bool(coin.get(f'{key}_active') and bot)
+        if waiting:
+            bot._set_liq_block(key, why='manual')
+
+        # '청산 중' 표시는 몇 초 뒤 해제 (그 사이 다른 봇 스레드가 옛 포지션 값을 읽어 와도 수동청산으로 오인하지 않게)
+        def _release(c=coin, t0=t_close):
+            time.sleep(5)
+            if c.get('is_closing_start') == t0:
+                c['is_closing'] = False
+        threading.Thread(target=_release, daemon=True).start()
         
         # 🔥 ROI 초기화 ("-"로 표시)
         def _clear_roi_labels(c=coin, k=key):
@@ -7498,6 +7526,7 @@ class App:
             coin['entry_tp_long'] = None
             coin['tp_reached_long'] = False
             coin['entry_fee_long'] = 0
+            coin['chart_entry_long'] = None
         else:  # short
             coin['roi']['short_entry'] = None
             coin['roi']['short_current'] = 0
@@ -7508,9 +7537,10 @@ class App:
             coin['entry_tp_short'] = None
             coin['tp_reached_short'] = False
             coin['entry_fee_short'] = 0
+            coin['chart_entry_short'] = None
         
         # 플래그 초기화
-        coin['last_close_time'] = None
+        coin['last_close_time'] = time.time()   # 청산 직후 2초는 재진입 안 함 (봇 청산과 같게)
         coin['is_entering_long'] = False; coin['is_entering_short'] = False
         coin['warned_position_exists'] = False
         coin['prev_signals'] = {
@@ -7522,7 +7552,12 @@ class App:
             'short_signal': None
         }
         
-        return f"{side} 포지션 청산 완료!\n\n진입이 금지되었습니다.\n📝 거래 기록 저장됨\n\n재시작하려면 '▶️ 시작' 버튼을 눌러주세요."
+        if waiting:
+            return (f"{side} 포지션 청산 완료!\n📝 거래 기록 저장됨\n\n"
+                    f"봇은 멈추지 않습니다.\n지금 {side} 신호에서는 다시 안 들어가고,\n"
+                    f"신호가 끝난 뒤 다음 신호(UT+EMA)가 뜨면 진입합니다.\n반대 신호는 바로 진입합니다.\n\n"
+                    f"진입을 완전히 막으려면 '⏸️ 정지' 버튼을 눌러주세요.")
+        return f"{side} 포지션 청산 완료!\n📝 거래 기록 저장됨\n\n{side} 봇은 정지 상태라 진입하지 않습니다.\n다시 하려면 '▶️ 시작' 버튼을 눌러주세요."
 
     def create_panel(self, parent, coin, side):
         color = '#1a3d1a' if side == 'LONG' else '#3d1a1a'
@@ -7587,7 +7622,9 @@ class App:
             CustomMessageBox.showinfo("정지", self.coin_pause_side(coin, side))
 
         def force_stop():
-            if CustomMessageBox.askyesno("강제 청산", f"{side} 포지션을 청산하고 진입을 금지하시겠습니까?\n\n※ 봇 정지 + 포지션 청산\n※ 재시작하려면 '▶️ 시작' 버튼을 눌러주세요."):
+            if CustomMessageBox.askyesno("강제 청산", f"{side} 포지션을 시장가로 청산하시겠습니까?\n\n"
+                                         f"※ 봇은 멈추지 않습니다 — 지금 {side} 신호가 끝난 뒤\n   다음 신호(UT+EMA)가 뜨면 다시 진입\n"
+                                         f"※ 진입을 완전히 막으려면 '⏸️ 정지' 버튼"):
                 CustomMessageBox.showinfo("강제 청산", self.coin_force_stop_side(coin, side))
 
         def force_entry():

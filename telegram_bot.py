@@ -287,7 +287,8 @@ class TelegramBot:
                 return
             side = pos['side'].upper()
             self._edit(cid, mid, f"⚠️ {short} {side} 포지션을 시장가로 청산할까요?\n"
-                                 f"청산 후 이 코인 {side} 진입은 금지됩니다 (다시 하려면 ▶️ 시작).",
+                                 f"봇은 멈추지 않고, 지금 {side} 신호가 끝난 뒤 다음 신호에서 다시 진입합니다.\n"
+                                 f"(진입을 완전히 막으려면 ⏸️ 정지)",
                        [[{'text': f'예, {short} 청산', 'callback_data': f'closeyes:{short}'}],
                         [{'text': '아니오', 'callback_data': f'c:{short}'}]])
             return
@@ -306,8 +307,14 @@ class TelegramBot:
                     if not pos:
                         note = 'ℹ️ 포지션이 이미 없습니다'
                     else:
-                        self.app.coin_force_stop_side(coin, pos['side'].upper())
-                        note = f"🛑 {pos['side'].upper()} 청산 완료 — 이 방향 진입 금지 (다시 하려면 ▶️ 시작)"
+                        S = pos['side'].upper()
+                        r = self.app.coin_force_stop_side(coin, S)
+                        if '실패' in r:
+                            note = f"❌ {S} 청산 실패 — 다시 누르거나 바이낸스에서 직접 청산하세요"
+                        elif '멈추지 않습니다' in r:
+                            note = f"🛑 {S} 청산 완료 — 봇은 그대로, {S} 신호가 끝난 뒤 다음 신호에서 진입 (막으려면 ⏸️ 정지)"
+                        else:
+                            note = f"🛑 {S} 청산 완료 — {S} 봇은 정지 상태 (다시 하려면 ▶️ 시작)"
                     time.sleep(1.5)
             except Exception as e:
                 note = f"❌ 실패: {e}"
@@ -396,7 +403,7 @@ class TelegramBot:
             elif c.get('halted_reason') and not c.get('long_active') and not c.get('short_active'):
                 s += f" 정지 — {c['halted_reason']}"
             elif c.get('liq_block'):
-                s += f" 강제청산 후 대기 ({c['liq_block'].upper()} 신호 끝나면 진입)"
+                s += f" 청산 후 대기 ({c['liq_block'].upper()} 신호 끝나면 진입)"
             elif not c.get('long_active') and not c.get('short_active'):
                 s += " 꺼짐"
             else:
@@ -406,7 +413,7 @@ class TelegramBot:
             if c.get('exit_mode', 'tp') == 'switch':
                 s += ' 🔁'
             lines.append(s)
-        lines.append("\n🟢롱 🔴숏 ⚪대기 ⏸️강제청산후대기 🛑정지 ⚫꺼짐 🎯1회매매 🔁스위칭만")
+        lines.append("\n🟢롱 🔴숏 ⚪대기 ⏸️청산후신호대기 🛑정지 ⚫꺼짐 🎯1회매매 🔁스위칭만")
         return '\n'.join(lines), [self._back('s')]
 
     def _screen_pnl(self):
@@ -507,7 +514,7 @@ class TelegramBot:
         st.append(f"🎯1회매매 {'ON' if c.get('one_shot') else 'OFF'}")
         st.append(f"🔁청산 {'스위칭만' if c.get('exit_mode', 'tp') == 'switch' else 'TP+스위칭'}")
         if c.get('liq_block'):
-            st.append(f"⏸️ 강제청산 후 대기({c['liq_block'].upper()})")
+            st.append(f"⏸️ 청산 후 다음 신호 대기({c['liq_block'].upper()})")
         if c.get('halted_reason') and not c.get('long_active') and not c.get('short_active'):
             st.append(f"🛑 정지: {c['halted_reason']}")
         L.append('⚙️ ' + ' · '.join(st))
@@ -565,7 +572,8 @@ class TelegramBot:
         if '스위칭!' in m or '손절 (반대 신호' in m:
             return 'switch'
         if ('강제청산 감지' in m or '수동청산 감지' in m or '봇 정지 —' in m or m.startswith('⏸️ 강제청산 후')
-                or m.startswith('🔓 강제청산된') or '강제 청산!' in m):
+                or m.startswith('⏸️ 직접 청산') or m.startswith('⏸️ 청산 후')
+                or m.startswith('🔓 청산된') or '강제 청산!' in m):
             return 'close'
         if m.startswith('❌'):
             return 'error'
