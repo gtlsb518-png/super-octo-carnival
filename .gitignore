@@ -31,3 +31,4 @@ dist/
 one_shot*.json
 telegram_owner*.json
 telegram_alerts*.json
+exit_mode*.json

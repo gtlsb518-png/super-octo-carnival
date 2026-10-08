@@ -39,7 +39,8 @@ except ValueError:
 _FILE_SUFFIX = '' if PROGRAM_NUMBER == 1 else f'_{PROGRAM_NUMBER}'
 TRADE_HISTORY_FILE = f'trade_history{_FILE_SUFFIX}.xlsx'
 BOT_RUNNING_FILE = f'bot_running{_FILE_SUFFIX}.json'
-ONE_SHOT_FILE = f'one_shot{_FILE_SUFFIX}.json'   # 🎯 1회 매매 버튼 켜 둔 코인 (껐다 켜도 유지)
+ONE_SHOT_FILE = f'one_shot{_FILE_SUFFIX}.json'
+EXIT_MODE_FILE = f'exit_mode{_FILE_SUFFIX}.json'   # 🔁 청산 방식 (TP+스위칭 / 스위칭만) — 껐다 켜도 유지   # 🎯 1회 매매 버튼 켜 둔 코인 (껐다 켜도 유지)
 
 # 번호 붙은 모듈 import
 import importlib
@@ -4330,6 +4331,7 @@ class App:
         self.create_ui()
         self.add_default_coins()  # 기본 10개 코인 추가!
         self._load_one_shot()     # 🎯 1회 매매 켜 둔 코인 복원
+        self._load_exit_mode()    # 🔁 청산 방식 복원
         threading.Thread(target=self.check_coin_units, daemon=True).start()  # 📏 소수점 점검
 
         # 🔌 웹소켓 (1_config.py 의 WEBSOCKET_MODE: off / shadow / on)
@@ -4479,6 +4481,110 @@ class App:
             c['one_shot'] = turn_on
         print(f"🎯 1회 매매 전체 {'ON' if turn_on else 'OFF'} ({len(self.coins)}개 코인)")
         self._one_shot_changed(list(self.coins))
+
+    # ==================== 🔁 청산 방식 (TP+스위칭 / 스위칭만) ====================
+    EXIT_MODE_TEXT = {'tp': 'TP+스위칭', 'switch': '스위칭만'}
+
+    def _load_exit_mode(self):
+        try:
+            with open(EXIT_MODE_FILE, 'r', encoding='utf-8') as f:
+                saved = dict(json.load(f))
+        except Exception:
+            saved = {}
+        for c in self.coins:
+            if saved.get(c['symbol']) in ('tp', 'switch'):
+                c['exit_mode'] = saved[c['symbol']]
+        n = sum(1 for c in self.coins if c.get('exit_mode') == 'switch')
+        if n:
+            print(f"🔁 청산 '스위칭만' 코인 {n}개: "
+                  f"{', '.join(c['symbol'].split('/')[0] for c in self.coins if c.get('exit_mode') == 'switch')}"
+                  f" — TP 없이 반대 신호 2개에 스위칭")
+        self._paint_exit_mode_all()
+
+    def _save_exit_mode(self):
+        try:
+            with open(EXIT_MODE_FILE, 'w', encoding='utf-8') as f:
+                json.dump({c['symbol']: c.get('exit_mode', 'tp') for c in self.coins}, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️ 청산 방식 저장 실패: {e}")
+
+    def _paint_exit_mode(self, coin):
+        b = coin.get('exit_mode_btn')
+        if b is None:
+            return
+        try:
+            sw = coin.get('exit_mode', 'tp') == 'switch'
+            b.config(text=f"🔁 청산: {'스위칭만' if sw else 'TP+스위칭'}",
+                     bg='#996600' if sw else '#2d6a4f', fg='#ffffff')
+        except tk.TclError:
+            pass
+
+    def _paint_exit_mode_all(self):
+        b = getattr(self, 'exit_mode_all_btn', None)
+        if b is None:
+            return
+        n, total = sum(1 for c in self.coins if c.get('exit_mode') == 'switch'), len(self.coins)
+        try:
+            if n == 0:
+                b.config(text="🔁 청산 전체: TP+스위칭", bg='#2d6a4f')
+            elif n == total:
+                b.config(text="🔁 청산 전체: 스위칭만", bg='#996600')
+            else:
+                b.config(text=f"🔁 스위칭만 {n}/{total}", bg='#7a6a2a')
+        except tk.TclError:
+            pass
+
+    def set_exit_mode(self, coin, mode, save=True):
+        """청산 방식 바꾸기. 들고 있는 포지션이 있으면 거래소 TP 주문도 바로 맞춘다
+        (스위칭만 → TP 주문 취소 / TP+스위칭 → TP 주문 다시 걸기)."""
+        mode = 'switch' if mode == 'switch' else 'tp'
+        if coin.get('exit_mode', 'tp') == mode:
+            return
+        coin['exit_mode'] = mode
+        if save:
+            self._save_exit_mode()
+        self._paint_exit_mode(coin)
+        self._paint_exit_mode_all()
+        text = ("🔁 청산 방식: 스위칭만 — TP 없이 들고 있다가 반대 신호 2개(봉 마감)가 뜨면 스위칭"
+                if mode == 'switch' else "🔁 청산 방식: TP+스위칭 — TP 에서 익절, 반대 신호 2개면 스위칭")
+        for side in ('LONG', 'SHORT'):
+            self.add_log(coin, side, text)
+        print(f"🔁 {coin['symbol']} 청산 방식 → {self.EXIT_MODE_TEXT[mode]}")
+
+        def _apply(c=coin, m=mode):
+            try:
+                pos = self.api.get_position(c['symbol'])
+            except Exception:
+                pos = None
+            if not pos:
+                return
+            side = pos['side']
+            if m == 'switch':
+                try:
+                    self.api.cancel_all_orders(c['symbol'])     # 거래소 TP 주문 정리 (포지션은 그대로)
+                    c[f'tp_algo_{side}'] = False
+                    self.add_log(c, side.upper(), "   📌 거래소 TP 주문 취소 — 이제 반대 신호까지 보유")
+                except Exception as e:
+                    print(f"⚠️ {c['symbol']} TP 주문 취소 실패: {e}")
+            else:
+                b = (getattr(self, 'bots', {}).get(id(c)) or {}).get(side)
+                if b is not None:
+                    try:
+                        b._ensure_exchange_tp(pos)              # 없으면 지금 TP 주문을 건다
+                    except Exception as e:
+                        print(f"⚠️ {c['symbol']} TP 주문 다시 걸기 실패: {e}")
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def toggle_exit_mode(self, coin):
+        self.set_exit_mode(coin, 'tp' if coin.get('exit_mode', 'tp') == 'switch' else 'switch')
+
+    def toggle_exit_mode_all(self):
+        to = 'tp' if all(c.get('exit_mode', 'tp') == 'switch' for c in self.coins) else 'switch'
+        for c in self.coins:
+            self.set_exit_mode(c, to, save=False)
+        self._save_exit_mode()
+        self._paint_exit_mode_all()
+        print(f"🔁 청산 방식 전체 → {self.EXIT_MODE_TEXT[to]} ({len(self.coins)}개 코인)")
 
     def _halted_coins(self):
         """수동청산·강제청산으로 멈춘(롱·숏 둘 다 꺼진) 코인 → {심볼: 이유}"""
@@ -4677,6 +4783,12 @@ class App:
                                           bg='#555555', fg='#ffffff', font=('Arial', 11, 'bold'),
                                           width=16, pady=5)
         self.one_shot_all_btn.pack(side='left', padx=5)
+
+        # 🔁 청산 방식 전체: TP+스위칭 ↔ 스위칭만
+        self.exit_mode_all_btn = tk.Button(self.tab_frame, text="🔁 청산 전체: TP+스위칭", command=self.toggle_exit_mode_all,
+                                           bg='#2d6a4f', fg='#ffffff', font=('Arial', 11, 'bold'),
+                                           width=20, pady=5)
+        self.exit_mode_all_btn.pack(side='left', padx=5)
         
         # 메인 컨텐츠
         self.main_frame = tk.Frame(self.root, bg='#1e1e1e')
@@ -6854,10 +6966,10 @@ class App:
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
 
         # 🔥 청산 방식 표시
-        _sw = coin.get('exit_mode', 'tp') == 'switch'
-        tk.Label(settings_line, text="청산:스위칭만" if _sw else "청산:TP+스위칭",
-                bg='#2d2d2d', fg='#ffaa00' if _sw else '#00ff88',
-                font=('Arial', 9, 'bold')).pack(side='left', padx=3)
+        coin['exit_mode_btn'] = tk.Button(settings_line, command=lambda: self.toggle_exit_mode(coin),
+                                          font=('Arial', 9, 'bold'), padx=4, pady=0)
+        coin['exit_mode_btn'].pack(side='left', padx=3)
+        self._paint_exit_mode(coin)
 
         _sm = coin.get('signal_mode', SIGNAL_MODE)
         tk.Label(settings_line, text={'live': "신호:즉시", 'confirmed': "신호:확정"}.get(_sm, "신호:UT마감"),
@@ -7057,7 +7169,8 @@ class App:
             coin['sl'] = 0  # AUTO 고정
             
             # 🔥 청산 방식 저장
-            coin['exit_mode'] = exit_mode_var.get()
+            if exit_mode_var.get() != coin.get('exit_mode', 'tp'):
+                self.set_exit_mode(coin, exit_mode_var.get())
             coin['signal_mode'] = signal_mode_var.get()
 
             # 🔥 동적 TP 저장

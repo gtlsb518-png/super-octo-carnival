@@ -229,7 +229,7 @@ class TelegramBot:
                 self.alerts[arg] = not self.alerts[arg]
                 self._save_alerts()
             self._edit(cid, mid, *self._screen_alerts())
-        elif cmd in ('start', 'pause', 'oneshot', 'close', 'closeyes'):
+        elif cmd in ('start', 'pause', 'oneshot', 'exit', 'close', 'closeyes'):
             self._do_coin(cmd, arg, cid, mid)
         elif cmd == 'X':
             n = len(self.app.coins)
@@ -271,6 +271,14 @@ class TelegramBot:
         if cmd == 'oneshot':
             self._run_ui(lambda: self.app.toggle_one_shot(coin))
             self._edit(cid, mid, *self._screen_coin(short))
+            return
+        if cmd == 'exit':
+            self._run_ui(lambda: self.app.toggle_exit_mode(coin))
+            time.sleep(1.0)      # 들고 있는 포지션의 TP 주문 정리/다시 걸기 기다림
+            sw = coin.get('exit_mode', 'tp') == 'switch'
+            self._edit(cid, mid, *self._screen_coin(short, note=(
+                '🔁 청산 방식: 스위칭만 — TP 없이 반대 신호 2개에 스위칭 (TP 주문 취소)' if sw else
+                '🔁 청산 방식: TP+스위칭 — TP 에서 익절 (TP 주문 다시 걸기)')))
             return
         if cmd == 'close':
             pos = self.app.api.get_position(coin['symbol'])
@@ -395,8 +403,10 @@ class TelegramBot:
                 s += " 포지션 없음 (신호 대기)"
             if c.get('one_shot'):
                 s += ' 🎯'
+            if c.get('exit_mode', 'tp') == 'switch':
+                s += ' 🔁'
             lines.append(s)
-        lines.append("\n🟢롱 🔴숏 ⚪대기 ⏸️강제청산후대기 🛑정지 ⚫꺼짐 🎯1회매매")
+        lines.append("\n🟢롱 🔴숏 ⚪대기 ⏸️강제청산후대기 🛑정지 ⚫꺼짐 🎯1회매매 🔁스위칭만")
         return '\n'.join(lines), [self._back('s')]
 
     def _screen_pnl(self):
@@ -424,6 +434,8 @@ class TelegramBot:
                 label += f" {p.get('roi_pct', 0):+.1f}%"
             if c.get('one_shot'):
                 label += '🎯'
+            if c.get('exit_mode', 'tp') == 'switch':
+                label += '🔁'
             row.append({'text': label, 'callback_data': f"c:{_short(c['symbol'])}"})
             if len(row) == 2:
                 btns.append(row); row = []
@@ -493,6 +505,7 @@ class TelegramBot:
         st.append(f"롱 {'ON' if c.get('long_active') else 'OFF'}")
         st.append(f"숏 {'ON' if c.get('short_active') else 'OFF'}")
         st.append(f"🎯1회매매 {'ON' if c.get('one_shot') else 'OFF'}")
+        st.append(f"🔁청산 {'스위칭만' if c.get('exit_mode', 'tp') == 'switch' else 'TP+스위칭'}")
         if c.get('liq_block'):
             st.append(f"⏸️ 강제청산 후 대기({c['liq_block'].upper()})")
         if c.get('halted_reason') and not c.get('long_active') and not c.get('short_active'):
@@ -523,7 +536,9 @@ class TelegramBot:
         chart = f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym.replace('/', '')}.P"
         btns = [[{'text': '🔄 새로고침', 'callback_data': f'c:{short}'}, {'text': '📈 차트', 'url': chart}],
                 [{'text': '▶️ 시작', 'callback_data': f'start:{short}'}, {'text': '⏸️ 정지', 'callback_data': f'pause:{short}'}],
-                [{'text': f"🎯 1회매매: {'ON' if c.get('one_shot') else 'OFF'}", 'callback_data': f'oneshot:{short}'}],
+                [{'text': f"🎯 1회매매: {'ON' if c.get('one_shot') else 'OFF'}", 'callback_data': f'oneshot:{short}'},
+                 {'text': f"🔁 청산: {'스위칭만' if c.get('exit_mode', 'tp') == 'switch' else 'TP+스위칭'}",
+                  'callback_data': f'exit:{short}'}],
                 [{'text': '🛑 이 코인 청산', 'callback_data': f'close:{short}'}],
                 [{'text': '◀️ 코인 목록', 'callback_data': 'c'}, {'text': '🏠 메뉴', 'callback_data': 'm'}]]
         return text, btns
