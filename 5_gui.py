@@ -1811,6 +1811,17 @@ if SWITCH_MODE not in ('close', 'live'):
     SWITCH_MODE = 'close'
 SWITCH_TEXT = {'close': '봉 확정 후', 'live': '신호 즉시'}
 
+# 🕒 매매 봉 (1_config.py 의 TIMEFRAME). 신호·스위칭·ADX 모두 이 봉 기준
+TIMEFRAMES = ('5m', '15m', '30m', '1h', '2h', '4h')
+try:
+    TIMEFRAME = str(getattr(_cfgmod, 'TIMEFRAME', '15m')).strip().lower()
+except Exception:
+    TIMEFRAME = '15m'
+if TIMEFRAME not in TIMEFRAMES:
+    print(f"⚠️ TIMEFRAME='{TIMEFRAME}' 은 없는 값 ({'/'.join(TIMEFRAMES)}) → '15m'")
+    TIMEFRAME = '15m'
+TF_TEXT = {'5m': '5분봉', '15m': '15분봉', '30m': '30분봉', '1h': '1시간봉', '2h': '2시간봉', '4h': '4시간봉'}
+
 SIGNAL_MODE_TEXT = {'ut_close': 'UT 봉마감 + EMA 실시간', 'live': '즉시 (둘 다 실시간)',
                     'confirmed': '확정 (둘 다 봉마감)'}
 REENTRY_TEXT = {'next_bar': '익절 후 다음 봉', 'immediate': '익절 후 바로'}
@@ -4682,7 +4693,7 @@ class App:
         for i, coin_info in enumerate(selected_coins, 1):
             coin = {
                 'symbol': coin_info['symbol'],
-                'timeframe': '1h',  # 🔥 1시간봉
+                'timeframe': TIMEFRAME,  # 🕒 매매 봉 (1_config.py 의 TIMEFRAME, 기본 15분봉)
                 'amount': coin_amount(coin_info['symbol']),  # 진입금 (코인별, 1_config.py)
                 'leverage': LEVERAGE,  # 레버리지 (1_config.py 의 LEVERAGE, 기본 5배)
                 'tp': 1.2,  # 기본 TP (동적 TP 비활성화 시)
@@ -4702,7 +4713,7 @@ class App:
                 #    / 'live'=둘 다 진행중 봉 / 'confirmed'=둘 다 완성봉
                 'signal_mode': SIGNAL_MODE,
                 'adx_period': 10,  # ADX 기간
-                'adx_interval': '1h',  # 🔥 ADX 계산 시간봉 (TP 결정용)
+                'adx_interval': TIMEFRAME,  # 🔥 ADX 계산 봉 (TP 결정용) — 매매 봉과 같게 (조회 한 번으로 끝)
                 # 🔥 거래량 필터 비활성화
                 'volume_filter_enabled': False,  # 거래량 필터 비활성화
                 'volume_multiplier': 1.0,  # 사용 안 함
@@ -4717,7 +4728,7 @@ class App:
         mult = 4 if LEVERAGE <= 3 else 5 if LEVERAGE <= 5 else 8
         print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * mult:,.0f} USDT "
               f"(이 프로그램만, {LEVERAGE}배 기준 증거금×{mult})")
-        print(f"  🎯 전략: {LEVERAGE}배 | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
+        print(f"  🎯 전략: {TF_TEXT[TIMEFRAME]} · {LEVERAGE}배 | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
               f" | 스위칭 {SWITCH_TEXT[SWITCH_MODE]}")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
@@ -6612,7 +6623,7 @@ class App:
                     state='readonly', font=('Arial', 11)).pack(pady=5)
         
         tk.Label(dialog, text="시간봉:", bg='#2d2d2d', fg='#ffffff', font=('Arial', 11)).pack(pady=5)
-        tf_var = tk.StringVar(value='1h')  # 🔥 기본 1시간봉
+        tf_var = tk.StringVar(value=TIMEFRAME)  # 🕒 기본 = 1_config.py 의 TIMEFRAME
         ttk.Combobox(dialog, textvariable=tf_var, values=['1m', '5m', '15m', '30m', '1h', '4h', '1d'],
                     state='readonly', font=('Arial', 11)).pack(pady=5)
         

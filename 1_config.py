@@ -39,6 +39,7 @@ STATS_START_DATE = ""
 WEBSOCKET_MODE = "on"
 
 # ==================== 🎯 전략 ====================
+TIMEFRAME = "15m"           # 매매 봉: "15m"(기본) / "1h"(예전) / "30m" / "4h" 등. 신호·스위칭·ADX 모두 이 봉 기준
 LEVERAGE = 5                # 레버리지 (격리). 예전 값 3
 SIGNAL_MODE = "ut_close"    # "ut_close"  : UT 는 봉 마감 기준, EMA34/55 는 실시간  ← 추천·기본
                             # "live"      : 둘 다 진행 중인 봉 (예전 방식, 리페인팅 있음)
