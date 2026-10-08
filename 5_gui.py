@@ -7429,7 +7429,7 @@ class App:
                 f"들고 있는 {side} 포지션이 있으면 그대로 관리합니다\n(반대 신호 스위칭 청산 · TP 익절).\n\n"
                 f"📊 통계는 유지됨\n💡 다시 하려면 '▶️ 시작'")
 
-    def coin_force_stop_side(self, coin, side):
+    def coin_force_stop_side(self, coin, side, wait_next=True):
         """🛑 강제청산 — 포지션만 청산. 봇은 멈추지 않고, 이 방향은 지금 신호가 끝난 뒤 다음 신호(UT+EMA)에서 진입.
         반대 신호는 바로 진입. 진입을 완전히 막는 건 ⏸️ 정지 버튼. (화면 라벨은 화면 스레드에서 바꾼다)"""
         key = side.lower()
@@ -7544,7 +7544,7 @@ class App:
 
         # ▶️ 봇은 멈추지 않는다 — 이 방향은 지금 신호가 끝난 뒤 다음 신호에서 진입 (진짜 멈추려면 ⏸️ 정지)
         bot = self.bots.get(id(coin), {}).get(key)
-        waiting = bool(coin.get(f'{key}_active') and bot)
+        waiting = bool(wait_next and coin.get(f'{key}_active') and bot)   # 🔥강제진입이 부를 땐 대기 안 함
         if waiting:
             bot._set_liq_block(key, why='manual')
 
@@ -7688,34 +7688,23 @@ class App:
                 except Exception:
                     pass
 
-                # 🔥 1단계: 기존 포지션 청산!
+                # 🔥 1단계: 기존 포지션 청산! — 🛑강제청산과 같은 방식으로 (거래 기록 남기고, 봇이 '수동청산'으로 오인해 코인을 멈추지 않게)
                 position = self.api.get_position(coin['symbol'])
                 if position:
                     print(f"[{coin['symbol']}] 기존 포지션 발견 → 청산 후 진입")
-
                     try:
-                        # 청산 주문
-                        close_side = 'SELL' if position['side'] == 'long' else 'BUY'
-                        close_qty = abs(position['amount'])
-                        
-                        close_order = self.api.create_order(
-                            coin['symbol'],
-                            close_side,
-                            close_qty,
-                            reduce_only=True
-                        )
-                        
-                        if close_order:
-                            print(f"[{coin['symbol']}] 기존 포지션 청산 완료")
-                            time.sleep(2)  # 청산 완료 대기
-                        else:
-                            print(f"[{coin['symbol']}] 청산 실패 - 강제 진입 취소")
-                            CustomMessageBox.showwarning("강제 진입 실패", "기존 포지션 청산 실패!\n\n다시 시도하세요.")
-                            return
+                        r = self.coin_force_stop_side(coin, position['side'].upper(), wait_next=False)
                     except Exception as e:
-                        print(f"[{coin['symbol']}] 청산 오류: {e}")
-                        CustomMessageBox.showwarning("강제 진입 실패", f"기존 포지션 청산 오류!\n\n{str(e)}")
+                        r = f"실패: {e}"
+                    if '실패' in r:
+                        print(f"[{coin['symbol']}] 청산 실패 - 강제 진입 취소")
+                        CustomMessageBox.showwarning("강제 진입 실패", "기존 포지션 청산 실패!\n\n다시 시도하세요.")
                         return
+                    coin['is_closing'] = True       # 새 진입 끝날 때까지 '청산 중' 유지 (아래에서 해제)
+                    coin['is_closing_start'] = time.time()
+                    time.sleep(1)
+                coin['liq_block'] = None            # 강제진입 = 지금 들어가겠다는 뜻 → '다음 신호 대기' 해제
+                self._refresh_running_state()
                 
                 # 🔥 2단계: ROI 완전 초기화 (청산 여부 무관)
                 if side == 'LONG':
