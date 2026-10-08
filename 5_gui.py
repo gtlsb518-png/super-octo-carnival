@@ -2413,6 +2413,9 @@ class TradingBot:
             self.config['tp_block_bar'] = None
             if reason == 'liq' and not self.config.get('one_shot'):
                 # 💀 강제청산: 멈추지 않는다. 청산된 방향의 지금 신호에서는 다시 안 들어가고, 다음 신호부터 진입
+                # 처리한 강제청산 시각 (거래소 시계 기준) — 켤 때 같은 기록으로 또 막지 않게
+                self.config['liq_seen_ms'] = int((info or {}).get('close_time') or 0) or \
+                    int(time.time() * 1000) + int(getattr(self.api, 'time_offset', 0) or 0)
                 self._set_liq_block(side)
             else:
                 self.halt_coin(label, pos_type)
@@ -2718,8 +2721,16 @@ class TradingBot:
         if side not in ('long', 'short'):
             why = 'liq'
             r = self.api.last_liq_fill(self.config['symbol'])
+            seen = self.config.get('liq_seen_ms') or 0
+            try:
+                seen = max(seen, int(self.app._saved_liq_seen().get(self.config['symbol']) or 0) if getattr(self, 'app', None) else 0)
+            except Exception:
+                pass
+            if r and r[1] <= seen + 60_000:   # 이미 처리했던 강제청산 (대기도 이미 풀림) → 다시 막지 않는다
+                r = None
             side = r[0] if r else None
             if side:
+                self.config['liq_seen_ms'] = r[1]
                 self.log(f"💀 꺼져 있는 사이 {side.upper()} 강제청산 기록이 있습니다", side.upper())
         if side in ('long', 'short'):
             self._set_liq_block(side, announce=True, why=why)
@@ -4653,6 +4664,13 @@ class App:
         except Exception:
             return {}
 
+    def _saved_liq_seen(self):
+        try:
+            with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
+                return dict(json.load(f).get('liq_seen') or {})
+        except Exception:
+            return {}
+
     def _saved_paused(self):
         try:
             with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
@@ -4674,7 +4692,8 @@ class App:
                      'tp_block': {c['symbol']: c['tp_block_bar'] for c in self.coins if c.get('tp_block_bar')},
                      'liq_block': {c['symbol']: c['liq_block'] for c in self.coins if c.get('liq_block')},
                      'paused': {c['symbol']: [k for k in ('long', 'short') if c.get(f'{k}_paused')]
-                                for c in self.coins if c.get('long_paused') or c.get('short_paused')}}
+                                for c in self.coins if c.get('long_paused') or c.get('short_paused')},
+                     'liq_seen': {c['symbol']: c['liq_seen_ms'] for c in self.coins if c.get('liq_seen_ms')}}
             with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
