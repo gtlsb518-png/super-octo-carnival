@@ -485,7 +485,7 @@ class TelegramBot:
             if isinstance(tp, (tuple, list)):
                 tp = tp[0] if tp else None
             if c.get('exit_mode', 'tp') == 'switch':
-                L.append("   🔁 스위칭만 — 목표 TP 없음, 반대 신호 2개(봉 마감)까지 보유")
+                L.append("   🔁 스위칭만 — 목표 TP 없음, 반대 신호 2개까지 보유")
             elif tp:
                 tp = float(tp)
                 tgt = p['entry_price'] * (1 + tp / 100) if k == 'long' else p['entry_price'] * (1 - tp / 100)
@@ -506,7 +506,7 @@ class TelegramBot:
             L.append(line)
             if p and sw:
                 opp = 'short' if p['side'] == 'long' else 'long'
-                L.append(f"   스위칭 조건(반대 2개, 봉마감): UT {'✅' if sw.get(f'ut_position_{opp}') else '❌'}"
+                L.append(f"   스위칭 조건(반대 2개): UT {'✅' if sw.get(f'ut_position_{opp}') else '❌'}"
                          f" EMA {'✅' if sw.get(f'ema_{opp}') else '❌'}")
         else:
             L.append("📡 신호: 봇이 꺼져 있어 계산 안 함")

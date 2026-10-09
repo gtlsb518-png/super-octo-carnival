@@ -47,8 +47,8 @@ SIGNAL_MODE = "ut_close"    # "ut_close"  : UT 는 봉 마감 기준, EMA34/55 �
                             # "confirmed" : 둘 다 봉 마감 기준
 REENTRY = "immediate"       # "immediate" : 익절 후 신호가 그대로면 바로 재진입 (익절이 계속 이어짐)  ← 기본
                             # "next_bar"  : 익절한 봉에서는 안 들어가고 다음 봉에서 신호 확인 후 진입
-SWITCH_MODE = "close"       # "close" : 반대 신호가 봉 마감으로 확정됐을 때만 스위칭 (UT·EMA 둘 다 마감 기준)  ← 추천·기본
-                            # "live"  : 위 SIGNAL_MODE 신호대로 봉 중간에도 바로 스위칭 (예전 방식)
+SWITCH_MODE = "live"        # "live"  : 진입과 같은 신호로 스위칭 — SIGNAL_MODE 가 "ut_close" 면 UT 는 봉 마감, EMA 는 실시간  ← 기본
+                            # "close" : UT·EMA 둘 다 봉 마감으로 확정됐을 때만 스위칭 (봉 중간 EMA 흔들림에 안 뒤집힘)
 
 # ==================== 📱 텔레그램 (알림 + 버튼으로 조작) ====================
 # 프로그램마다 봇 하나: 텔레그램 @BotFather 에게 /newbot → 받은 토큰을 프로그램 번호에 넣기. 비우면 텔레그램 안 씀

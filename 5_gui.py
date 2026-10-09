@@ -1803,12 +1803,12 @@ if REENTRY_MODE not in REENTRY_MODES:
     REENTRY_MODE = 'immediate'
 
 try:
-    SWITCH_MODE = str(getattr(_cfgmod, 'SWITCH_MODE', 'close')).strip().lower()
+    SWITCH_MODE = str(getattr(_cfgmod, 'SWITCH_MODE', 'live')).strip().lower()
 except Exception:
-    SWITCH_MODE = 'close'
+    SWITCH_MODE = 'live'
 if SWITCH_MODE not in ('close', 'live'):
-    print(f"⚠️ SWITCH_MODE='{SWITCH_MODE}' 은 없는 값 → 'close'")
-    SWITCH_MODE = 'close'
+    print(f"⚠️ SWITCH_MODE='{SWITCH_MODE}' 은 없는 값 → 'live'")
+    SWITCH_MODE = 'live'
 SWITCH_TEXT = {'close': '봉 확정 후', 'live': '신호 즉시'}
 
 # 🕒 매매 봉 (1_config.py 의 TIMEFRAME). 신호·스위칭은 이 봉 기준 (ADX 는 ADX_TIMEFRAME)
@@ -1833,6 +1833,8 @@ if ADX_TIMEFRAME not in TIMEFRAMES:
 SIGNAL_MODE_TEXT = {'ut_close': 'UT 봉마감 + EMA 실시간', 'live': '즉시 (둘 다 실시간)',
                     'confirmed': '확정 (둘 다 봉마감)'}
 REENTRY_TEXT = {'next_bar': '익절 후 다음 봉', 'immediate': '익절 후 바로'}
+# 스위칭 'live' = 진입과 같은 신호 (ut_close 면 UT 봉마감 + EMA 실시간)
+SWITCH_TEXT['live'] = SIGNAL_MODE_TEXT.get(SIGNAL_MODE, '신호 즉시')
 
 
 def calc_signals(df, coin):
@@ -2653,7 +2655,7 @@ class TradingBot:
     # ==================== 💀 강제청산 후 다음 신호 대기 ====================
     def _set_liq_block(self, side, announce=True, why='liq'):
         """강제청산된(또는 🛑 버튼으로 직접 청산한) 방향(side)은 지금 이어지는 신호에서 다시 안 들어간다.
-        신호가 끝나면(봉 마감 기준) 풀린다. 반대 신호는 바로 진입 가능.
+        신호가 끝나면(스위칭과 같은 기준) 풀린다. 반대 신호는 바로 진입 가능.
         why: 'liq' 바이낸스 강제청산 / 'manual' 🛑 강제청산 버튼 / 'restore' 껐다 켜서 이어받음"""
         self.config['liq_block'] = side
         self.config['_liq_block_logged'] = False
@@ -4599,7 +4601,7 @@ class App:
             self._save_exit_mode()
         self._paint_exit_mode(coin)
         self._paint_exit_mode_all()
-        text = ("🔁 청산 방식: 스위칭만 — TP 없이 들고 있다가 반대 신호 2개(봉 마감)가 뜨면 스위칭"
+        text = ("🔁 청산 방식: 스위칭만 — TP 없이 들고 있다가 반대 신호 2개가 뜨면 스위칭"
                 if mode == 'switch' else "🔁 청산 방식: TP+스위칭 — TP 에서 익절, 반대 신호 2개면 스위칭")
         for side in ('LONG', 'SHORT'):
             self.add_log(coin, side, text)
@@ -7076,7 +7078,8 @@ class App:
                 font=('Arial', 9, 'bold')).pack(side='left', padx=3)
         tk.Label(settings_line, text="재진입:다음봉" if REENTRY_MODE == 'next_bar' else "재진입:바로",
                 bg='#2d2d2d', fg='#aaaaaa', font=('Arial', 9)).pack(side='left', padx=3)
-        tk.Label(settings_line, text="스위칭:봉마감" if SWITCH_MODE == 'close' else "스위칭:즉시",
+        tk.Label(settings_line, text="스위칭:봉마감" if SWITCH_MODE == 'close' else
+                 ("스위칭:UT마감+EMA실시간" if SIGNAL_MODE == 'ut_close' else "스위칭:즉시"),
                 bg='#2d2d2d', fg='#aaaaaa', font=('Arial', 9)).pack(side='left', padx=3)
         
         tk.Label(settings_line, text=f"UT:{coin.get('ut_sens', 10)},{coin.get('ut_atr', 5)}", bg='#2d2d2d', fg='#aaaaaa',
