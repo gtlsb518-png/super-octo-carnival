@@ -290,6 +290,11 @@ def _disable_console_quickedit():
 
 _disable_console_quickedit()
 
+# 📈 신호 계산에 쓰는 봉 개수. UT 는 앞쪽 기록에 따라 값이 달라지는 지표라 짧으면 트레이딩뷰와 어긋난다
+#   (측정: 200봉이면 UT 방향이 5%, 진입 신호가 2.5% 시점에서 트레이딩뷰(긴 기록)와 다름 → 499봉이면 0.02%)
+#   499 = 바이낸스 조회 무게가 200봉과 같은(2) 최대 개수
+SIGNAL_BARS = 499
+
 _INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
                 '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
                 '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000}
@@ -456,7 +461,7 @@ class KlineFeed:
                     todo = list(self.need_seed)
                 for key in todo:
                     sym, iv = key
-                    df = self.api._rest_klines(sym, iv, 300, fresh=True)
+                    df = self.api._rest_klines(sym, iv, SIGNAL_BARS, fresh=True)
                     if df is not None and len(df):
                         rows = [[int(ts.value // 1_000_000), *map(float, r)]
                                 for ts, r in zip(df.index, df[['open', 'high', 'low', 'close', 'volume']].values)]
@@ -1051,8 +1056,9 @@ class BinanceAPI:
         self.ws.start()
         return self.ws
 
-    def get_klines(self, symbol, interval, limit=200):
+    def get_klines(self, symbol, interval, limit=None):
         """차트 데이터 (항상 메인넷). 웹소켓 'on' 이면 웹소켓 값, 안 되면 조회."""
+        limit = SIGNAL_BARS if limit is None else limit
         ws = self.ws
         if ws is not None and self.ws_mode == 'on':
             df = ws.klines.get(symbol, interval, limit)
@@ -1080,8 +1086,9 @@ class BinanceAPI:
                 print(f"[🔌 비교 오류] {e}")
         return df
 
-    def _rest_klines(self, symbol, interval, limit=200, fresh=False):
+    def _rest_klines(self, symbol, interval, limit=None, fresh=False):
         """차트 데이터를 조회(REST)로 — 메인넷. fresh=True 면 캐시 안 씀 (웹소켓 빈 구간 채우기용)"""
+        limit = SIGNAL_BARS if limit is None else limit
         cache_key = f"{symbol}_{interval}_{limit}"   # 개수도 구분 (limit=1 결과를 봇이 받아가던 문제)
         # 웹소켓이 끊겨 여러 프로그램이 한꺼번에 조회로 바뀌어도, IP 전체 사용량을 보고 자동으로 느려진다
         ttl = self._klines_cache_ttl * self._slow('chart')
