@@ -1817,6 +1817,14 @@ if SWITCH_MODE not in ('close', 'live'):
     print(f"⚠️ SWITCH_MODE='{SWITCH_MODE}' 은 없는 값 → 'live'")
     SWITCH_MODE = 'live'
 SWITCH_TEXT = {'close': '봉 확정 후', 'live': '신호 즉시'}
+# 🔁 처음 청산 방식 (코인별 🔁 버튼으로 바꾸면 exit_mode*.json 에 저장돼 그게 우선)
+try:
+    EXIT_MODE = str(getattr(_cfgmod, 'EXIT_MODE', 'switch')).strip().lower()
+except Exception:
+    EXIT_MODE = 'switch'
+if EXIT_MODE not in ('tp', 'switch'):
+    print(f"⚠️ EXIT_MODE='{EXIT_MODE}' 은 없는 값 → 'switch'")
+    EXIT_MODE = 'switch'
 
 # 🕒 매매 봉 (1_config.py 의 TIMEFRAME). 신호·스위칭은 이 봉 기준 (ADX 는 ADX_TIMEFRAME)
 TIMEFRAMES = ('5m', '15m', '30m', '1h', '2h', '4h')
@@ -4777,7 +4785,7 @@ class App:
                 'tp_trend': 1.5,  # ✅ 추세장 TP 1.5% (ADX >= 21) — 시뮬 검증값
                 'tp_sideways': 1.2,  # ✅ 횡보장 TP 1.2% (ADX < 21) — 시뮬 검증값
                 # 🔥 청산 방식: 'tp'=TP 도달 시 익절(+스위칭) / 'switch'=반대신호 스위칭만
-                'exit_mode': 'tp',
+                'exit_mode': EXIT_MODE,   # 🔁 처음 청산 방식 (1_config.py 의 EXIT_MODE, 기본 스위칭만)
                 # 🔥 신호 기준 (1_config.py 의 SIGNAL_MODE): 'ut_close'=UT 봉마감+EMA 실시간(기본)
                 #    / 'live'=둘 다 진행중 봉 / 'confirmed'=둘 다 완성봉
                 'signal_mode': SIGNAL_MODE,
@@ -4874,9 +4882,43 @@ class App:
         self.coin_tab_frame = tk.Frame(self.root, bg='#2d2d2d')
         self.coin_tab_frame.pack(fill='x', padx=10, pady=(0, 5))
         
-        # 메인 컨텐츠
-        self.main_frame = tk.Frame(self.root, bg='#1e1e1e')
-        self.main_frame.pack(fill='both', expand=True)
+        # 메인 컨텐츠 — 화면보다 길면 마우스 휠/오른쪽 스크롤바로 내려 본다 (로그 창이 잘리던 문제)
+        page = tk.Frame(self.root, bg='#1e1e1e')
+        page.pack(fill='both', expand=True)
+        self.page_canvas = tk.Canvas(page, bg='#1e1e1e', highlightthickness=0)
+        page_sb = tk.Scrollbar(page, orient='vertical', command=self.page_canvas.yview)
+        self.page_canvas.configure(yscrollcommand=page_sb.set)
+        page_sb.pack(side='right', fill='y')
+        self.page_canvas.pack(side='left', fill='both', expand=True)
+        self.main_frame = tk.Frame(self.page_canvas, bg='#1e1e1e')
+        _win = self.page_canvas.create_window((0, 0), window=self.main_frame, anchor='nw')
+        self.main_frame.bind('<Configure>',
+                             lambda e: self.page_canvas.configure(scrollregion=self.page_canvas.bbox('all')))
+        self.page_canvas.bind('<Configure>', lambda e: self.page_canvas.itemconfigure(_win, width=e.width))
+        for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self.root.bind_all(seq, self._on_wheel)
+
+    def _on_wheel(self, event):
+        """마우스 휠 — 로그 창 위면 로그만, 설정 창이면 그 창, 나머지는 프로그램 화면 전체를 위아래로"""
+        w = event.widget
+        try:
+            if isinstance(w, str):
+                w = self.root.nametowidget(w)
+            if w.winfo_class() in ('Text', 'Listbox', 'TCombobox'):
+                return      # 로그 창 등은 자기 스크롤 (기본 동작)
+            top = w.winfo_toplevel()
+            canvas = getattr(top, '_scroll_canvas', None) or (self.page_canvas if top is self.root else None)
+            if canvas is None:
+                return
+            if getattr(event, 'num', None) == 4:
+                step = -1
+            elif getattr(event, 'num', None) == 5:
+                step = 1
+            else:
+                step = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(step * 3, 'units')
+        except (tk.TclError, KeyError, AttributeError):
+            pass
     
     def toggle_4h_filter(self):
         """🔥 4H UT 필터 ON/OFF 토글"""
@@ -6817,7 +6859,7 @@ class App:
                    'ut_sens': 10, 'ut_atr': 5, 'ema_fast': 34, 'ema_slow': 55,
                    'long_active': False, 'short_active': False,
                    'tp_trend': tp_trend_var.get(), 'tp_sideways': tp_sideways_var.get(),
-                   'adx_period': adx_period_var.get(), 'adx_interval': ADX_TIMEFRAME}
+                   'adx_period': adx_period_var.get(), 'adx_interval': ADX_TIMEFRAME, 'exit_mode': EXIT_MODE}
             self.add_coin(coin)
             dialog.destroy()
         
@@ -6942,6 +6984,10 @@ class App:
     def show_coin(self, coin):
         for w in self.main_frame.winfo_children():
             w.destroy()
+        try:
+            self.page_canvas.yview_moveto(0)     # 코인을 바꾸면 맨 위부터
+        except Exception:
+            pass
         
         # 잔고 + 신호 상태 (상단) - 컴팩트
         status_frame = tk.LabelFrame(self.main_frame, text=f"📊 {coin['symbol']} - {coin['timeframe']}",
@@ -7154,10 +7200,8 @@ class App:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # 마우스 휠 스크롤
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        # 마우스 휠 스크롤 (프로그램 전체 휠 처리기가 이 창 안에서는 이 캔버스를 움직인다)
+        dialog._scroll_canvas = canvas
         
         # 🔥 모든 위젯을 scrollable_frame에 추가
         # 진입금
@@ -7179,10 +7223,10 @@ class App:
         tk.Label(scrollable_frame, text="━━━━━━━━━━━━━━━━━━━━━", bg='#2d2d2d', fg='#666666', font=('Arial', 10)).pack(pady=5)
         tk.Label(scrollable_frame, text="🎯 청산 방식", bg='#2d2d2d', fg='#00ff88', font=('Arial', 11, 'bold')).pack(pady=5)
         exit_mode_var = tk.StringVar(value=coin.get('exit_mode', 'tp'))
-        tk.Radiobutton(scrollable_frame, text="TP 익절 + 스위칭 (기본)", variable=exit_mode_var,
+        tk.Radiobutton(scrollable_frame, text="TP 익절 + 스위칭", variable=exit_mode_var,
                        value='tp', bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
                        font=('Arial', 10), activebackground='#2d2d2d').pack(anchor='w', padx=30)
-        tk.Radiobutton(scrollable_frame, text="스위칭만 (TP 없이 반대신호까지 보유)",
+        tk.Radiobutton(scrollable_frame, text="스위칭만 (TP 없이 반대신호까지 보유) (기본)",
                        variable=exit_mode_var, value='switch', bg='#2d2d2d', fg='#ffaa00',
                        selectcolor='#1e1e1e', font=('Arial', 10),
                        activebackground='#2d2d2d').pack(anchor='w', padx=30)
@@ -7296,9 +7340,6 @@ class App:
             # 🔥 거래량 필터 저장
             coin['volume_filter_enabled'] = volume_filter_var.get()
             coin['volume_multiplier'] = volume_mult_var.get()
-            
-            # 마우스 휠 이벤트 해제
-            canvas.unbind_all("<MouseWheel>")
             
             CustomMessageBox.showinfo("저장 완료", "설정이 저장되었습니다!\n\nSL은 AUTO (스위칭)로 고정됩니다.")
             dialog.destroy()
@@ -8005,7 +8046,7 @@ class App:
         scrollbar = tk.Scrollbar(scroll_frame)
         scrollbar.pack(side='right', fill='y')
         
-        log_text = tk.Text(scroll_frame, height=15, bg='#1e1e1e', fg='#ffffff', font=('Arial', 9),
+        log_text = tk.Text(scroll_frame, height=45, bg='#1e1e1e', fg='#ffffff', font=('Arial', 9),
                           yscrollcommand=scrollbar.set, wrap='word')
         log_text.pack(side='left', fill='both', expand=True)
         scrollbar.config(command=log_text.yview)
