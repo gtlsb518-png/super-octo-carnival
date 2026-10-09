@@ -28,6 +28,7 @@ trade_history_*.xlsx
 dist/
 바이낸스봇_전체_키포함.zip
 테스트넷_호가점검.txt
+신호점검.txt
 one_shot*.json
 telegram_owner*.json
 telegram_alerts*.json
