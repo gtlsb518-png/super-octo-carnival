@@ -4860,6 +4860,10 @@ class App:
                                            bg='#2d6a4f', fg='#ffffff', font=('Arial', 11, 'bold'),
                                            width=20, pady=5)
         self.exit_mode_all_btn.pack(side='left', padx=5)
+
+        # 🪙 코인 탭 — 전체 버튼 줄 아래, 2줄로 나눠서 (버튼이 늘어 한 줄이면 잘렸음)
+        self.coin_tab_frame = tk.Frame(self.root, bg='#2d2d2d')
+        self.coin_tab_frame.pack(fill='x', padx=10, pady=(0, 5))
         
         # 메인 컨텐츠
         self.main_frame = tk.Frame(self.root, bg='#1e1e1e')
@@ -6877,8 +6881,7 @@ class App:
         
         # 탭 버튼
         tab_text = f"{coin['symbol'].split('/')[0]} {coin['timeframe']}"
-        btn_frame = tk.Frame(self.tab_frame, bg='#2d2d2d')
-        btn_frame.pack(side='left', padx=5)
+        btn_frame = tk.Frame(getattr(self, 'coin_tab_frame', None) or self.tab_frame, bg='#2d2d2d')
         
         btn = tk.Button(btn_frame, text=tab_text, command=lambda: self.show_coin(coin),
                        bg='#3d3d3d', fg='#ffffff', font=('Arial', 11), padx=15, pady=5)
@@ -6889,10 +6892,21 @@ class App:
         close_btn.pack(side='left')
         
         self.tab_buttons[id(coin)] = btn_frame
+        self._layout_coin_tabs()
         
         if len(self.coins) == 1:
             self.show_coin(coin)
     
+    def _layout_coin_tabs(self, rows=2):
+        """코인 탭을 rows 줄로 고르게 나눠 배치 (10개면 5개씩 2줄)"""
+        frames = [self.tab_buttons[id(c)] for c in self.coins if id(c) in self.tab_buttons]
+        per_row = max(1, -(-len(frames) // rows))
+        for i, f in enumerate(frames):
+            try:
+                f.grid(row=i // per_row, column=i % per_row, padx=5, pady=2, sticky='w')
+            except tk.TclError:
+                pass
+
     def remove_coin(self, coin, btn_frame):
         # 포지션 확인
         position = self.api.get_position(coin['symbol'])
@@ -6904,6 +6918,8 @@ class App:
             if CustomMessageBox.askyesno("탭 삭제", f"{coin['symbol']} {coin['timeframe']} 탭을 삭제하시겠습니까?"):
                 self.coins.remove(coin)
                 btn_frame.destroy()
+                self.tab_buttons.pop(id(coin), None)
+                self._layout_coin_tabs()
                 if id(coin) in self.bots:
                     self.bots[id(coin)]['long'].stop()
                     self.bots[id(coin)]['short'].stop()
