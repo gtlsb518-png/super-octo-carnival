@@ -4,6 +4,7 @@
   python real_chart_check.py              ← 프로그램 1·2 코인 20개, 최근 2년, ①② 둘 다
   python real_chart_check.py --what tp    ← TP 비교만 (--what reentry 는 재진입 비교만)
   python real_chart_check.py --what risk --days 1460   ← 1시간봉 최대 하락 + 3·5·7·10배 강제청산 비교 (4년)
+  python real_chart_check.py --what now --days 1460   ← ★ 지금 봇 설정(15분봉·스위칭만·5배) 그대로 4년 — 수익 나는지, 몇 달 봐야 아는지
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -311,13 +312,15 @@ def main():
     ap.add_argument('--days', type=int, default=730, help='기간 (일, 기본 730 = 2년)')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
-    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk'], default='all',
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now'], default='all',
                     help='all = 재진입+TP+위험 / reentry = 재진입 비교만 / tp = TP 비교만 / '
-                         'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교')
+                         'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교 / '
+                         'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률')
     a = ap.parse_args()
     coins = [c.upper().replace('USDT', '').replace('/', '') for c in a.coins]
 
-    out(f"📊 실제 바이낸스 차트 비교 — 최근 {a.days}일, 코인 {len(coins)}개, 1시간봉 (15분 단위로 따라감)")
+    out(f"📊 실제 바이낸스 차트 비교 — 최근 {a.days}일, 코인 {len(coins)}개, "
+        + ("15분봉 (지금 봇 설정)" if a.what == 'now' else "1시간봉 (15분 단위로 따라감)"))
     out(f"   진입금 BTC 60 / 나머지 50 USDT · 손절 없음 · 펀딩 0.01%/8h 가정")
     out('')
 
@@ -339,6 +342,8 @@ def main():
         out('❌ 계산할 차트가 없습니다')
         return 1
 
+    if a.what == 'now':
+        now_check(data)
     if a.what in ('all', 'reentry'):
         reentry_compare(data)
     if a.what in ('all', 'tp'):
@@ -356,6 +361,86 @@ def main():
     except Exception as e:
         print(f"⚠️ 결과 파일 저장 실패: {e}")
     return 0
+
+
+def now_check(data):
+    """★ 지금 봇 설정 그대로: 15분봉 · 스위칭만(TP 없음) · UT 봉마감 + EMA 실시간 (진입·스위칭 같음) · 5배"""
+    out('━' * 92)
+    out('★ 지금 봇 설정 그대로 — 15분봉 · 스위칭만 · UT 봉마감 + EMA 실시간 · 5배 (꼬리로 강제청산 판정, 유지증거금 1%)')
+
+    def run(c, df, lev, tp_s=1e6, tp_t=1e6):
+        p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=tp_s, tp_t=tp_t, switch='live')
+        p['mmr_pct'] = 1.0
+        return bt.run_backtest_live(df, p, bar='15min')[0]
+
+    t0 = time.time()
+    res, levs, tpres = {}, {L: {} for L in (3, 7, 10)}, {}
+    for i, (c, df) in enumerate(data.items(), 1):
+        print(f"  계산 {i}/{len(data)}: {c}", flush=True)
+        res[c] = run(c, df, 5)
+        for L in levs:
+            levs[L][c] = run(c, df, L)
+        tpres[c] = run(c, df, 5, 1.2, 1.5)
+    print(f"  (계산 {time.time() - t0:.0f}초)")
+
+    def total(by):
+        a = pd.concat([t.assign(코인=c) for c, t in by.items() if len(t)], ignore_index=True)
+        if a.empty:
+            return None
+        a = a.sort_values('시각')
+        eq = np.r_[0.0, a['순손익'].cumsum().values]
+        mon = a.groupby(a['시각'].dt.to_period('M'))['순손익'].sum()
+        return dict(all=a, net=a['순손익'].sum(), mdd=(eq - np.maximum.accumulate(eq)).min(), mon=mon,
+                    liq=int((a['유형'] == '강제청산').sum()), fee=a['수수료'].sum(), fund=a['펀딩비'].sum())
+
+    out(f"{'코인':6s} {'기간':>6s} {'순손익':>9s} {'거래':>6s} {'강제청산':>6s} {'최대역행':>8s}")
+    for c, df in data.items():
+        t = res[c]
+        net = t['순손익'].sum() if len(t) else 0.0
+        mae = (-t['최저ROI%'] / 5).max() if len(t) else 0.0
+        out(f"{c:6s} {(df.index[-1] - df.index[0]).days:>5d}일 {net:+9,.0f} {len(t):6,d} "
+            f"{int((t['유형'] == '강제청산').sum()) if len(t) else 0:6d} {mae:7.1f}%")
+    T = total(res)
+    if T is None:
+        out('거래 없음')
+        return
+    out('━' * 92)
+    out(f"전체: 순손익 {T['net']:+,.0f} · 최대 낙폭 {T['mdd']:+,.0f} · 최악의 달 {T['mon'].min():+,.0f} · "
+        f"손실 난 달 {(T['mon'] < 0).sum()}/{len(T['mon'])} · 강제청산 {T['liq']}번 · 수수료 {T['fee']:,.0f} · 펀딩 {T['fund']:,.0f}")
+    for L in sorted(list(levs) + [5]):
+        X = T if L == 5 else total(levs[L])
+        if X:
+            out(f"  {L:>2}배: 순손익 {X['net']:+9,.0f} · 최대 낙폭 {X['mdd']:+8,.0f} · 최악의 달 {X['mon'].min():+7,.0f} · 강제청산 {X['liq']:4d}번")
+    P = total(tpres)
+    if P:
+        out(f"  (참고) TP+스위칭 5배: 순손익 {P['net']:+,.0f} · 최대 낙폭 {P['mdd']:+,.0f} · 수수료 {P['fee']:,.0f}")
+
+    out('━' * 92)
+    out('월별 순손익 (5배, 코인 전부)')
+    for m, v in T['mon'].items():
+        bar = '█' * min(40, int(abs(v) / max(1.0, T['mon'].abs().max()) * 40))
+        out(f"  {m}  {v:+8,.0f}  {'+' if v >= 0 else '-'}{bar}")
+
+    out('━' * 92)
+    out('아무 날에나 시작해서 그 기간만 봤을 때 — 수익이 나 있을 확률 (최악)')
+    coins = list(data)
+    groups = [('프로그램1 코인', coins[:10]), ('프로그램2 코인', coins[10:]), ('20개 전부', coins)]
+    idx = pd.date_range(min(df.index[0] for df in data.values()).floor('D'),
+                        max(df.index[-1] for df in data.values()).floor('D'), freq='D')
+    daily = pd.DataFrame({c: (res[c].groupby(res[c]['시각'].dt.floor('D'))['순손익'].sum() if len(res[c]) else pd.Series(dtype=float))
+                          .reindex(idx, fill_value=0.0) for c in coins})
+    wins = [('1주', 7), ('2주', 14), ('1달', 30), ('3달', 91), ('6달', 182), ('1년', 365)]
+    out(f"  {'':14s} " + ' '.join(f"{n:>13s}" for n, _ in wins))
+    for name, cs in groups:
+        if not cs:
+            continue
+        d = daily[cs].sum(axis=1)
+        cells = []
+        for _, w in wins:
+            r = d.rolling(w).sum().dropna()
+            cells.append(f"{(r > 0).mean() * 100:3.0f}% ({r.min():+6,.0f})" if len(r) else '      -      ')
+        out(f"  {name:14s} " + ' '.join(f"{x:>13s}" for x in cells))
+    out('  → 짧은 기간 결과는 운이 크게 좌우합니다. 이 표에서 확률이 80~90% 넘는 기간부터가 "봐야 아는" 기간입니다.')
 
 
 def reentry_compare(data):
