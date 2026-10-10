@@ -453,6 +453,9 @@ def run_backtest_live(sub, p, bar='1h'):
     ut_conf = p.get('signal_mode', 'live') == 'ut_confirmed'  # UT 만 봉 확정, EMA 는 실시간
     sw_close = p.get('switch_mode', 'live') == 'close'          # 스위칭은 봉이 확정된 신호로만
     sw_state = 0
+    # 스위칭 규칙: 'both' = UT·EMA 둘 다 반대면 (봇) / 'ema_exit' = EMA 만 반대여도 청산, 반대 진입은 둘 다 맞을 때
+    #             'ema_only' = UT 안 보고 EMA 크로스만으로 진입·스위칭
+    sw_rule = p.get('switch_rule', 'both')
     next_bar = p.get('reentry', 'immediate') == 'next_bar'     # 익절 후 다음 봉에서만 재진입
     # 연속 익절 브레이크: 바로 재진입하다가 익절이 chain_max 번 이어지면 멈추고 다음 봉에서 진입
     #   chain_scope='bar' → 같은 봉 안에서 센 횟수 / 'run' → 봉이 바뀌어도 끊기지 않은 연속 횟수
@@ -527,6 +530,8 @@ def run_backtest_live(sub, p, bar='1h'):
         ef = ef_arr[H - 1] + af * (c - ef_arr[H - 1])
         es = es_arr[H - 1] + as_ * (c - es_arr[H - 1])
         new_state = 1 if (up == 1 and ef > es) else -1 if (up == -1 and ef < es) else 0
+        if sw_rule == 'ema_only':
+            new_state = 1 if ef > es else -1
         raw_new = new_state
         if trend_n:
             et = et_arr[H - 1] + at_ * (c - et_arr[H - 1])
@@ -535,6 +540,8 @@ def run_backtest_live(sub, p, bar='1h'):
         bar_end = (t + 1 >= n_sub) or (hidx[t + 1] != H)
         if bar_end:     # 봉 마감 시점의 UT·EMA (= 확정 신호)
             sw_state = 1 if (up_live == 1 and ef > es) else -1 if (up_live == -1 and ef < es) else 0
+            if sw_rule == 'ema_only':
+                sw_state = 1 if ef > es else -1
         if not confirmed or bar_end:
             state, raw_state = new_state, raw_new
             if (trend_close and pos is not None and state == 0 and
@@ -545,7 +552,12 @@ def run_backtest_live(sub, p, bar='1h'):
 
         # 4) 스위칭 / 신규 진입
         sw_sig = sw_state if sw_close else state
-        if pos is not None and sw_sig == (-1 if pos['side'] == 'LONG' else 1):
+        if sw_rule == 'ema_exit' and pos is not None and (ef < es if pos['side'] == 'LONG' else ef > es):
+            new_side = 'SHORT' if pos['side'] == 'LONG' else 'LONG'
+            close_pos(pos, c, t, '스위칭')        # EMA 만 반대 → 청산. 반대 진입은 UT 도 반대일 때만
+            pos = open_pos(new_side, c, H, t) if state == (1 if new_side == 'LONG' else -1) else None
+            chain_n = 0
+        elif pos is not None and sw_sig == (-1 if pos['side'] == 'LONG' else 1):
             new_side = 'SHORT' if pos['side'] == 'LONG' else 'LONG'
             close_pos(pos, c, t, '스위칭')
             pos = open_pos(new_side, c, H, t)
