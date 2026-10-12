@@ -6,6 +6,7 @@
   python real_chart_check.py --what risk --days 1460   ← 1시간봉 최대 하락 + 3·5·7·10배 강제청산 비교 (4년)
   python real_chart_check.py --what now --days 1460   ← ★ 지금 봇 설정(15분봉·스위칭만·5배) 그대로 4년 — 수익 나는지, 몇 달 봐야 아는지
   python real_chart_check.py --what now --since 2020-01-01   ← 2020년부터 지금까지 (연도별 표 포함)
+  python real_chart_check.py --what grid --since 2020-01-01  ← 봉(15분·1시간·4시간) · 배율 · UT 값 · 횡보 필터 한꺼번에 비교
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -314,10 +315,11 @@ def main():
     ap.add_argument('--since', default=None, help='이 날짜부터 (예: 2020-01-01) — 주면 --days 대신 씀')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
-    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now'], default='all',
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid'], default='all',
                     help='all = 재진입+TP+위험 / reentry = 재진입 비교만 / tp = TP 비교만 / '
                          'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교 / '
-                         'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률')
+                         'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률 / '
+                         'grid = 봉·배율·UT 값·횡보 필터 비교 (스위칭만)')
     a = ap.parse_args()
     if a.since:
         a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.since)).days + 1)
@@ -348,6 +350,8 @@ def main():
 
     if a.what == 'now':
         now_check(data)
+    if a.what == 'grid':
+        grid_check(data)
     if a.what in ('all', 'reentry'):
         reentry_compare(data)
     if a.what in ('all', 'tp'):
@@ -458,6 +462,58 @@ def now_check(data):
             cells.append(f"{(r > 0).mean() * 100:3.0f}% ({r.min():+6,.0f})" if len(r) else '      -      ')
         out(f"  {name:14s} " + ' '.join(f"{x:>13s}" for x in cells))
     out('  → 짧은 기간 결과는 운이 크게 좌우합니다. 이 표에서 확률이 80~90% 넘는 기간부터가 "봐야 아는" 기간입니다.')
+
+
+# grid 비교: (이름, 봉, 배율, UT 키, UT ATR, 횡보 필터 ADX 최소값(0=끔))
+GRID = [
+    ('지금 15분 5배 UT10/5', '15min', 5, 10, 5, 0),
+    ('15분 5배 UT5/10', '15min', 5, 5, 10, 0),
+    ('15분 5배 UT10/5 +ADX20', '15min', 5, 10, 5, 20),
+    ('15분 3배 UT10/5', '15min', 3, 10, 5, 0),
+    ('1시간 3배 UT10/5', '1h', 3, 10, 5, 0),
+    ('1시간 5배 UT10/5', '1h', 5, 10, 5, 0),
+    ('1시간 3배 UT5/10', '1h', 3, 5, 10, 0),
+    ('1시간 3배 UT10/5 +ADX20', '1h', 3, 10, 5, 20),
+    ('4시간 2배 UT10/5', '4h', 2, 10, 5, 0),
+    ('4시간 3배 UT10/5', '4h', 3, 10, 5, 0),
+]
+
+
+def grid_check(data):
+    """봉·배율·UT 값·횡보 필터 비교 — 전부 스위칭만 (TP 없음), UT 봉마감 + EMA 실시간, 꼬리로 강제청산 판정"""
+    out('━' * 112)
+    out('봉 · 배율 · UT 값 · 횡보 필터 비교 — 스위칭만, UT 봉마감 + EMA34/55 실시간, 진입금 BTC 60 / 나머지 50')
+    t0 = time.time()
+    rows = []
+    for gi, (name, bar, lev, key, atr, adx_min) in enumerate(GRID, 1):
+        ts = []
+        for c, df in data.items():
+            p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=1e6, tp_t=1e6, switch='live')
+            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, adx_entry_min=float(adx_min))
+            t = bt.run_backtest_live(df, p, bar=bar)[0]
+            if len(t):
+                ts.append(t.assign(코인=c, 증거금기준=AMOUNT.get(c, 50)))
+        print(f"  계산 {gi}/{len(GRID)}: {name} ({time.time() - t0:.0f}초)", flush=True)
+        if not ts:
+            rows.append((name, None))
+            continue
+        a = pd.concat(ts, ignore_index=True).sort_values('시각')
+        eq = np.r_[0.0, a['순손익'].cumsum().values]
+        mon = a.groupby(a['시각'].dt.to_period('M'))['순손익'].sum()
+        r = a['순손익'] / a['증거금기준'] * 100
+        rows.append((name, dict(net=a['순손익'].sum(), n=len(a), win=(r > 0).mean() * 100, avg_loss=r[r <= 0].mean(),
+                                p10=np.percentile(r, 10), mdd=(eq - np.maximum.accumulate(eq)).min(), worst=mon.min(),
+                                negm=int((mon < 0).sum()), months=len(mon), liq=int((a['유형'] == '강제청산').sum()),
+                                fee=a['수수료'].sum())))
+    out(f"{'설정':24s} {'순손익':>9s} {'거래':>6s} {'이긴%':>5s} {'평균손실':>7s} {'큰손실':>7s} {'최대낙폭':>9s} "
+        f"{'최악의달':>8s} {'손실달':>7s} {'청산':>5s} {'수수료':>7s}")
+    for name, x in rows:
+        if x is None:
+            out(f"{name:24s} 거래 없음")
+            continue
+        out(f"{name:24s} {x['net']:+9,.0f} {x['n']:6,d} {x['win']:4.0f}% {x['avg_loss']:+6.1f}% {x['p10']:+6.1f}% "
+            f"{x['mdd']:+9,.0f} {x['worst']:+8,.0f} {x['negm']:>3d}/{x['months']:<3d} {x['liq']:5d} {x['fee']:7,.0f}")
+    out('  평균손실·큰손실 = 진입금 대비 % (큰손실 = 나쁜 쪽 10% 거래). ADX20 = 매매 봉 ADX 가 20 미만이면 새 진입 쉼 (스위칭 청산은 함)')
 
 
 def reentry_compare(data):
