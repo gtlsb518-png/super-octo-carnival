@@ -5,6 +5,7 @@
   python real_chart_check.py --what tp    ← TP 비교만 (--what reentry 는 재진입 비교만)
   python real_chart_check.py --what risk --days 1460   ← 1시간봉 최대 하락 + 3·5·7·10배 강제청산 비교 (4년)
   python real_chart_check.py --what now --days 1460   ← ★ 지금 봇 설정(15분봉·스위칭만·5배) 그대로 4년 — 수익 나는지, 몇 달 봐야 아는지
+  python real_chart_check.py --what now --since 2020-01-01   ← 2020년부터 지금까지 (연도별 표 포함)
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -310,6 +311,7 @@ def risk_compare(data):
 def main():
     ap = argparse.ArgumentParser(description='실제 차트로 재진입 방식 비교')
     ap.add_argument('--days', type=int, default=730, help='기간 (일, 기본 730 = 2년)')
+    ap.add_argument('--since', default=None, help='이 날짜부터 (예: 2020-01-01) — 주면 --days 대신 씀')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
     ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now'], default='all',
@@ -317,6 +319,8 @@ def main():
                          'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교 / '
                          'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률')
     a = ap.parse_args()
+    if a.since:
+        a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.since)).days + 1)
     coins = [c.upper().replace('USDT', '').replace('/', '') for c in a.coins]
 
     out(f"📊 실제 바이낸스 차트 비교 — 최근 {a.days}일, 코인 {len(coins)}개, "
@@ -420,6 +424,19 @@ def now_check(data):
     for m, v in T['mon'].items():
         bar = '█' * min(40, int(abs(v) / max(1.0, T['mon'].abs().max()) * 40))
         out(f"  {m}  {v:+8,.0f}  {'+' if v >= 0 else '-'}{bar}")
+
+    out('━' * 92)
+    out('연도별 (5배, 코인 전부) — BTC 는 그해 가격 변화')
+    btc = data.get('BTC')
+    yr = T['all'].groupby(T['all']['시각'].dt.year)
+    for y, g in yr:
+        chg = ''
+        if btc is not None:
+            b = btc[btc.index.year == y]['close']
+            if len(b) > 1:
+                chg = f"BTC {(b.iloc[-1] / b.iloc[0] - 1) * 100:+5.0f}%  "
+        out(f"  {y}  {chg}순손익 {g['순손익'].sum():+8,.0f} · 거래 {len(g):5,d} · 이긴 비율 {(g['순손익'] > 0).mean() * 100:3.0f}% · "
+            f"강제청산 {int((g['유형'] == '강제청산').sum()):3d} · 수수료 {g['수수료'].sum():6,.0f}")
 
     out('━' * 92)
     out('아무 날에나 시작해서 그 기간만 봤을 때 — 수익이 나 있을 확률 (최악)')
