@@ -456,6 +456,9 @@ def run_backtest_live(sub, p, bar='1h'):
     # 스위칭 규칙: 'both' = UT·EMA 둘 다 반대면 (봇) / 'ema_exit' = EMA 만 반대여도 청산, 반대 진입은 둘 다 맞을 때
     #             'ema_only' = UT 안 보고 EMA 크로스만으로 진입·스위칭
     sw_rule = p.get('switch_rule', 'both')
+    # 손절 후: 같은 방향 신호가 이어지는 동안은 다시 안 들어감 (봇의 '다음 신호 대기'와 같게). False 면 예전처럼 바로 재진입
+    sl_wait = bool(p.get('sl_wait', True))
+    sl_block = 0
     next_bar = p.get('reentry', 'immediate') == 'next_bar'     # 익절 후 다음 봉에서만 재진입
     # 연속 익절 브레이크: 바로 재진입하다가 익절이 chain_max 번 이어지면 멈추고 다음 봉에서 진입
     #   chain_scope='bar' → 같은 봉 안에서 센 횟수 / 'run' → 봉이 바뀌어도 끊기지 않은 연속 횟수
@@ -496,6 +499,7 @@ def run_backtest_live(sub, p, bar='1h'):
                 close_pos(pos, pos['liq'], t, '강제청산'); pos = None
             elif pos['sl_price'] is not None and ((side == 'LONG' and sl_[t] <= pos['sl_price']) or
                                                   (side == 'SHORT' and sh[t] >= pos['sl_price'])):
+                sl_block = 1 if side == 'LONG' else -1
                 close_pos(pos, pos['sl_price'], t, '손절'); pos = None
             else:
                 # 2) 유리한 쪽: 익절 → 신호가 그대로면 그 가격에서 바로 재진입 (여러 번 가능)
@@ -562,7 +566,9 @@ def run_backtest_live(sub, p, bar='1h'):
             close_pos(pos, c, t, '스위칭')
             pos = open_pos(new_side, c, H, t)
             chain_n = 0
-        elif pos is None and state != 0 and H != blocked_h:
+        elif sl_block and state != sl_block:
+            sl_block = 0                                   # 손절한 방향의 신호가 끝남 → 다음 신호부터 진입
+        if pos is None and state != 0 and H != blocked_h and not (sl_wait and sl_block == state):
             pos = open_pos('LONG' if state == 1 else 'SHORT', c, H, t)
             chain_n = 0
 
