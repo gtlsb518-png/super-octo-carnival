@@ -294,6 +294,7 @@ _disable_console_quickedit()
 #   (측정: 200봉이면 UT 방향이 5%, 진입 신호가 2.5% 시점에서 트레이딩뷰(긴 기록)와 다름 → 499봉이면 0.02%)
 #   499 = 바이낸스 조회 무게가 200봉과 같은(2) 최대 개수
 SIGNAL_BARS = 499
+BOT_VERSION = '2026-10-11'   # 화면 제목·켤 때 콘솔에 표시 (어느 파일로 돌고 있는지 확인용)
 
 _INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
                 '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
@@ -2558,6 +2559,23 @@ class TradingBot:
     def stop(self):
         self.running = False
         
+    def _why(self, sig, live_ema):
+        """📊 진입·스위칭 근거 한 줄 — 트레이딩뷰와 바로 맞춰 보게 (UT 가 어느 봉 마감 기준인지, EMA 값)"""
+        try:
+            ut = 'Buy' if sig.get('ut_position_long') else ('Sell' if sig.get('ut_position_short') else '-')
+            ef, es = float(sig['ema_fast_val']), float(sig['ema_slow_val'])
+            when = ''
+            df = getattr(self, '_cached_df', None)
+            if df is not None and len(df):
+                t = df.index[-1]           # 'ut_close' 면 진행 중인 봉의 시작 = 마지막 마감봉이 끝난 시각
+                if SIGNAL_MODE == 'confirmed':
+                    t = t + pd.Timedelta(milliseconds=_INTERVAL_MS.get(self.config['timeframe'], 900_000))
+                when = datetime.fromtimestamp(t.timestamp()).strftime('%H:%M') + ' 마감봉 '
+            return (f"   📊 근거: UT {ut} ({when}기준) · EMA{self.config.get('ema_fast', 34)} {fmt_px(ef)} "
+                    f"{'>' if ef > es else '<'} EMA{self.config.get('ema_slow', 55)} {fmt_px(es)} ({'실시간' if live_ema else '봉 마감'})")
+        except Exception:
+            return None
+
     def _tp_pct(self, side):
         """이 포지션의 TP% 를 숫자로. (TP%, ADX, 장세) 묶음 등이 잘못 저장돼 있어도 TP% 만 꺼내고 고쳐 둔다"""
         key = f'entry_tp_{side}'
@@ -3421,6 +3439,9 @@ class TradingBot:
                                 # 로그 출력 (동적 TP 값으로 표시)
                                 entry_price_str = self.format_price(signals['price'])
                                 self.log(f"✅ {pos_type} 진입! ${entry_price_str} | {qty}개 | {self.config['timeframe']} | {self.config['leverage']}x", pos_type)
+                                _w = self._why(signals, SIGNAL_MODE != 'confirmed')
+                                if _w:
+                                    self.log(_w, pos_type)
                                 self.log(f"   📊 ADX: {adx_value:.1f} ({market_type}) → TP {dynamic_tp}%", pos_type)
                                 if self.config.get('exit_mode', 'tp') != 'switch':
                                     self.log(f"   🎯 TP: 가격+{dynamic_tp:.2f}% → ROI +{target_tp_roi:.2f}% → 💰 ${target_usdt:.2f}", pos_type)
@@ -3746,6 +3767,9 @@ class TradingBot:
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"{'🛑 LONG 손절 (반대 신호 2개)' if self.config.get('one_shot') else '🔄 LONG→SHORT 스위칭!'} 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'LONG')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | ROI {pnl_pct:+.2f}%", 'LONG')
+                            _w = self._why(sw, SWITCH_MODE == 'live' and SIGNAL_MODE != 'confirmed')
+                            if _w:
+                                self.log(_w, 'LONG')
                             self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'LONG')
                             
                             # 콘솔 출력
@@ -4130,6 +4154,9 @@ class TradingBot:
                             # 🔥 로그에 청산 가격, 수수료, 순수익 표시
                             self.log(f"{'🛑 SHORT 손절 (반대 신호 2개)' if self.config.get('one_shot') else '🔄 SHORT→LONG 스위칭!'} 가격{'+' if price_change_pct >= 0 else ''}{price_change_pct:.2f}% | ROI {'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%", 'SHORT')
                             self.log(f"   💰 청산가: ${fmt_px(close_price)} | 수익: ${pnl_usd:.2f} | ROI {pnl_pct:+.2f}%", 'SHORT')
+                            _w = self._why(sw, SWITCH_MODE == 'live' and SIGNAL_MODE != 'confirmed')
+                            if _w:
+                                self.log(_w, 'SHORT')
                             self.log(f"   💸 총 수수료: -${total_fee:.3f}{fund_txt} | 순수익: {profit_sign}${abs(net_profit):.2f}", 'SHORT')
                             
                             # 콘솔 출력
@@ -4729,7 +4756,7 @@ class App:
         prog_num = PROGRAM_NUMBER
         self.program_number = prog_num
         mode = '테스트넷(모의)' if TESTNET else '🔴 메인넷(실거래)'
-        self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}  |  {mode}  |  키 {key_hint()}  ({key_source()})")
+        self.root.title(f"🤖 자동매매 봇 - 프로그램 #{prog_num}  |  {mode}  |  키 {key_hint()}  ({key_source()})  |  버전 {BOT_VERSION}")
         return prog_num
     
     def add_default_coins(self):
@@ -4806,7 +4833,7 @@ class App:
         print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * mult:,.0f} USDT "
               f"(이 프로그램만, {LEVERAGE}배 기준 증거금×{mult})")
         print(f"  🎯 전략: {TF_TEXT[TIMEFRAME]} · {LEVERAGE}배 · ADX {TF_TEXT[ADX_TIMEFRAME]} | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
-              f" | 스위칭 {SWITCH_TEXT[SWITCH_MODE]}")
+              f" | 스위칭 {SWITCH_TEXT[SWITCH_MODE]} | 신호 {SIGNAL_BARS}봉 | 버전 {BOT_VERSION}")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
         print("=" * 60)
