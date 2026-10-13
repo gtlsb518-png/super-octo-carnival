@@ -7,6 +7,7 @@
   python real_chart_check.py --what now --days 1460   ← ★ 지금 봇 설정(15분봉·스위칭만·5배) 그대로 4년 — 수익 나는지, 몇 달 봐야 아는지
   python real_chart_check.py --what now --since 2020-01-01   ← 2020년부터 지금까지 (연도별 표 포함)
   python real_chart_check.py --what grid --since 2020-01-01  ← 봉(15분·1시간·4시간) · 배율 · UT 값 · 횡보 필터 한꺼번에 비교
+  python real_chart_check.py --what ut --since 2020-01-01    ← ★ UT 키·ATR 조합 찾기 (앞 기간에서 고르고 뒤 기간으로 확인)
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -315,11 +316,12 @@ def main():
     ap.add_argument('--since', default=None, help='이 날짜부터 (예: 2020-01-01) — 주면 --days 대신 씀')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
-    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid'], default='all',
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid', 'ut'], default='all',
                     help='all = 재진입+TP+위험 / reentry = 재진입 비교만 / tp = TP 비교만 / '
                          'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교 / '
                          'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률 / '
-                         'grid = 봉·배율·UT 값·횡보 필터 비교 (스위칭만)')
+                         'grid = 봉·배율·UT 값·횡보 필터 비교 (스위칭만) / '
+                         'ut = UT 키·ATR 조합 찾기 (앞 기간 고르기 + 뒤 기간 확인)')
     a = ap.parse_args()
     if a.since:
         a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.since)).days + 1)
@@ -352,6 +354,8 @@ def main():
         now_check(data)
     if a.what == 'grid':
         grid_check(data)
+    if a.what == 'ut':
+        ut_search(data)
     if a.what in ('all', 'reentry'):
         reentry_compare(data)
     if a.what in ('all', 'tp'):
@@ -514,6 +518,72 @@ def grid_check(data):
         out(f"{name:24s} {x['net']:+9,.0f} {x['n']:6,d} {x['win']:4.0f}% {x['avg_loss']:+6.1f}% {x['p10']:+6.1f}% "
             f"{x['mdd']:+9,.0f} {x['worst']:+8,.0f} {x['negm']:>3d}/{x['months']:<3d} {x['liq']:5d} {x['fee']:7,.0f}")
     out('  평균손실·큰손실 = 진입금 대비 % (큰손실 = 나쁜 쪽 10% 거래). ADX20 = 매매 봉 ADX 가 20 미만이면 새 진입 쉼 (스위칭 청산은 함)')
+
+
+UT_KEYS = (5, 7, 10, 15, 20)
+UT_ATRS = (5, 10, 14)
+
+
+def ut_search(data):
+    """UT 키·ATR 조합 찾기 — 지금 봇 설정(15분봉·5배·스위칭만·UT 봉마감 + EMA 실시간)에서 UT 값만 바꿔 본다.
+
+    과거에 끼워 맞추기 방지: 기간을 반으로 나눠 '앞 기간'에서 좋았던 조합이 '뒤 기간'(고를 때 안 본 기간)에서도
+    지금(10/5)보다 나은지 확인한다. 둘 다 나은 조합만 추천.
+    """
+    out('━' * 112)
+    out('★ UT 키·ATR 조합 찾기 — 15분봉 · 5배 · 스위칭만 · UT 봉마감 + EMA34/55 실시간 (UT 값만 바꿈)')
+    start = min(df.index[0] for df in data.values())
+    end = max(df.index[-1] for df in data.values())
+    mid = start + (end - start) / 2
+    out(f"   앞 기간 {start:%Y-%m-%d} ~ {mid:%Y-%m-%d} (고르기) · 뒤 기간 {mid:%Y-%m-%d} ~ {end:%Y-%m-%d} (확인)")
+    t0 = time.time()
+    res = {}
+    combos = [(k, a) for k in UT_KEYS for a in UT_ATRS]
+    for i, (k, a) in enumerate(combos, 1):
+        ts = []
+        for c, df in data.items():
+            p = params(5, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=1e6, tp_t=1e6, switch='live')
+            p.update(ut_sens=float(k), ut_atr=int(a), mmr_pct=1.0)
+            t = bt.run_backtest_live(df, p, bar='15min')[0]
+            if len(t):
+                ts.append(t.assign(증거금기준=AMOUNT.get(c, 50)))
+        print(f"  계산 {i}/{len(combos)}: UT {k}/{a} ({time.time() - t0:.0f}초)", flush=True)
+        if not ts:
+            continue
+        al = pd.concat(ts, ignore_index=True).sort_values('시각')
+        first, second = al[al['시각'] < mid], al[al['시각'] >= mid]
+        eq = np.r_[0.0, al['순손익'].cumsum().values]
+        r = al['순손익'] / al['증거금기준'] * 100
+        res[(k, a)] = dict(first=first['순손익'].sum(), second=second['순손익'].sum(), net=al['순손익'].sum(), n=len(al),
+                           avg_loss=r[r <= 0].mean(), mdd=(eq - np.maximum.accumulate(eq)).min(),
+                           fee=al['수수료'].sum(), liq=int((al['유형'] == '강제청산').sum()))
+    if not res:
+        out('거래 없음')
+        return
+    base = res.get((10, 5))
+    out(f"{'UT 키/ATR':>9s} {'앞 기간':>9s} {'뒤 기간':>9s} {'전체':>9s} {'거래':>6s} {'평균손실':>7s} {'최대낙폭':>9s} "
+        f"{'수수료':>7s} {'청산':>4s}   판정")
+    good = []
+    for (k, a), x in sorted(res.items(), key=lambda kv: -kv[1]['first']):
+        tag = ''
+        if (k, a) == (10, 5):
+            tag = '← 지금'
+        elif base and x['first'] > base['first'] and x['second'] > base['second'] and x['second'] > 0:
+            tag = '✅ 앞·뒤 모두 지금보다 나음'
+            good.append(((k, a), x))
+        elif base and x['first'] > base['first']:
+            tag = '⚠️ 앞에서만 나음 (뒤에서 못 지킴)'
+        out(f"{f'{k}/{a}':>9s} {x['first']:+9,.0f} {x['second']:+9,.0f} {x['net']:+9,.0f} {x['n']:6,d} "
+            f"{x['avg_loss']:+6.1f}% {x['mdd']:+9,.0f} {x['fee']:7,.0f} {x['liq']:4d}   {tag}")
+    out('━' * 112)
+    if good:
+        (k, a), x = max(good, key=lambda g: g[1]['second'])
+        out(f"추천: UT {k}/{a} — 고를 때 안 본 뒤 기간에서도 지금(10/5)보다 나았음 "
+            f"(뒤 기간 {x['second']:+,.0f} vs 지금 {base['second']:+,.0f})")
+        out(f"   바꾸려면: 5_gui.py 코인 기본값 'ut_sens': {k}, 'ut_atr': {a} (또는 코인 ⚙️ 설정) — 바꾸기 전에 알려주세요")
+    else:
+        out('추천 없음: 앞·뒤 기간 모두에서 지금(10/5)보다 나은 조합이 없음 → 지금 값 유지가 맞음')
+    out('  ※ 앞 기간 1등이 뒤 기간에서 무너지면 그건 과거에 끼워 맞춘 것 (실전에서도 무너질 가능성 큼)')
 
 
 def reentry_compare(data):
