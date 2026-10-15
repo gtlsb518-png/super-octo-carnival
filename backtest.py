@@ -431,7 +431,7 @@ def run_backtest_live(sub, p, bar='1h'):
                 'sl_price': (price * (1 - sl_pct / 100) if side == 'LONG' else price * (1 + sl_pct / 100))
                             if sl_pct > 0 else None,
                 'liq': price * (1 - liq_move / 100) if side == 'LONG' else price * (1 + liq_move / 100),
-                't0': ts[t], 'min_roi': 0.0}
+                't0': ts[t], 'min_roi': 0.0, 'max_roi': 0.0}
 
     def close_pos(pp, price, t, reason):
         nonlocal equity, peak, max_dd
@@ -445,6 +445,7 @@ def run_backtest_live(sub, p, bar='1h'):
                        'TP%': pp['tp_pct'], 'ROI%': round(gross / pp.get('margin', amount) * 100, 2), '수익': gross,
                        '물타기': pp.get('adds', 0), '증거금': pp.get('margin', amount),
                        '수수료': fee, '펀딩비': fund, '순손익': net, '최저ROI%': round(pp['min_roi'], 2),
+                       '최고ROI%': round(pp.get('max_roi', 0.0), 2),
                        '유형': reason, '보유(봉)': (ts[t] - pp['t0']) / 3600.0})
 
     state = 0          # 직전 확인 시점의 신호 (1 롱 / -1 숏 / 0 없음)
@@ -495,6 +496,9 @@ def run_backtest_live(sub, p, bar='1h'):
                 pos['liq'] = pos['entry'] * (1 - liq_move / 100) if side == 'LONG' else pos['entry'] * (1 + liq_move / 100)
                 roi_low = ((adverse - pos['entry']) if side == 'LONG' else (pos['entry'] - adverse)) / pos['entry'] * 100 * lev
             pos['min_roi'] = min(pos['min_roi'], roi_low)
+            fav_px = sh[t] if side == 'LONG' else sl_[t]           # 이 봉에서 가장 유리했던 가격 → 최고 ROI
+            pos['max_roi'] = max(pos.get('max_roi', 0.0),
+                                 ((fav_px - pos['entry']) if side == 'LONG' else (pos['entry'] - fav_px)) / pos['entry'] * 100 * lev)
             if (side == 'LONG' and sl_[t] <= pos['liq']) or (side == 'SHORT' and sh[t] >= pos['liq']):
                 close_pos(pos, pos['liq'], t, '강제청산'); pos = None
             elif pos['sl_price'] is not None and ((side == 'LONG' and sl_[t] <= pos['sl_price']) or
