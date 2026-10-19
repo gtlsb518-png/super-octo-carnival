@@ -468,9 +468,12 @@ def now_check(data):
     out('  → 짧은 기간 결과는 운이 크게 좌우합니다. 이 표에서 확률이 80~90% 넘는 기간부터가 "봐야 아는" 기간입니다.')
 
 
-# grid 비교: (이름, 봉, 배율, UT 키, UT ATR, 횡보 필터 ADX 최소값(0=끔))
+# grid 비교: (이름, 봉, 배율, UT 키, UT ATR, 횡보 필터 ADX 최소값(0=끔)[, 익절 ROI%(0=없음) — 익절 후 다음 신호까지 대기])
 GRID = [
     ('지금 15분 5배 UT10/5', '15min', 5, 10, 5, 0),
+    ('15분 5배 ROI30% 익절+대기', '15min', 5, 10, 5, 0, 30),
+    ('15분 5배 ROI40% 익절+대기', '15min', 5, 10, 5, 0, 40),
+    ('15분 5배 ROI60% 익절+대기', '15min', 5, 10, 5, 0, 60),
     ('15분 5배 UT5/10', '15min', 5, 5, 10, 0),
     ('15분 5배 UT10/5 +ADX20', '15min', 5, 10, 5, 20),
     ('15분 3배 UT10/5', '15min', 3, 10, 5, 0),
@@ -489,11 +492,13 @@ def grid_check(data):
     out('봉 · 배율 · UT 값 · 횡보 필터 비교 — 스위칭만, UT 봉마감 + EMA34/55 실시간, 진입금 BTC 60 / 나머지 50')
     t0 = time.time()
     rows = []
-    for gi, (name, bar, lev, key, atr, adx_min) in enumerate(GRID, 1):
+    for gi, (name, bar, lev, key, atr, adx_min, *rest) in enumerate(GRID, 1):
+        tp_roi = rest[0] if rest else 0
         ts = []
         for c, df in data.items():
-            p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=1e6, tp_t=1e6, switch='live')
-            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, adx_entry_min=float(adx_min))
+            tpp = tp_roi / lev if tp_roi else 1e6                 # ROI% → 가격 %
+            p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=tpp, tp_t=tpp, switch='live')
+            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, adx_entry_min=float(adx_min), tp_wait=bool(tp_roi))
             t = bt.run_backtest_live(df, p, bar=bar)[0]
             if len(t):
                 ts.append(t.assign(코인=c, 증거금기준=AMOUNT.get(c, 50)))

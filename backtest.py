@@ -516,7 +516,11 @@ def run_backtest_live(sub, p, bar='1h'):
                         if not chain_run and chain_h != H:
                             chain_n = 0
                         chain_n, chain_h = chain_n + 1, H
-                    if next_bar or (chain_max > 0 and chain_n >= chain_max):
+                    if p.get('tp_wait'):
+                        # 익절 후 같은 방향 신호가 이어지는 동안은 안 들어감 → 다음 신호(새 신호 또는 반대 신호)에서 진입
+                        sl_block = 1 if side == 'LONG' else -1
+                        pos = None
+                    elif next_bar or (chain_max > 0 and chain_n >= chain_max):
                         pos, blocked_h, chain_n = None, H, 0
                     else:
                         pos = open_pos(side, px, H, t) if state == (1 if side == 'LONG' else -1) else None
