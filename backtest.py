@@ -419,12 +419,21 @@ def run_backtest_live(sub, p, bar='1h'):
     pos = None
 
     adx_min = float(p.get('adx_entry_min', 0.0) or 0.0)   # 횡보 필터: ADX 가 이보다 낮으면 새 진입 안 함 (청산·스위칭 청산은 함)
+    # 거래량 필터: 직전 마감봉 거래량 >= 그 앞 vol_ma 봉 평균 × vol_mult 일 때만 새 진입 (청산은 그대로)
+    if p.get('vol_filter') and 'volume' in hb:
+        _vma = int(p.get('vol_ma', 20) or 20)
+        _avg = hb['volume'].rolling(_vma).mean().shift(1)
+        vol_ok_arr = (hb['volume'] >= _avg * float(p.get('vol_mult', 1.5))).fillna(False).values
+    else:
+        vol_ok_arr = None
     dca_roi = float(p.get('dca_roi', 0.0) or 0.0)      # 물타기: ROI 가 이만큼(음수, 예 -65) 빠지면 같은 금액 추가 진입
     dca_times = int(p.get('dca_times', 1) or 0)
 
     def open_pos(side, price, H, t):
         if adx_min > 0 and adx[H - 1] < adx_min:
             return None            # 횡보 (추세 약함) → 들어가지 않고 기다림
+        if vol_ok_arr is not None and not vol_ok_arr[H - 1]:
+            return None            # 거래량이 약함 → 기다렸다가 거래량 실린 봉에서 진입
         tp = tp_pct(H)
         return {'side': side, 'entry': price, 'qty': amount * lev / price, 'tp_pct': tp, 'margin': amount, 'adds': 0,
                 'tp_price': price * (1 + tp / 100) if side == 'LONG' else price * (1 - tp / 100),

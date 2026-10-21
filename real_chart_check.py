@@ -468,7 +468,7 @@ def now_check(data):
     out('  → 짧은 기간 결과는 운이 크게 좌우합니다. 이 표에서 확률이 80~90% 넘는 기간부터가 "봐야 아는" 기간입니다.')
 
 
-# grid 비교: (이름, 봉, 배율, UT 키, UT ATR, 횡보 필터 ADX 최소값(0=끔)[, 익절 ROI%(0=없음) — 익절 후 다음 신호까지 대기])
+# grid 비교: (이름, 봉, 배율, UT 키, UT ATR, 횡보 필터 ADX 최소값(0=끔)[, 익절 ROI%(0=없음, 익절 후 다음 신호까지 대기)[, 거래량 배수(0=끔)]])
 GRID = [
     ('지금 15분 5배 UT10/5', '15min', 5, 10, 5, 0),
     ('15분 5배 ROI10% 익절+대기', '15min', 5, 10, 5, 0, 10),
@@ -478,6 +478,8 @@ GRID = [
     ('15분 5배 ROI40% 익절+대기', '15min', 5, 10, 5, 0, 40),
     ('15분 5배 ROI50% 익절+대기', '15min', 5, 10, 5, 0, 50),
     ('15분 5배 ROI60% 익절+대기', '15min', 5, 10, 5, 0, 60),
+    ('15분 5배 거래량1.5배', '15min', 5, 10, 5, 0, 0, 1.5),
+    ('15분 5배 거래량2배', '15min', 5, 10, 5, 0, 0, 2.0),
     ('15분 5배 UT5/10', '15min', 5, 5, 10, 0),
     ('15분 5배 UT10/5 +ADX20', '15min', 5, 10, 5, 20),
     ('15분 3배 UT10/5', '15min', 3, 10, 5, 0),
@@ -498,11 +500,13 @@ def grid_check(data):
     rows = []
     for gi, (name, bar, lev, key, atr, adx_min, *rest) in enumerate(GRID, 1):
         tp_roi = rest[0] if rest else 0
+        vol_mult = rest[1] if len(rest) > 1 else 0
         ts = []
         for c, df in data.items():
             tpp = tp_roi / lev if tp_roi else 1e6                 # ROI% → 가격 %
             p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=tpp, tp_t=tpp, switch='live')
-            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, adx_entry_min=float(adx_min), tp_wait=bool(tp_roi))
+            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, adx_entry_min=float(adx_min), tp_wait=bool(tp_roi),
+                     vol_filter=bool(vol_mult), vol_mult=float(vol_mult or 1.5), vol_ma=20)
             t = bt.run_backtest_live(df, p, bar=bar)[0]
             if len(t):
                 ts.append(t.assign(코인=c, 증거금기준=AMOUNT.get(c, 50)))
@@ -527,6 +531,7 @@ def grid_check(data):
         out(f"{name:24s} {x['net']:+9,.0f} {x['n']:6,d} {x['win']:4.0f}% {x['avg_loss']:+6.1f}% {x['p10']:+6.1f}% "
             f"{x['mdd']:+9,.0f} {x['worst']:+8,.0f} {x['negm']:>3d}/{x['months']:<3d} {x['liq']:5d} {x['fee']:7,.0f}")
     out('  평균손실·큰손실 = 진입금 대비 % (큰손실 = 나쁜 쪽 10% 거래). ADX20 = 매매 봉 ADX 가 20 미만이면 새 진입 쉼 (스위칭 청산은 함)')
+    out('  거래량N배 = 직전 마감봉 거래량이 그 앞 20봉 평균의 N배 이상일 때만 새 진입 (스위칭 청산은 함, 거래량 실린 봉에서 진입)')
 
 
 UT_KEYS = (5, 7, 10, 15, 20)
