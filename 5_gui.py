@@ -294,7 +294,7 @@ _disable_console_quickedit()
 #   (측정: 200봉이면 UT 방향이 5%, 진입 신호가 2.5% 시점에서 트레이딩뷰(긴 기록)와 다름 → 499봉이면 0.02%)
 #   499 = 바이낸스 조회 무게가 200봉과 같은(2) 최대 개수
 SIGNAL_BARS = 499
-BOT_VERSION = '2026-10-11'   # 화면 제목·켤 때 콘솔에 표시 (어느 파일로 돌고 있는지 확인용)
+BOT_VERSION = '2026-10-29'   # 화면 제목·켤 때 콘솔에 표시 (어느 파일로 돌고 있는지 확인용)
 
 _INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
                 '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
@@ -908,7 +908,7 @@ class BinanceAPI:
             print(f"[펀딩비 조회 실패] {symbol}: {e}")
             return None, 0
 
-    def get_close_reason(self, symbol, lookback_ms=10 * 60 * 1000, had_algo_tp=False):
+    def get_close_reason(self, symbol, lookback_ms=10 * 60 * 1000, had_algo_tp=False, pos_side=None):
         """포지션이 왜 닫혔는지 판별.
 
         Returns: 'tp'     = 봇이 건 TP 주문 체결 (정상)
@@ -939,6 +939,10 @@ class BinanceAPI:
             otype = str(o.get('type', ''))
             if cid.startswith('adl_autoclose') or cid.startswith('autoclose-'):
                 return 'liq'
+            if pos_side in ('long', 'short'):
+                closing = 'SELL' if pos_side == 'long' else 'BUY'
+                if str(o.get('side', '')).upper() != closing:
+                    return 'not_closed'   # 마지막 체결이 '여는 쪽'(봇 진입) → 닫힌 적 없음 (조회 일시 오류)
             if otype in ('TAKE_PROFIT_MARKET', 'TAKE_PROFIT'):
                 return 'tp'
             if otype in ('STOP_MARKET', 'STOP'):
@@ -1453,6 +1457,11 @@ class BinanceAPI:
                     return None
             else:
                 positions = self._request('GET', '/fapi/v2/positionRisk', signed=True)
+                if isinstance(positions, list) and len(positions) == 0:
+                    # 정상 응답은 모든 코인(수량 0 포함)이 다 온다 → 빈 목록은 거래소 쪽 일시 오류.
+                    # 이걸 '포지션 전부 사라짐'으로 믿으면 여러 코인이 한꺼번에 수동청산으로 오인됐다
+                    print("⚠️ 포지션 조회가 빈 목록으로 옴 → 일시 오류로 보고 무시")
+                    positions = None
                 if positions is not None:
                     self._position_cache = positions
                     self._position_cache_time = now
@@ -2319,6 +2328,18 @@ class TradingBot:
         pos_type = side.upper()
         symbol = self.config['symbol']
 
+        # 🛡️ 정말 닫혔는지 다시 확인 — 거래소가 잠깐 포지션을 못 보여주면 '사라짐'으로 보여 수동청산으로 오인했다
+        for _ in range(2):
+            time.sleep(2)
+            try:
+                self.api.invalidate_position_cache()
+                again = self.api.get_position(symbol)
+            except Exception:
+                again = None
+            if again and isinstance(again, dict) and again.get('side') == side:
+                self._restore_after_false_close(prev, '다시 보니 포지션이 그대로 있음')
+                return
+
         # 바이낸스 실현 손익 조회 (원인 판별 폴백에도 쓰이므로 먼저 한다)
         pnl_usd = prev.get('pnl', 0)
         position_size = self.config['amount'] * self.config['leverage']
@@ -2339,20 +2360,24 @@ class TradingBot:
             print(f"[{symbol}] 실현 손익 조회 실패: {e}")
 
         # 🔍 왜 닫혔는지 판별
-        reason = self.api.get_close_reason(symbol, had_algo_tp=bool(self.config.get(f'tp_algo_{side}')))
+        reason = self.api.get_close_reason(symbol, had_algo_tp=bool(self.config.get(f'tp_algo_{side}')), pos_side=side)
+        if reason == 'not_closed':
+            self._restore_after_false_close(prev, '마지막 체결이 진입 주문뿐 (닫는 주문 없음)')
+            return
         if reason is None:
             # 주문 조회 실패 → 손익 부호로 보수적 추정.
             # 봇 TP는 +1.5%에서만 체결되므로 손실이면 TP일 수 없다.
             # 실현 손익을 우선 쓰고, 그것도 없으면 마지막 미실현 손익으로 본다.
-            reason = 'tp' if pnl_usd > 0 else 'manual'
-            if pnl_usd > 0 and self.config.get('exit_mode', 'tp') == 'switch' and not self.config.get(f'tp_algo_{side}'):
-                reason = 'manual'    # 🔁 스위칭만 + 걸린 TP 주문 없음 → 익절일 수 없다
+            # 확실하지 않으면 '수동청산'으로 보고 코인을 멈추지 않는다 (예전엔 손실이면 무조건 수동청산 → 코인 정지)
+            reason = 'unknown'
+            if pnl_usd > 0 and self.config.get(f'tp_algo_{side}'):
+                reason = 'tp'        # 거래소 TP 주문이 걸려 있었고 수익 → 익절로 봄
             elif pnl_usd < 0 and self.config['amount'] > 0 and -pnl_usd >= 0.8 * self.config['amount']:
-                reason = 'liq'       # 증거금을 거의 다 잃음 = 강제청산 (수동청산으로 보고 코인을 멈추지 않게)
+                reason = 'liq'       # 증거금을 거의 다 잃음 = 강제청산
             src = '실현손익' if realized_ok else '미실현손익(추정)'
             print(f"[청산 원인 추정] {symbol}: 주문조회 실패 → {src} {pnl_usd:+.2f} 기준 '{reason}'")
 
-        label = {'tp': '익절(TP주문)', 'manual': '수동청산', 'liq': '강제청산'}[reason]
+        label = {'tp': '익절(TP주문)', 'manual': '수동청산', 'liq': '강제청산', 'unknown': '청산(원인 확인 안 됨)'}[reason]
         print(f"[🎯 외부 청산 감지] {symbol} {pos_type} — {label}")
 
         # 잔여 주문 정리
@@ -2404,7 +2429,7 @@ class TradingBot:
             self._warn_bad_tp_fill(pos_type, pnl_usd)
             print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
         else:
-            icon = '🛑' if reason == 'manual' else '💀'
+            icon = {'manual': '🛑', 'liq': '💀'}.get(reason, '❔')
             self.log(f"{icon} {pos_type} {label} 감지! (#{count})", pos_type)
             self.log(f"   💰 실현 손익: ${pnl_usd:.2f} | 수수료: ${total_fee:.3f}{fund_txt} "
                      f"| 순손익: {profit_sign}${abs(net_profit):.2f}", pos_type)
@@ -2429,7 +2454,10 @@ class TradingBot:
             # 원인 확인 전에 걸어둔 '이번 봉 진입 금지'는 익절용이라 푼다
             # (안 풀면 사용자가 바로 시작 버튼을 눌러도 다음 봉까지 안 들어갔음)
             self.config['tp_block_bar'] = None
-            if reason == 'liq' and not self.config.get('one_shot'):
+            if reason == 'unknown' and not self.config.get('one_shot'):
+                # ❔ 원인을 확인 못 함 → 멈추지 않고 다음 신호 대기 (사람이 끈 게 확실할 때만 코인 정지)
+                self._set_liq_block(side, why='unknown')
+            elif reason == 'liq' and not self.config.get('one_shot'):
                 # 💀 강제청산: 멈추지 않는다. 청산된 방향의 지금 신호에서는 다시 안 들어가고, 다음 신호부터 진입
                 # 처리한 강제청산 시각 (거래소 시계 기준) — 켤 때 같은 기록으로 또 막지 않게
                 self.config['liq_seen_ms'] = int((info or {}).get('close_time') or 0) or \
@@ -2454,6 +2482,17 @@ class TradingBot:
         self.config['roi'][f'{side}_current'] = 0
         self.config['roi'][f'{side}_max'] = 0
         self.config['roi'][f'{side}_min'] = 0
+
+    def _restore_after_false_close(self, prev, why):
+        """포지션이 사라진 것처럼 보였지만 실제로는 안 닫힘 → 기록·정지 없이 그대로 관리"""
+        side = prev.get('side')
+        self.config['_cached_position'] = prev
+        self.config['has_position'] = True
+        self.config['_recording_close'] = 0
+        self._close_consumed = False
+        self.config['tp_block_bar'] = None          # 오인해서 걸어둔 '이번 봉 진입 금지' 해제
+        print(f"[🛡️ 청산 아님] {self.config['symbol']} {str(side).upper()}: {why} → 기록·정지 없이 그대로 관리")
+        self.log(f"🛡️ 거래소가 잠깐 포지션을 안 보여줬지만 청산은 아님 ({why}) → 그대로 관리", str(side).upper())
 
     def halt_coin(self, why, pos_type, detected=True):
         """🛑 이 코인만 매매 정지 (재진입 차단).
@@ -2701,7 +2740,8 @@ class TradingBot:
             S = side.upper()
             head = {'liq': '⏸️ 강제청산 후 멈추지 않고 다음 신호를 기다립니다',
                     'manual': '⏸️ 직접 청산 — 봇은 멈추지 않고 다음 신호를 기다립니다',
-                    'restore': '⏸️ 청산 후 다음 신호 대기를 이어갑니다'}.get(why, '⏸️ 청산 후 다음 신호를 기다립니다')
+                    'restore': '⏸️ 청산 후 다음 신호 대기를 이어갑니다',
+                    'unknown': '⏸️ 청산 원인을 확인 못 해서 멈추지 않고 다음 신호를 기다립니다'}.get(why, '⏸️ 청산 후 다음 신호를 기다립니다')
             for t in ('LONG', 'SHORT'):
                 self.log(f"{head} — 지금 {S} 신호에서는 다시 안 들어가고, "
                          f"{S} 신호가 끝난 뒤 새 신호(또는 반대 신호)가 뜨면 진입", t)

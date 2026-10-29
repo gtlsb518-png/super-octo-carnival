@@ -573,7 +573,7 @@ class TelegramBot:
             return 'tp'
         if '스위칭!' in m or '손절 (반대 신호' in m:
             return 'switch'
-        if ('강제청산 감지' in m or '수동청산 감지' in m or '봇 정지 —' in m or m.startswith('⏸️ 강제청산 후')
+        if ('강제청산 감지' in m or '수동청산 감지' in m or '원인 확인 안 됨' in m or '봇 정지 —' in m or m.startswith('⏸️ 강제청산 후')
                 or m.startswith('⏸️ 직접 청산') or m.startswith('⏸️ 청산 후')
                 or m.startswith('🔓 청산된') or '강제 청산!' in m):
             return 'close'
