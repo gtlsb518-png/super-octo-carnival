@@ -9,7 +9,7 @@
   python real_chart_check.py --what grid --since 2020-01-01  ← 봉(15분·1시간·4시간) · 배율 · UT 값 · 횡보 필터 한꺼번에 비교
   python real_chart_check.py --what ut --since 2020-01-01    ← ★ UT 키·ATR 조합 찾기 (앞 기간에서 고르고 뒤 기간으로 확인)
   python real_chart_check.py --what grid --since 2020-01-01 --rows "지금,1시간,UT20"  ← 원하는 설정만 골라서 (이름에 그 글자가 있는 것)
-  python real_chart_check.py --what two --since 2020-01-01   ← 1시간봉 UT 10/5 vs 15분봉 UT 20/5 (+ 지금 설정) — 비교_1시간_UT20.bat 더블클릭과 같음
+  python real_chart_check.py --what two --since 2020-01-01   ← 1시간봉 UT 10/5·20/5 (3·5배) vs 15분봉 UT 20/5 (+ 지금) — 비교_1시간_UT20.bat 더블클릭과 같음
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -357,8 +357,8 @@ def main():
         now_check(data)
     if a.what == 'grid':
         grid_check(data, a.rows)
-    if a.what == 'two':     # 1시간봉 UT 10/5 vs 15분봉 UT 20/5 (+ 지금 설정 기준)
-        grid_check(data, '지금,1시간 5배 UT10,15분 5배 UT20')
+    if a.what == 'two':     # 1시간봉 UT 10/5·20/5 (3배·5배) vs 15분봉 UT 20/5 (+ 지금 설정 기준)
+        grid_check(data, '지금,1시간 3배 UT10,1시간 5배 UT10,1시간 3배 UT20,1시간 5배 UT20,15분 5배 UT20')
     if a.what == 'ut':
         ut_search(data)
     if a.what in ('all', 'reentry'):
