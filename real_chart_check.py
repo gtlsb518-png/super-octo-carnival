@@ -9,6 +9,7 @@
   python real_chart_check.py --what grid --since 2020-01-01  ← 봉(15분·1시간·4시간) · 배율 · UT 값 · 횡보 필터 한꺼번에 비교
   python real_chart_check.py --what ut --since 2020-01-01    ← ★ UT 키·ATR 조합 찾기 (앞 기간에서 고르고 뒤 기간으로 확인)
   python real_chart_check.py --what grid --since 2020-01-01 --rows "지금,1시간,UT20"  ← 원하는 설정만 골라서 (이름에 그 글자가 있는 것)
+  python real_chart_check.py --what two --since 2020-01-01   ← 1시간봉 UT 10/5 vs 15분봉 UT 20/5 (+ 지금 설정) — 비교_1시간_UT20.bat 더블클릭과 같음
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -318,7 +319,7 @@ def main():
     ap.add_argument('--rows', default=None, help='grid 에서 이름에 이 글자가 들어간 설정만 (쉼표로 여러 개, 예: "지금,1시간,UT20")')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
-    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid', 'ut'], default='all',
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid', 'ut', 'two'], default='all',
                     help='all = 재진입+TP+위험 / reentry = 재진입 비교만 / tp = TP 비교만 / '
                          'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교 / '
                          'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률 / '
@@ -356,6 +357,8 @@ def main():
         now_check(data)
     if a.what == 'grid':
         grid_check(data, a.rows)
+    if a.what == 'two':     # 1시간봉 UT 10/5 vs 15분봉 UT 20/5 (+ 지금 설정 기준)
+        grid_check(data, '지금,1시간 5배 UT10,15분 5배 UT20')
     if a.what == 'ut':
         ut_search(data)
     if a.what in ('all', 'reentry'):
