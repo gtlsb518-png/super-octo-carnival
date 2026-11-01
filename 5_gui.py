@@ -2387,7 +2387,7 @@ class TradingBot:
             src = '실현손익' if realized_ok else '미실현손익(추정)'
             print(f"[청산 원인 추정] {symbol}: 주문조회 실패 → {src} {pnl_usd:+.2f} 기준 '{reason}'")
 
-        label = {'tp': '익절(TP주문)', 'manual': '수동청산', 'liq': '강제청산', 'unknown': '청산(원인 확인 안 됨)'}[reason]
+        label = {'tp': '익절(TP주문)', 'manual': '밖에서 청산(바이낸스 앱 등)', 'liq': '강제청산', 'unknown': '청산(원인 확인 안 됨)'}[reason]
         print(f"[🎯 외부 청산 감지] {symbol} {pos_type} — {label}")
 
         # 잔여 주문 정리
@@ -2439,7 +2439,7 @@ class TradingBot:
             self._warn_bad_tp_fill(pos_type, pnl_usd)
             print(f"[✅ 익절] {symbol} {pos_type} 거래소 TP 체결 | 순수익 {profit_sign}${abs(net_profit):.2f}")
         else:
-            icon = {'manual': '🛑', 'liq': '💀'}.get(reason, '❔')
+            icon = {'manual': '⏸️', 'liq': '💀'}.get(reason, '❔')
             self.log(f"{icon} {pos_type} {label} 감지! (#{count})", pos_type)
             self.log(f"   💰 실현 손익: ${pnl_usd:.2f} | 수수료: ${total_fee:.3f}{fund_txt} "
                      f"| 순손익: {profit_sign}${abs(net_profit):.2f}", pos_type)
