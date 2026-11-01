@@ -7656,9 +7656,19 @@ class App:
                 coin['stats']['short_fee'] = coin['stats'].get('short_fee', 0) + total_fee
                 coin['stats']['total_fee'] = coin['stats'].get('total_fee', 0) + total_fee
             
+            # ⏸️ '다음 신호 대기'는 청산 주문 **전에** 건다 — 청산 직후 돌고 있던 봇 스레드가
+            #    같은 신호로 바로 다시 들어가 버리던 틈 막기 (시험에서 실제로 재진입했음)
+            bot = self.bots.get(id(coin), {}).get(key)
+            waiting = bool(wait_next and coin.get(f'{key}_active') and bot)   # 🔥강제진입이 부를 땐 대기 안 함
+            if waiting:
+                bot._set_liq_block(key, why='manual')
+
             # 청산
             if not self.api.close_position(coin['symbol']):
                 coin['is_closing'] = False
+                if waiting and coin.get('liq_block') == key:     # 청산 못 했으면 대기도 풀어 둔다
+                    coin['liq_block'] = None
+                    self._refresh_running_state()
                 self.add_log(coin, side, f"❌ 강제 청산 실패 — 다시 누르거나 바이낸스에서 직접 청산하세요")
                 return f"{side} 청산에 실패했습니다.\n\n다시 누르거나 바이낸스에서 직접 청산해 주세요."
             coin['has_position'] = False
@@ -7710,10 +7720,7 @@ class App:
             self.update_stats(coin)
 
         # ▶️ 봇은 멈추지 않는다 — 이 방향은 지금 신호가 끝난 뒤 다음 신호에서 진입 (진짜 멈추려면 ⏸️ 정지)
-        bot = self.bots.get(id(coin), {}).get(key)
-        waiting = bool(wait_next and coin.get(f'{key}_active') and bot)   # 🔥강제진입이 부를 땐 대기 안 함
-        if waiting:
-            bot._set_liq_block(key, why='manual')
+        #    (대기는 위에서 청산 주문 전에 이미 걸었음)
 
         # '청산 중' 표시는 몇 초 뒤 해제 (그 사이 다른 봇 스레드가 옛 포지션 값을 읽어 와도 수동청산으로 오인하지 않게)
         def _release(c=coin, t0=t_close):
