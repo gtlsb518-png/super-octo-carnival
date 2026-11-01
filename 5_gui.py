@@ -294,7 +294,7 @@ _disable_console_quickedit()
 #   (측정: 200봉이면 UT 방향이 5%, 진입 신호가 2.5% 시점에서 트레이딩뷰(긴 기록)와 다름 → 499봉이면 0.02%)
 #   499 = 바이낸스 조회 무게가 200봉과 같은(2) 최대 개수
 SIGNAL_BARS = 499
-BOT_VERSION = '2026-10-29'   # 화면 제목·켤 때 콘솔에 표시 (어느 파일로 돌고 있는지 확인용)
+BOT_VERSION = '2026-11-01'   # 화면 제목·켤 때 콘솔에 표시 (어느 파일로 돌고 있는지 확인용)
 
 _INTERVAL_MS = {'1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
                 '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
@@ -1846,6 +1846,16 @@ if TIMEFRAME not in TIMEFRAMES:
     print(f"⚠️ TIMEFRAME='{TIMEFRAME}' 은 없는 값 ({'/'.join(TIMEFRAMES)}) → '15m'")
     TIMEFRAME = '15m'
 TF_TEXT = {'5m': '5분봉', '15m': '15분봉', '30m': '30분봉', '1h': '1시간봉', '2h': '2시간봉', '4h': '4시간봉'}
+# 📈 UT Bot 값 (1_config.py 의 UT_KEY / UT_ATR) — 기본 15 / 5
+try:
+    UT_KEY = float(getattr(_cfgmod, 'UT_KEY', 15))
+    UT_ATR = int(getattr(_cfgmod, 'UT_ATR', 5))
+except Exception:
+    UT_KEY, UT_ATR = 15.0, 5
+if not (1 <= UT_KEY <= 50) or not (1 <= UT_ATR <= 50):
+    print(f"⚠️ UT_KEY={UT_KEY} / UT_ATR={UT_ATR} 범위 밖 → 15 / 5")
+    UT_KEY, UT_ATR = 15.0, 5
+UT_KEY = int(UT_KEY) if float(UT_KEY).is_integer() else UT_KEY
 # 📐 ADX 봉 (TP 1.5%/1.2% 고르기용) — 기본 1시간봉 (15분봉 ADX 는 자주 흔들림)
 try:
     ADX_TIMEFRAME = str(getattr(_cfgmod, 'ADX_TIMEFRAME', '1h')).strip().lower()
@@ -2449,22 +2459,21 @@ class TradingBot:
             except Exception:
                 pass
 
-        # 🛑 봇이 건 TP가 아니면 = 내가 껐거나 바이낸스가 끊은 것 → 이 코인만 정지
+        # 봇이 건 TP 가 아니면 = 밖에서 닫힘(바이낸스 앱 등) / 강제청산 / 원인 모름
         if reason != 'tp':
             # 원인 확인 전에 걸어둔 '이번 봉 진입 금지'는 익절용이라 푼다
             # (안 풀면 사용자가 바로 시작 버튼을 눌러도 다음 봉까지 안 들어갔음)
             self.config['tp_block_bar'] = None
-            if reason == 'unknown' and not self.config.get('one_shot'):
-                # ❔ 원인을 확인 못 함 → 멈추지 않고 다음 신호 대기 (사람이 끈 게 확실할 때만 코인 정지)
-                self._set_liq_block(side, why='unknown')
-            elif reason == 'liq' and not self.config.get('one_shot'):
-                # 💀 강제청산: 멈추지 않는다. 청산된 방향의 지금 신호에서는 다시 안 들어가고, 다음 신호부터 진입
-                # 처리한 강제청산 시각 (거래소 시계 기준) — 켤 때 같은 기록으로 또 막지 않게
-                self.config['liq_seen_ms'] = int((info or {}).get('close_time') or 0) or \
-                    int(time.time() * 1000) + int(getattr(self.api, 'time_offset', 0) or 0)
-                self._set_liq_block(side)
+            # 🔒 코인을 멈추는 건 사용자 버튼(⏸️ 정지 · ⏹️ 전체 종료 · 🎯 1회매매)뿐.
+            #    밖에서 닫혔든 강제청산이든 원인을 모르든 → 멈추지 않고, 같은 신호엔 안 들어가고 다음 신호를 기다린다
+            if self.config.get('one_shot'):
+                self.halt_coin(f'1회 매매: {label}', pos_type)
             else:
-                self.halt_coin(label, pos_type)
+                if reason == 'liq':
+                    # 처리한 강제청산 시각 (거래소 시계 기준) — 켤 때 같은 기록으로 또 막지 않게
+                    self.config['liq_seen_ms'] = int((info or {}).get('close_time') or 0) or \
+                        int(time.time() * 1000) + int(getattr(self.api, 'time_offset', 0) or 0)
+                self._set_liq_block(side, why={'liq': 'liq', 'manual': 'external'}.get(reason, 'unknown'))
         elif self.config.get('one_shot'):
             # 🎯 1회 매매: 거래소 TP 로 익절 1번 → 이 코인 정지 (재진입 안 함)
             self.halt_coin('1회 매매: 익절 완료', pos_type, detected=False)
@@ -2741,11 +2750,12 @@ class TradingBot:
             head = {'liq': '⏸️ 강제청산 후 멈추지 않고 다음 신호를 기다립니다',
                     'manual': '⏸️ 직접 청산 — 봇은 멈추지 않고 다음 신호를 기다립니다',
                     'restore': '⏸️ 청산 후 다음 신호 대기를 이어갑니다',
-                    'unknown': '⏸️ 청산 원인을 확인 못 해서 멈추지 않고 다음 신호를 기다립니다'}.get(why, '⏸️ 청산 후 다음 신호를 기다립니다')
+                    'unknown': '⏸️ 청산 원인을 확인 못 해서 멈추지 않고 다음 신호를 기다립니다',
+                    'external': '⏸️ 밖에서 청산됨 (바이낸스 앱 등) — 봇은 멈추지 않고 다음 신호를 기다립니다'}.get(why, '⏸️ 청산 후 다음 신호를 기다립니다')
             for t in ('LONG', 'SHORT'):
                 self.log(f"{head} — 지금 {S} 신호에서는 다시 안 들어가고, "
                          f"{S} 신호가 끝난 뒤 새 신호(또는 반대 신호)가 뜨면 진입", t)
-            if why == 'manual':
+            if why in ('manual', 'external'):
                 self.log(f"   진입을 완전히 막으려면 ⏸️ 정지 버튼을 누르세요", S)
         print(f"[⏸️ 다음 신호 대기] {self.config['symbol']} {side.upper()} ({why}) — 같은 신호 재진입 막음")
 
@@ -4842,8 +4852,8 @@ class App:
                 'leverage': LEVERAGE,  # 레버리지 (1_config.py 의 LEVERAGE, 기본 5배)
                 'tp': 1.2,  # 기본 TP (동적 TP 비활성화 시)
                 'sl': 0,  # AUTO 고정
-                'ut_sens': 10,  # 🔥 UT Bot Key Value
-                'ut_atr': 5,   # 🔥 UT Bot ATR Period (2→5: 거래·수수료·낙폭 감소, 수익 동등)
+                'ut_sens': UT_KEY,  # 🔥 UT Bot Key Value (1_config.py 의 UT_KEY)
+                'ut_atr': UT_ATR,   # 🔥 UT Bot ATR Period (1_config.py 의 UT_ATR)
                 'ema_fast': 34,
                 'ema_slow': 55,
                 'long_active': False,
@@ -4872,7 +4882,7 @@ class App:
         mult = 4 if LEVERAGE <= 3 else 5 if LEVERAGE <= 5 else 8
         print(f"  💵 동시 증거금 최대 {margin:,.0f} USDT → 권장 잔고 {margin * mult:,.0f} USDT "
               f"(이 프로그램만, {LEVERAGE}배 기준 증거금×{mult})")
-        print(f"  🎯 전략: {TF_TEXT[TIMEFRAME]} · {LEVERAGE}배 · ADX {TF_TEXT[ADX_TIMEFRAME]} | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
+        print(f"  🎯 전략: {TF_TEXT[TIMEFRAME]} · {LEVERAGE}배 · UT {UT_KEY}/{UT_ATR} · ADX {TF_TEXT[ADX_TIMEFRAME]} | 신호 {SIGNAL_MODE_TEXT[SIGNAL_MODE]} | 재진입 {REENTRY_TEXT[REENTRY_MODE]}"
               f" | 스위칭 {SWITCH_TEXT[SWITCH_MODE]} | 신호 {SIGNAL_BARS}봉 | 버전 {BOT_VERSION}")
         print("=" * 60)
         print(f"🪙 프로그램 #{prog_num}: {len(selected_coins)}개 코인 로드 완료!")
@@ -5329,6 +5339,10 @@ class App:
             count = 0
             reconnected_positions = []
             halted = self._saved_halted()
+            # 🔒 멈춤은 사용자 버튼만 — 예전 버전이 '수동청산 감지' 등으로 자동으로 멈춰 둔 코인은 풀어서 다시 돌린다
+            #    (🎯 1회매매로 멈춘 코인만 그대로 유지)
+            for sym in [k for k, v in halted.items() if not str(v).startswith('1회 매매')]:
+                print(f"  ▶️ {sym} 예전에 자동으로 멈췄던 상태 해제 ({halted.pop(sym)}) — 멈춤은 버튼으로만")
             _paused = self._saved_paused()
             for c in self.coins:      # ⏸️ 정지해 둔 방향 (껐다 켜도 유지)
                 for k in _paused.get(c['symbol'], []):
@@ -6923,7 +6937,7 @@ class App:
             
             coin = {'symbol': symbol, 'timeframe': timeframe, 'amount': float(amount_var.get()),
                    'leverage': lev_var.get(), 'tp': tp_var.get(), 'sl': sl_var.get(),
-                   'ut_sens': 10, 'ut_atr': 5, 'ema_fast': 34, 'ema_slow': 55,
+                   'ut_sens': UT_KEY, 'ut_atr': UT_ATR, 'ema_fast': 34, 'ema_slow': 55,
                    'long_active': False, 'short_active': False,
                    'tp_trend': tp_trend_var.get(), 'tp_sideways': tp_sideways_var.get(),
                    'adx_period': adx_period_var.get(), 'adx_interval': ADX_TIMEFRAME, 'exit_mode': EXIT_MODE}

@@ -39,9 +39,11 @@ STATS_START_DATE = ""
 WEBSOCKET_MODE = "on"
 
 # ==================== 🎯 전략 ====================
-TIMEFRAME = "15m"           # 매매 봉: "15m"(기본) / "1h"(예전) / "30m" / "4h" 등. 신호·스위칭은 이 봉 기준
+TIMEFRAME = "1h"            # 매매 봉: "1h"(기본) / "15m" / "30m" / "4h" 등. 신호·스위칭은 이 봉 기준
 ADX_TIMEFRAME = "1h"        # ADX(추세장/횡보장 → TP 1.5%/1.2% 고르기) 계산 봉. 1시간봉이 15분봉보다 안정적. 매매 봉과 같게 하려면 TIMEFRAME 과 같은 값
-LEVERAGE = 5                # 레버리지 (격리). 예전 값 3
+LEVERAGE = 3                # 레버리지 (격리). 1시간봉 UT 15 는 손절 한 번이 커서 3배 (5배면 강제청산이 크게 늘어남)
+UT_KEY = 15                 # UT Bot 키 (트레이딩뷰 UT Bot Alerts 의 Key Value). 예전 10
+UT_ATR = 5                  # UT Bot ATR 기간 (ATR Period)
 SIGNAL_MODE = "ut_close"    # "ut_close"  : UT 는 봉 마감 기준, EMA34/55 는 실시간  ← 추천·기본
                             # "live"      : 둘 다 진행 중인 봉 (예전 방식, 리페인팅 있음)
                             # "confirmed" : 둘 다 봉 마감 기준

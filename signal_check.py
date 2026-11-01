@@ -24,9 +24,23 @@ import requests
 
 MAINNET = os.environ.get('SIGNAL_CHECK_MAINNET', 'https://fapi.binance.com')
 HERE = os.path.dirname(os.path.abspath(__file__))
-TF = '15m'
-BAR_MS = 15 * 60 * 1000
-UT_KEY, UT_ATR, EMA_F, EMA_S = 10, 5, 34, 55
+# 봇과 같은 값 (1_config.py 의 TIMEFRAME · UT_KEY · UT_ATR) — 못 읽으면 1시간봉 · UT 15/5
+TF, UT_KEY, UT_ATR = '1h', 15, 5
+try:
+    _cs = importlib.util.spec_from_file_location('cfg', os.path.join(HERE, '1_config.py'))
+    _cfg = importlib.util.module_from_spec(_cs)
+    _cs.loader.exec_module(_cfg)
+    TF = str(getattr(_cfg, 'TIMEFRAME', TF)).strip()
+    UT_KEY = getattr(_cfg, 'UT_KEY', UT_KEY)
+    UT_ATR = int(getattr(_cfg, 'UT_ATR', UT_ATR))
+except Exception as e:
+    print(f"⚠️ 1_config.py 를 못 읽어 기본값 사용 ({e})")
+_UNIT = {'m': 60_000, 'h': 3_600_000, 'd': 86_400_000}
+try:
+    BAR_MS = int(TF[:-1]) * _UNIT[TF[-1]]
+except Exception:
+    TF, BAR_MS = '1h', 3_600_000
+EMA_F, EMA_S = 34, 55
 NEW_BARS, OLD_BARS, HIST = 499, 200, 1500
 
 _spec = importlib.util.spec_from_file_location('ind', os.path.join(HERE, '3_indicators.py'))

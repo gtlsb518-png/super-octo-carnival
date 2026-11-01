@@ -383,7 +383,7 @@ def main():
 def now_check(data):
     """★ 지금 봇 설정 그대로: 15분봉 · 스위칭만(TP 없음) · UT 봉마감 + EMA 실시간 (진입·스위칭 같음) · 5배"""
     out('━' * 92)
-    out('★ 지금 봇 설정 그대로 — 15분봉 · 스위칭만 · UT 봉마감 + EMA 실시간 · 5배 (꼬리로 강제청산 판정, 유지증거금 1%)')
+    out('예전 봇 설정 — 15분봉 · 스위칭만 · UT 10/5 봉마감 + EMA 실시간 · 5배 (꼬리로 강제청산 판정, 유지증거금 1%)  ※ 지금 설정(1시간봉·3배·UT 15/5)은 --what grid 의 "1시간 3배 UT15/5"')
 
     def run(c, df, lev, tp_s=1e6, tp_t=1e6):
         p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=tp_s, tp_t=tp_t, switch='live')
