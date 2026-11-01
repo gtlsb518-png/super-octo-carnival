@@ -2503,6 +2503,33 @@ class TradingBot:
         print(f"[🛡️ 청산 아님] {self.config['symbol']} {str(side).upper()}: {why} → 기록·정지 없이 그대로 관리")
         self.log(f"🛡️ 거래소가 잠깐 포지션을 안 보여줬지만 청산은 아님 ({why}) → 그대로 관리", str(side).upper())
 
+    def _force_hold_check(self, mine, auto_sl):
+        """🔥 강제진입으로 신호와 반대로 들어간 포지션 — 진입할 때 이미 켜져 있던 반대 신호로는 스위칭하지 않는다
+        (예전엔 강제진입하자마자 봇이 그 신호를 보고 바로 되돌려 수수료만 냈다).
+        그 반대 신호가 한 번 꺼지면 유지가 풀리고, 그 뒤 새로 켜지는 반대 신호(UT+EMA)에는 정상 스위칭."""
+        if self.config.get('force_hold') != mine:
+            return auto_sl
+        if auto_sl:
+            if not self.config.get('_force_hold_logged'):
+                self.config['_force_hold_logged'] = True
+                opp = 'SHORT' if mine == 'long' else 'LONG'
+                self.log(f"🔥 강제진입 유지 — 지금 {opp} 신호는 진입 전부터 켜져 있던 것이라 스위칭 안 함 "
+                         f"(이 신호가 꺼졌다가 다시 켜지면 스위칭)", mine.upper())
+                print(f"[🔥 강제진입 유지] {self.config['symbol']} {mine.upper()} — 진입 전부터 켜져 있던 {opp} 신호로는 스위칭 안 함")
+            return False
+        was_held = self.config.get('_force_hold_logged')
+        self.config['force_hold'] = None
+        self.config['_force_hold_logged'] = False
+        try:
+            if getattr(self, 'app', None):
+                self.app._refresh_running_state()
+        except Exception:
+            pass
+        if was_held:
+            self.log("🔓 강제진입 유지 해제 — 이제 반대 신호가 새로 뜨면 스위칭", mine.upper())
+            print(f"[🔓 강제진입 유지 해제] {self.config['symbol']} {mine.upper()} — 반대 신호가 새로 뜨면 스위칭")
+        return False
+
     def halt_coin(self, why, pos_type, detected=True):
         """🛑 이 코인만 매매 정지 (재진입 차단).
 
@@ -3743,6 +3770,7 @@ class TradingBot:
                         # 🔥 손절: AUTO(스위칭) - UT Bot 현재 상태 + EMA 크로스
                         sw = getattr(self, '_cached_switch_signals', None) or signals
                         auto_sl = sw.get('ut_position_short', False) and sw['ema_short']
+                        auto_sl = self._force_hold_check('long', auto_sl)
 
                         # 🔍 디버깅: 반대 신호 상태가 바뀔 때만 출력 (예전엔 매초 같은 줄이 쌓였음)
                         _st = (bool(sw.get('ut_position_short', False)), bool(sw['ema_short']))
@@ -4128,6 +4156,7 @@ class TradingBot:
                         # 🔥 손절: AUTO(스위칭) - UT Bot 현재 상태 + EMA 크로스
                         sw = getattr(self, '_cached_switch_signals', None) or signals
                         auto_sl = sw.get('ut_position_long', False) and sw['ema_long']
+                        auto_sl = self._force_hold_check('short', auto_sl)
 
                         # 🔍 디버깅: 반대 신호 상태가 바뀔 때만 출력 (예전엔 매초 같은 줄이 쌓였음)
                         _st = (bool(sw.get('ut_position_long', False)), bool(sw['ema_long']))
@@ -4787,7 +4816,8 @@ class App:
                      'liq_block': {c['symbol']: c['liq_block'] for c in self.coins if c.get('liq_block')},
                      'paused': {c['symbol']: [k for k in ('long', 'short') if c.get(f'{k}_paused')]
                                 for c in self.coins if c.get('long_paused') or c.get('short_paused')},
-                     'liq_seen': {c['symbol']: c['liq_seen_ms'] for c in self.coins if c.get('liq_seen_ms')}}
+                     'liq_seen': {c['symbol']: c['liq_seen_ms'] for c in self.coins if c.get('liq_seen_ms')},
+                     'force_hold': {c['symbol']: c['force_hold'] for c in self.coins if c.get('force_hold')}}
             with open(BOT_RUNNING_FILE, 'w') as f:
                 json.dump(state, f)
         except:
@@ -5344,6 +5374,14 @@ class App:
             for sym in [k for k, v in halted.items() if not str(v).startswith('1회 매매')]:
                 print(f"  ▶️ {sym} 예전에 자동으로 멈췄던 상태 해제 ({halted.pop(sym)}) — 멈춤은 버튼으로만")
             _paused = self._saved_paused()
+            try:                      # 🔥 강제진입 유지 (껐다 켜도 지금 신호로 바로 되돌리지 않게)
+                with open(BOT_RUNNING_FILE, 'r', encoding='utf-8') as f:
+                    _fh = dict(json.load(f).get('force_hold') or {})
+            except Exception:
+                _fh = {}
+            for c in self.coins:
+                if _fh.get(c['symbol']) in ('long', 'short'):
+                    c['force_hold'] = _fh[c['symbol']]
             for c in self.coins:      # ⏸️ 정지해 둔 방향 (껐다 켜도 유지)
                 for k in _paused.get(c['symbol'], []):
                     c[f'{k}_paused'] = True
@@ -7673,6 +7711,7 @@ class App:
                 return f"{side} 청산에 실패했습니다.\n\n다시 누르거나 바이낸스에서 직접 청산해 주세요."
             coin['has_position'] = False
             coin['_cached_position'] = None
+            coin['force_hold'] = None
             coin[f'entry_tp_{key}'] = None   # 다른 봇 스레드가 이 청산을 '밖에서 닫힘'으로 다시 기록하지 않게
             coin[f'tp_algo_{key}'] = False
 
@@ -8026,6 +8065,10 @@ class App:
                         
                         # 🔥 has_position + 캐시 설정 (봇 루프 연동!)
                         coin['has_position'] = True
+                        # 🔥 지금 켜져 있는 반대 신호로 바로 되돌리지 않게 (그 신호가 꺼졌다 다시 켜지면 스위칭)
+                        coin['force_hold'] = side.lower()
+                        coin['_force_hold_logged'] = False
+                        self._refresh_running_state()
                         
 
                         # 🔥 수수료를 통계에 반영!
