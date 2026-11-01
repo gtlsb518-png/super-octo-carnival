@@ -10,6 +10,8 @@
   python real_chart_check.py --what ut --since 2020-01-01    ← ★ UT 키·ATR 조합 찾기 (앞 기간에서 고르고 뒤 기간으로 확인)
   python real_chart_check.py --what grid --since 2020-01-01 --rows "지금,1시간,UT20"  ← 원하는 설정만 골라서 (이름에 그 글자가 있는 것)
   python real_chart_check.py --what two --since 2020-01-01   ← 1시간봉 UT 10/5·20/5 (3·5배) vs 15분봉 UT 20/5 (+ 지금) — 비교_1시간_UT20.bat 더블클릭과 같음
+  python real_chart_check.py --what period   ← ★ 10/3~10/30 (15분봉으로 실제 돌렸던 기간) 그대로 다시 — 그때 설정 vs 지금 설정 (10월_다시돌리기.bat)
+  python real_chart_check.py --what period --start "2026-11-01 00:00" --end "2026-11-15 00:00"   ← 다른 기간
   python real_chart_check.py --days 365   ← 기간 바꾸기
   python real_chart_check.py --coins BTC ETH SOL
 
@@ -319,14 +321,21 @@ def main():
     ap.add_argument('--rows', default=None, help='grid 에서 이름에 이 글자가 들어간 설정만 (쉼표로 여러 개, 예: "지금,1시간,UT20")')
     ap.add_argument('--coins', nargs='*', default=COINS, help='코인 (예: BTC ETH SOL)')
     ap.add_argument('--offline', action='store_true', help='저장된 차트만 사용 (다운로드 안 함)')
-    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid', 'ut', 'two'], default='all',
+    ap.add_argument('--start', default=None, help="period 시작 (예: '2026-10-03 03:30')")
+    ap.add_argument('--end', default=None, help="period 끝 (예: '2026-10-30 00:10')")
+    ap.add_argument('--tz', type=float, default=9, help='--start/--end 시각의 시간대 (한국 9)')
+    ap.add_argument('--what', choices=['all', 'reentry', 'tp', 'risk', 'now', 'grid', 'ut', 'two', 'period'], default='all',
                     help='all = 재진입+TP+위험 / reentry = 재진입 비교만 / tp = TP 비교만 / '
                          'risk = 1시간봉 최대 하락·보유 중 최대 역행 → 3·5·7·10배 비교 / '
                          'now = 지금 봇 설정(15분봉·스위칭만) 그대로 수익·기간별 수익 확률 / '
                          'grid = 봉·배율·UT 값·횡보 필터 비교 (스위칭만) / '
                          'ut = UT 키·ATR 조합 찾기 (앞 기간 고르기 + 뒤 기간 확인)')
     a = ap.parse_args()
-    if a.since:
+    if a.what == 'period':
+        a.start = a.start or '2026-10-03 03:30'
+        a.end = a.end or '2026-10-30 00:10'
+        a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.start)).days + 45)   # 시작 전 45일은 지표 계산용
+    elif a.since:
         a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.since)).days + 1)
     coins = [c.upper().replace('USDT', '').replace('/', '') for c in a.coins]
 
@@ -357,6 +366,8 @@ def main():
         now_check(data)
     if a.what == 'grid':
         grid_check(data, a.rows)
+    if a.what == 'period':
+        period_check(data, a.start, a.end, a.tz)
     if a.what == 'two':     # 1시간봉 UT 10/5·20/5 (3배·5배) vs 15분봉 UT 20/5 (+ 지금 설정 기준)
         grid_check(data, '지금,1시간 3배 UT10/5,1시간 5배 UT10/5,1시간 3배 UT15,1시간 5배 UT15,1시간 3배 UT20,1시간 5배 UT20,15분 5배 UT20')
     if a.what == 'ut':
@@ -552,6 +563,75 @@ def grid_check(data, rows_filter=None):
             f"{x['mdd']:+9,.0f} {x['worst']:+8,.0f} {x['negm']:>3d}/{x['months']:<3d} {x['liq']:5d} {x['fee']:7,.0f}")
     out('  평균손실·큰손실 = 진입금 대비 % (큰손실 = 나쁜 쪽 10% 거래). ADX20 = 매매 봉 ADX 가 20 미만이면 새 진입 쉼 (스위칭 청산은 함)')
     out('  거래량N배 = 직전 마감봉 거래량이 그 앞 20봉 평균의 N배 이상일 때만 새 진입 (스위칭 청산은 함, 거래량 실린 봉에서 진입)')
+
+
+PERIOD_ROWS = [
+    ('15분 5배 UT10/5  (10월 설정)', '15min', 5, 10, 5),
+    ('15분 3배 UT10/5', '15min', 3, 10, 5),
+    ('1시간 3배 UT10/5', '1h', 3, 10, 5),
+    ('1시간 3배 UT15/5  ★지금 설정', '1h', 3, 15, 5),
+    ('1시간 5배 UT15/5', '1h', 5, 15, 5),
+    ('1시간 3배 UT20/5', '1h', 3, 20, 5),
+    ('4시간 2배 UT10/5', '4h', 2, 10, 5),
+]
+# 사용자가 보내 준 엑셀(바이낸스 체결 기록, 10/3 ~ 10/30)에서 계산한 실제 결과 — 펀딩 제외
+ACTUAL_OCT = {'P1': -368, 'P2': -730}
+P1_COINS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'TRX', 'SUI', 'LINK']
+
+
+def period_check(data, start, end, tz_hours=9):
+    """★ 정해진 기간만 다시 돌려 보기 (예: 10/3 ~ 10/30 실제로 돌렸던 기간).
+    지표는 그 전 차트까지 써서 계산하고(트레이딩뷰와 같게), 매매는 시작일부터 포지션 없이 시작.
+    끝날 때 들고 있는 포지션은 빼고 '청산된 거래'만 셈 (엑셀 실현손익과 같은 기준)."""
+    # 엑셀·봇 로그 시각은 내 PC 시각(한국 = UTC+9), 차트는 UTC → 맞춰서 자름
+    t_start = pd.Timestamp(start) - pd.Timedelta(hours=tz_hours)
+    t_end = pd.Timestamp(end) - pd.Timedelta(hours=tz_hours)
+    out('━' * 112)
+    out(f'★ 기간 다시 돌리기 {pd.Timestamp(start):%Y-%m-%d %H:%M} ~ {pd.Timestamp(end):%Y-%m-%d %H:%M} (내 PC 시각) — 스위칭만, UT 봉마감 + EMA34/55 실시간, '
+        f'진입금 BTC 60 / 나머지 50, 시작할 때 포지션 없음')
+    out(f"   실제(보내 준 엑셀, 15분 5배 UT10/5 · 펀딩 제외): 프로그램1 {ACTUAL_OCT['P1']:+,} · 프로그램2 {ACTUAL_OCT['P2']:+,} "
+        f"· 합계 {ACTUAL_OCT['P1'] + ACTUAL_OCT['P2']:+,}")
+    out('   ※ 실제엔 10/3~10/5 는 3배였고, 10월 초엔 예전 봇(200봉)의 가짜 스위칭·재시작이 섞여 있어서 실제가 더 나쁠 수 있음')
+    out('')
+    res = {}
+    t0 = time.time()
+    for gi, (name, bar, lev, key, atr) in enumerate(PERIOD_ROWS, 1):
+        per = {}
+        for c, df in data.items():
+            d = df[df.index < t_end]
+            if not len(d) or d.index[0] >= t_start:
+                continue
+            warm = int((t_start - d.index[0]) / pd.Timedelta(bar))   # 시작일 전 봉은 지표 계산에만
+            p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=1e6, tp_t=1e6, switch='live')
+            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, warm_min=warm)
+            t = bt.run_backtest_live(d, p, bar=bar)[0]
+            per[c] = t
+        res[name] = per
+        print(f"  계산 {gi}/{len(PERIOD_ROWS)}: {name} ({time.time() - t0:.0f}초)", flush=True)
+
+    def summ(per, coins):
+        ts = [t.assign(코인=c) for c, t in per.items() if c in coins and len(t)]
+        if not ts:
+            return 0.0, 0, 0.0, 0, 0.0
+        a = pd.concat(ts, ignore_index=True).sort_values('시각')
+        eq = np.r_[0.0, a['순손익'].cumsum().values]
+        return (a['순손익'].sum(), len(a), (a['순손익'] > 0).mean() * 100,
+                int((a['유형'] == '강제청산').sum()), (eq - np.maximum.accumulate(eq)).min())
+
+    p1 = [c for c in data if c in P1_COINS]
+    p2 = [c for c in data if c not in P1_COINS]
+    out(f"{'설정':28s} {'프로그램1':>9s} {'프로그램2':>9s} {'합계':>9s} {'거래':>5s} {'이긴%':>6s} {'강제청산':>6s} {'최대낙폭':>9s}")
+    for name, per in res.items():
+        n1 = summ(per, p1)[0]; n2 = summ(per, p2)[0]
+        net, n, win, liq, mdd = summ(per, list(data))
+        out(f"{name:28s} {n1:+9,.0f} {n2:+9,.0f} {net:+9,.0f} {n:5d} {win:5.0f}% {liq:6d} {mdd:+9,.0f}")
+    out('')
+    out('코인별 순손익 (USDT)')
+    names = list(res)
+    out(f"{'코인':6s} " + ' '.join(f'{n.split()[0] + n.split()[1] + n.split()[2][2:]:>12s}' for n in names))
+    for c in data:
+        out(f"{c:6s} " + ' '.join(f"{(res[n][c]['순손익'].sum() if c in res[n] and len(res[n][c]) else 0):+12,.1f}" for n in names))
+    out('  ※ 끝날 때 들고 있던 포지션(평가손익)은 빠짐. 수수료 0.04% + 펀딩 0.01%/8h 가정')
 
 
 UT_KEYS = (5, 7, 10, 15, 20)
