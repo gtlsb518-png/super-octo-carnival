@@ -334,7 +334,7 @@ def main():
     if a.what == 'period':
         a.start = a.start or '2026-10-03 03:30'
         a.end = a.end or '2026-10-30 00:10'
-        a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.start)).days + 45)   # 시작 전 45일은 지표 계산용
+        a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.start)).days + 230)  # 시작 전 230일은 지표 계산용 (일봉 EMA200)
     elif a.since:
         a.days = max(60, (pd.Timestamp.now() - pd.Timestamp(a.since)).days + 1)
     coins = [c.upper().replace('USDT', '').replace('/', '') for c in a.coins]
@@ -509,6 +509,11 @@ GRID = [
     ('1시간 5배 UT20/5', '1h', 5, 20, 5, 0),
     ('1시간 3배 UT20/5', '1h', 3, 20, 5, 0),
     ('1시간 3배 UT10/5 +ADX20', '1h', 3, 10, 5, 20),
+    # 추세선(EMA) 필터: 가격이 EMA 아래면 숏만, 위면 롱만. 반대 신호가 떠도 '유지' = 그대로 들고 감 / '청산' = 닫고 기다림
+    ('1시간 3배 UT15/5 +EMA200(1시간) 유지', '1h', 3, 15, 5, 0, 0, 0, 200, 'hold'),
+    ('1시간 3배 UT15/5 +EMA200(1시간) 청산', '1h', 3, 15, 5, 0, 0, 0, 200, 'close'),
+    ('1시간 3배 UT15/5 +EMA200(일봉) 유지', '1h', 3, 15, 5, 0, 0, 0, 4800, 'hold'),
+    ('1시간 3배 UT15/5 +EMA200(일봉) 청산', '1h', 3, 15, 5, 0, 0, 0, 4800, 'close'),
     ('4시간 2배 UT10/5', '4h', 2, 10, 5, 0),
     ('4시간 3배 UT10/5', '4h', 3, 10, 5, 0),
 ]
@@ -530,12 +535,15 @@ def grid_check(data, rows_filter=None):
     for gi, (name, bar, lev, key, atr, adx_min, *rest) in enumerate(grid, 1):
         tp_roi = rest[0] if rest else 0
         vol_mult = rest[1] if len(rest) > 1 else 0
+        ema_tr = rest[2] if len(rest) > 2 else 0
+        tr_exit = rest[3] if len(rest) > 3 else 'hold'
         ts = []
         for c, df in data.items():
             tpp = tp_roi / lev if tp_roi else 1e6                 # ROI% → 가격 %
             p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=tpp, tp_t=tpp, switch='live')
             p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, adx_entry_min=float(adx_min), tp_wait=bool(tp_roi),
-                     vol_filter=bool(vol_mult), vol_mult=float(vol_mult or 1.5), vol_ma=20)
+                     vol_filter=bool(vol_mult), vol_mult=float(vol_mult or 1.5), vol_ma=20,
+                     ema_trend=int(ema_tr), trend_exit=tr_exit)
             t = bt.run_backtest_live(df, p, bar=bar)[0]
             if len(t):
                 ts.append(t.assign(코인=c, 증거금기준=AMOUNT.get(c, 50)))
@@ -562,6 +570,8 @@ def grid_check(data, rows_filter=None):
             f"{x['n']:6,d} {x['win']:4.0f}% {x['avg_loss']:+6.1f}% {x['p10']:+6.1f}% "
             f"{x['mdd']:+9,.0f} {x['worst']:+8,.0f} {x['negm']:>3d}/{x['months']:<3d} {x['liq']:5d} {x['fee']:7,.0f}")
     out('  평균손실·큰손실 = 진입금 대비 % (큰손실 = 나쁜 쪽 10% 거래). ADX20 = 매매 봉 ADX 가 20 미만이면 새 진입 쉼 (스위칭 청산은 함)')
+    out('  EMA200 = 가격이 추세선 아래면 숏만·위면 롱만. 유지 = 반대 신호가 떠도 들고 감 (가격이 추세선을 넘어 반대 신호가 맞을 때 스위칭) / '
+        '청산 = 반대 신호에 닫고 추세 방향 신호 기다림. (1시간) = 1시간봉 200개(약 8일) · (일봉) = 200일')
     out('  거래량N배 = 직전 마감봉 거래량이 그 앞 20봉 평균의 N배 이상일 때만 새 진입 (스위칭 청산은 함, 거래량 실린 봉에서 진입)')
 
 
@@ -573,6 +583,10 @@ PERIOD_ROWS = [
     ('1시간 5배 UT15/5', '1h', 5, 15, 5),
     ('1시간 3배 UT20/5', '1h', 3, 20, 5),
     ('4시간 2배 UT10/5', '4h', 2, 10, 5),
+    ('1시간3배 UT15 EMA200(1h)유지', '1h', 3, 15, 5, 200, 'hold'),
+    ('1시간3배 UT15 EMA200(1h)청산', '1h', 3, 15, 5, 200, 'close'),
+    ('1시간3배 UT15 EMA200(일)유지', '1h', 3, 15, 5, 4800, 'hold'),
+    ('1시간3배 UT15 EMA200(일)청산', '1h', 3, 15, 5, 4800, 'close'),
 ]
 # 사용자가 보내 준 엑셀(바이낸스 체결 기록, 10/3 ~ 10/30)에서 계산한 실제 결과 — 펀딩 제외
 ACTUAL_OCT = {'P1': -368, 'P2': -730}
@@ -595,7 +609,7 @@ def period_check(data, start, end, tz_hours=9):
     out('')
     res = {}
     t0 = time.time()
-    for gi, (name, bar, lev, key, atr) in enumerate(PERIOD_ROWS, 1):
+    for gi, (name, bar, lev, key, atr, *tr) in enumerate(PERIOD_ROWS, 1):
         per = {}
         for c, df in data.items():
             d = df[df.index < t_end]
@@ -603,7 +617,8 @@ def period_check(data, start, end, tz_hours=9):
                 continue
             warm = int((t_start - d.index[0]) / pd.Timedelta(bar))   # 시작일 전 봉은 지표 계산에만
             p = params(lev, 'ut_confirmed', 'immediate', AMOUNT.get(c, 50), tp_s=1e6, tp_t=1e6, switch='live')
-            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, warm_min=warm)
+            p.update(ut_sens=float(key), ut_atr=int(atr), mmr_pct=1.0, warm_min=warm,
+                     ema_trend=int(tr[0]) if tr else 0, trend_exit=tr[1] if len(tr) > 1 else 'hold')
             t = bt.run_backtest_live(d, p, bar=bar)[0]
             per[c] = t
         res[name] = per
@@ -620,17 +635,17 @@ def period_check(data, start, end, tz_hours=9):
 
     p1 = [c for c in data if c in P1_COINS]
     p2 = [c for c in data if c not in P1_COINS]
-    out(f"{'설정':28s} {'프로그램1':>9s} {'프로그램2':>9s} {'합계':>9s} {'거래':>5s} {'이긴%':>6s} {'강제청산':>6s} {'최대낙폭':>9s}")
-    for name, per in res.items():
+    out(f"{'설정':32s} {'프로그램1':>9s} {'프로그램2':>9s} {'합계':>9s} {'거래':>5s} {'이긴%':>6s} {'강제청산':>6s} {'최대낙폭':>9s}")
+    for i, (name, per) in enumerate(res.items(), 1):
         n1 = summ(per, p1)[0]; n2 = summ(per, p2)[0]
         net, n, win, liq, mdd = summ(per, list(data))
-        out(f"{name:28s} {n1:+9,.0f} {n2:+9,.0f} {net:+9,.0f} {n:5d} {win:5.0f}% {liq:6d} {mdd:+9,.0f}")
+        out(f"{f'#{i} ' + name:32s} {n1:+9,.0f} {n2:+9,.0f} {net:+9,.0f} {n:5d} {win:5.0f}% {liq:6d} {mdd:+9,.0f}")
     out('')
     out('코인별 순손익 (USDT)')
     names = list(res)
-    out(f"{'코인':6s} " + ' '.join(f'{n.split()[0] + n.split()[1] + n.split()[2][2:]:>12s}' for n in names))
+    out(f"{'코인':6s} " + ' '.join(f'{f"#{i}":>8s}' for i in range(1, len(names) + 1)) + '   (# = 위 표의 설정 번호)')
     for c in data:
-        out(f"{c:6s} " + ' '.join(f"{(res[n][c]['순손익'].sum() if c in res[n] and len(res[n][c]) else 0):+12,.1f}" for n in names))
+        out(f"{c:6s} " + ' '.join(f"{(res[n][c]['순손익'].sum() if c in res[n] and len(res[n][c]) else 0):+8,.1f}" for n in names))
     out('  ※ 끝날 때 들고 있던 포지션(평가손익)은 빠짐. 수수료 0.04% + 펀딩 0.01%/8h 가정')
 
 
